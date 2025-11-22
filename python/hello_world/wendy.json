@@ -1,0 +1,16 @@
+{
+  "appId" : "com.example.hello_world",
+  "entitlements" : [
+    {
+      "mode" : "host",
+      "type" : "network"
+    }
+  ],
+  "language" : "python",
+  "python" : {
+    "container" : {
+      "sourceRoot" : "\/app"
+    }
+  },
+  "version" : "0.0.1"
+}

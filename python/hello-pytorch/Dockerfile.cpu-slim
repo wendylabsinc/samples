@@ -1,0 +1,24 @@
+# CPU-only slim image for local/dev usage (no GPU)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Minimal runtime lib for PyTorch CPU wheels
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only what we need
+COPY pyproject.toml .
+COPY main.py .
+
+# Install runtime deps (CPU-only)
+RUN pip install --no-cache-dir torch numpy
+
+CMD ["python", "main.py"]
+
+

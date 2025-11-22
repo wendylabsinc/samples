@@ -1,0 +1,36 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "wendy",
+            "name": "Debug Python App on WendyOS",
+            "request": "attach",
+            "target": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world",
+            "cwd": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world",
+            "preLaunchTask": "wendy: Run Python App"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:hello-world}",
+            "name": "Debug hello-world",
+            "target": "hello-world",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug hello-world"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:hello-world}",
+            "name": "Release hello-world",
+            "target": "hello-world",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release hello-world"
+        }
+    ]
+}
