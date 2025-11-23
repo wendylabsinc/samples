@@ -23,6 +23,8 @@ Hello World
 
 ## Swift
 
+**Requirements:** You will need `swiftly` with Swift 6.2 or higher installed. For installation instructions of Swiftly, see [swift.org](https://swift.org).
+
 ### `swift/hello-world`
 A simple Swift package "Hello World" example.
 
@@ -37,3 +39,5 @@ swift run
 ## Notes
 - Build artifacts like `.build` and `.wendy-build` are ignored via `.gitignore`.
 - These samples are intended as starting points; feel free to modify and extend them for your own experiments.
+
+Learn more about wendy at https://wendy.sh/docs
