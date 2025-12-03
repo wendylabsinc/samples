@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  wendy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wendy-assistant:jetson
+    container_name: wendy-assistant
+
+    # GPU access for Jetson with CDI (Container Device Interface)
+    runtime: nvidia
+
+    environment:
+      # NVIDIA GPU environment variables
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+
+      # Application environment
+      - PYTHONUNBUFFERED=1
+      - ALSA_CARD=0
+      - ALSA_DEVICE=0
+      - PYTHONIOENCODING=utf-8
+      - ORT_LOGGING_LEVEL=3
+      - KMP_DUPLICATE_LIB_OK=TRUE
+
+    # Audio device access
+    devices:
+      - /dev/snd:/dev/snd  # Audio devices
+
+    # Host network for easier audio device access
+    network_mode: host
+
+    # Optional: Mount local code for development
+    volumes:
+      - ./wendy_assistant.py:/app/wendy_assistant.py:ro
+      - ~/.cache:/root/.cache  # Cache for models (Whisper, openWakeWord)
+
+    # Keep container running
+    stdin_open: true
+    tty: true
+
+    restart: unless-stopped

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh:*)",
+      "Read(//Users/mihaichiorean/.ssh/**)",
+      "Bash(sshpass:*)",
+      "Bash(/opt/homebrew/bin/linear:*)",
+      "Bash(python3:*)",
+      "Bash(chmod:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
