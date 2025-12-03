@@ -51,6 +51,8 @@ RUN pip3 install --no-cache-dir \
     --index-url https://pypi.jetson-ai-lab.io/jp6/cu126/
 
 # Install ONNX Runtime GPU for Jetson (for openWakeWord acceleration)
+# Uninstall any existing onnxruntime first to avoid conflicts
+RUN pip3 uninstall -y onnxruntime onnxruntime-gpu || true
 RUN pip3 install --no-cache-dir \
     onnxruntime-gpu==1.23.0 \
     --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126/
@@ -66,9 +68,10 @@ RUN pip3 install --no-cache-dir \
     pydub>=0.25.1 \
     requests>=2.31.0
 
-# Try to install piper-tts, but don't fail if it doesn't work
-# The application will fall back to espeak if piper is unavailable
-RUN pip3 install --no-cache-dir piper-tts>=0.0.2 || \
+# Install piper-tts WITHOUT dependencies to avoid conflict with onnxruntime-gpu
+# Using --no-deps ensures piper uses our already-installed onnxruntime-gpu
+# This enables GPU acceleration for both openWakeWord AND Piper TTS!
+RUN pip3 install --no-cache-dir --no-deps piper-tts>=1.2.0 || \
     echo "⚠ piper-tts installation failed - will use fallback TTS"
 
 # Install scientific Python packages with pinned numpy version

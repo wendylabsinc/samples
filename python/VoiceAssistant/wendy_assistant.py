@@ -199,7 +199,17 @@ class PiperTTS:
         if PIPER_AVAILABLE:
             try:
                 if os.path.exists(model_file):
-                    self.tts_engine = piper.PiperVoice.load(model_file)
+                    # Check if GPU is available for Piper TTS
+                    use_cuda = False
+                    try:
+                        import onnxruntime as ort
+                        if 'CUDAExecutionProvider' in ort.get_available_providers():
+                            use_cuda = True
+                            print("✓ Piper TTS will use GPU acceleration")
+                    except:
+                        pass
+
+                    self.tts_engine = piper.PiperVoice.load(model_file, use_cuda=use_cuda)
                     if hasattr(self.tts_engine, 'config'):
                         self.sample_rate = self.tts_engine.config.sample_rate
                     else:
@@ -277,9 +287,32 @@ class PiperTTS:
 
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
+        # Convert to float32 for resampling if needed
+        audio_float = audio_array.astype(np.float32) / 32768.0
+
+        # Resample if Piper's sample rate doesn't match system default
+        # Most audio systems expect 44100 or 48000 Hz
+        target_rate = 48000  # Common system sample rate
+        if self.sample_rate != target_rate:
+            try:
+                import scipy.signal
+                num_samples = int(len(audio_float) * target_rate / self.sample_rate)
+                audio_float = scipy.signal.resample(audio_float, num_samples)
+            except Exception as e:
+                print(f"[TTS] Warning: Could not resample audio: {e}")
+                # Try with original sample rate
+                target_rate = self.sample_rate
+
+        # Convert back to int16
+        audio_resampled = (audio_float * 32768.0).astype(np.int16)
+
         # Play audio using sounddevice
-        sd.play(audio_array, samplerate=self.sample_rate)
-        sd.wait()  # Wait until playback is finished
+        try:
+            sd.play(audio_resampled, samplerate=target_rate)
+            sd.wait()  # Wait until playback is finished
+        except Exception as e:
+            print(f"[TTS] Error playing audio: {e}")
+            print(f"[TTS FALLBACK] {text}")
 
 
 class WendyAssistant:
