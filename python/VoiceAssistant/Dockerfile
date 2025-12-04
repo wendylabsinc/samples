@@ -87,7 +87,6 @@ RUN pip3 show torch | grep "Version: 2.8.0" && echo "✓ Correct PyTorch version
 # Set working directory and copy application code
 WORKDIR /app
 COPY wendy_assistant.py .
-COPY check_gpu.py .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
