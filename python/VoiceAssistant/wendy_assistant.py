@@ -431,6 +431,13 @@ def audio_callback(indata, frames, time_info, status, assistant, model):
     # indata: shape (frames, channels), dtype=int16
     # Use the first (mono) channel
     pcm16_mono = indata[:, 0]
+    
+    # Resample to 16kHz if needed (openWakeWord and Whisper expect 16kHz)
+    if getattr(assistant, '_need_resample', False):
+        import scipy.signal
+        input_sr = assistant._input_sample_rate
+        num_samples = int(len(pcm16_mono) * SAMPLE_RATE / input_sr)
+        pcm16_mono = scipy.signal.resample(pcm16_mono, num_samples).astype(np.int16)
 
     # Debug: Print audio level periodically (every ~100 frames = ~8 seconds at 80ms chunks)
     if not hasattr(assistant, '_debug_frame_count'):
@@ -555,18 +562,80 @@ def main():
         audio_callback(indata, frames, time_info, status, assistant, model)
     
     # 5) Open microphone and start streaming
-    print("Opening microphone…")
-    print("Listening for wake words...")
-    print("(Try saying: 'alexa', 'hey jarvis', 'hey mycroft', etc.)")
-    print("=" * 60)
+    print("Opening microphone…", flush=True)
+    print("Listing available audio devices:", flush=True)
+    print(sd.query_devices(), flush=True)
+    
+    # Find a suitable input device (prefer USB microphones over internal APE)
+    input_device = None
+    input_sample_rate = SAMPLE_RATE
+    device_name = os.environ.get('WENDY_INPUT_DEVICE', None)
+    
+    if device_name:
+        # User specified a device by name or index
+        try:
+            input_device = int(device_name)  # Try as index
+        except ValueError:
+            input_device = device_name  # Use as name
+        print(f"Using specified input device: {input_device}", flush=True)
+    else:
+        # Auto-detect: look for USB microphone (prefer dedicated mics over webcams)
+        devices = sd.query_devices()
+        usb_mics = []
+        
+        for i, dev in enumerate(devices):
+            # Look for USB audio devices with input channels
+            if dev['max_input_channels'] > 0 and 'USB' in dev['name']:
+                # Prioritize: dedicated mics (not webcam) first
+                is_webcam = 'webcam' in dev['name'].lower() or 'camera' in dev['name'].lower()
+                usb_mics.append((i, dev, is_webcam))
+        
+        # Sort: dedicated mics first (is_webcam=False), then webcams
+        usb_mics.sort(key=lambda x: x[2])
+        
+        if usb_mics:
+            input_device = usb_mics[0][0]
+            dev = usb_mics[0][1]
+            print(f"Auto-detected USB microphone: [{input_device}] {dev['name']}", flush=True)
+            
+            # Check device's default sample rate
+            default_sr = dev.get('default_samplerate', SAMPLE_RATE)
+            print(f"  Device default sample rate: {default_sr} Hz", flush=True)
+            
+            # Try 16kHz first, fall back to device default if needed
+            try:
+                sd.check_input_settings(device=input_device, samplerate=SAMPLE_RATE)
+                print(f"  Using {SAMPLE_RATE} Hz", flush=True)
+            except sd.PortAudioError:
+                input_sample_rate = int(default_sr)
+                print(f"  16kHz not supported, using {input_sample_rate} Hz (will resample)", flush=True)
+        
+        if input_device is None:
+            print("WARNING: No USB microphone found, using default device", flush=True)
+    
+    print(f"Creating InputStream with device={input_device}, samplerate={input_sample_rate}...", flush=True)
+    
+    # Store sample rate for resampling in callback if needed
+    assistant._input_sample_rate = input_sample_rate
+    assistant._need_resample = (input_sample_rate != SAMPLE_RATE)
+    if assistant._need_resample:
+        print(f"  Audio will be resampled from {input_sample_rate} Hz to {SAMPLE_RATE} Hz", flush=True)
+    
+    # Adjust blocksize for different sample rates
+    adjusted_blocksize = int(FRAME_DURATION * input_sample_rate)
     
     with sd.InputStream(
-        samplerate=SAMPLE_RATE,
+        samplerate=input_sample_rate,
         channels=1,
         dtype="int16",
-        blocksize=FRAME_LENGTH,
+        blocksize=adjusted_blocksize,
         callback=callback,
+        device=input_device,
     ):
+        print("✓ Microphone opened successfully!", flush=True)
+        print("Listening for wake words...", flush=True)
+        print("(Try saying: 'alexa', 'hey jarvis', 'hey mycroft', etc.)", flush=True)
+        print("=" * 60, flush=True)
         try:
             while True:
                 time.sleep(0.1)
