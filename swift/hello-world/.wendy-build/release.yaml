@@ -1,0 +1,66 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "HelloWorld-aarch64-unknown-linux-gnu-release.exe": ["<HelloWorld-aarch64-unknown-linux-gnu-release.exe>"]
+  "HelloWorld-aarch64-unknown-linux-gnu-release.module": ["<HelloWorld-aarch64-unknown-linux-gnu-release.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<HelloWorld-aarch64-unknown-linux-gnu-release.exe>","<HelloWorld-aarch64-unknown-linux-gnu-release.module>"]
+  "test": ["<HelloWorld-aarch64-unknown-linux-gnu-release.exe>","<HelloWorld-aarch64-unknown-linux-gnu-release.module>"]
+default: "main"
+nodes:
+  "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Sources/HelloWorld/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Sources/HelloWorld/HelloWorld.swift"]
+    outputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/sources"]
+    description: "Write auxiliary file /Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/sources"
+
+  "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.swift.o"]
+    outputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.product/Objects.LinkFileList"
+
+  "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/swift-version--B824335529A2229.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Users/maximilianalexander/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/swift-version--B824335529A2229.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/swift-version--B824335529A2229.txt"
+
+  "<HelloWorld-aarch64-unknown-linux-gnu-release.exe>":
+    tool: phony
+    inputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld"]
+    outputs: ["<HelloWorld-aarch64-unknown-linux-gnu-release.exe>"]
+
+  "<HelloWorld-aarch64-unknown-linux-gnu-release.module>":
+    tool: phony
+    inputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.swift.o","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/Modules/HelloWorld.swiftmodule"]
+    outputs: ["<HelloWorld-aarch64-unknown-linux-gnu-release.module>"]
+
+  "C.HelloWorld-aarch64-unknown-linux-gnu-release.exe":
+    tool: shell
+    inputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.swift.o","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.product/Objects.LinkFileList"]
+    outputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld"]
+    description: "Linking ./.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld"
+    args: ["/Users/maximilianalexander/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/bin/swiftc","-L","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release","-o","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld","-module-name","HelloWorld","-static-stdlib","-emit-executable","-Xlinker","--gc-sections","-Xlinker","--defsym","-Xlinker","main=HelloWorld_main","-resource-dir","/Users/maximilianalexander/Library/org.swift.swiftpm/swift-sdks/6.2.1-RELEASE_wendyos_aarch64.artifactbundle/6.2.1-RELEASE_wendyos_aarch64/aarch64-unknown-linux-gnu/debian-bookworm.sdk/usr/lib/swift_static","-Xclang-linker","-resource-dir","-Xclang-linker","/Users/maximilianalexander/Library/org.swift.swiftpm/swift-sdks/6.2.1-RELEASE_wendyos_aarch64.artifactbundle/6.2.1-RELEASE_wendyos_aarch64/aarch64-unknown-linux-gnu/debian-bookworm.sdk/usr/lib/swift/clang","-Xlinker","-rpath=$ORIGIN","@/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.product/Objects.LinkFileList","-target","aarch64-unknown-linux-gnu","-plugin-path","/Users/maximilianalexander/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/lib/swift/host/plugins/testing","-Xlinker","-R/usr/lib/swift/linux/","-use-ld=lld","-sdk","/Users/maximilianalexander/Library/org.swift.swiftpm/swift-sdks/6.2.1-RELEASE_wendyos_aarch64.artifactbundle/6.2.1-RELEASE_wendyos_aarch64/aarch64-unknown-linux-gnu/debian-bookworm.sdk","-g","-Xlinker","-s"]
+
+  "C.HelloWorld-aarch64-unknown-linux-gnu-release.module":
+    tool: shell
+    inputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Sources/HelloWorld/HelloWorld.swift","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/swift-version--B824335529A2229.txt","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/sources"]
+    outputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.swift.o","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/Modules/HelloWorld.swiftmodule"]
+    description: "Compiling Swift Module 'HelloWorld' (1 sources)"
+    args: ["/Users/maximilianalexander/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/bin/swiftc","-module-name","HelloWorld","-emit-dependencies","-emit-module","-emit-module-path","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/Modules/HelloWorld.swiftmodule","-output-file-map","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/output-file-map.json","-whole-module-optimization","-num-threads","16","-c","@/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/sources","-I","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/Modules","-target","aarch64-unknown-linux-gnu","-whole-module-optimization","-num-threads","16","-serialize-diagnostics","-O","-j16","-DSWIFT_PACKAGE","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/ModuleCache","-static-stdlib","-resource-dir","/Users/maximilianalexander/Library/org.swift.swiftpm/swift-sdks/6.2.1-RELEASE_wendyos_aarch64.artifactbundle/6.2.1-RELEASE_wendyos_aarch64/aarch64-unknown-linux-gnu/debian-bookworm.sdk/usr/lib/swift_static","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","HelloWorld_main","-parse-as-library","-color-diagnostics","-swift-version","6","-plugin-path","/Users/maximilianalexander/Library/Developer/Toolchains/swift-6.2.1-RELEASE.xctoolchain/usr/lib/swift/host/plugins/testing","-Xlinker","-R/usr/lib/swift/linux/","-use-ld=lld","-sdk","/Users/maximilianalexander/Library/org.swift.swiftpm/swift-sdks/6.2.1-RELEASE_wendyos_aarch64.artifactbundle/6.2.1-RELEASE_wendyos_aarch64/aarch64-unknown-linux-gnu/debian-bookworm.sdk","-g","-Xcc","--sysroot","-Xcc","/Users/maximilianalexander/Library/org.swift.swiftpm/swift-sdks/6.2.1-RELEASE_wendyos_aarch64.artifactbundle/6.2.1-RELEASE_wendyos_aarch64/aarch64-unknown-linux-gnu/debian-bookworm.sdk","-Xcc","-g","-package-name","hello_world","-Xcc","-fno-omit-frame-pointer"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Sources/HelloWorld/","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Package.swift","/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

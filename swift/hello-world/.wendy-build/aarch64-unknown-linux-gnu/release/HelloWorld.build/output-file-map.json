@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.d",
+    "object": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.o",
+    "swift-dependencies": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/master.swiftdeps"
+  },
+  "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/Sources/HelloWorld/HelloWorld.swift": {
+    "object": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.swift.o",
+    "swiftmodule": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld~partial.swiftmodule",
+    "swift-dependencies": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.swiftdeps",
+    "diagnostics": "/Users/maximilianalexander/wendylabsinc/samples/swift/hello-world/.wendy-build/aarch64-unknown-linux-gnu/release/HelloWorld.build/HelloWorld.dia"
+  }
+}
