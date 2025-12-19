@@ -16,5 +16,5 @@ USER app
 # Expose port 8000
 EXPOSE 8000
 
-# Run the application with uvicorn
-CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application with uvicorn, ensuring dependencies are available
+CMD ["uv", "run", "--with", "fastapi", "--with", "uvicorn[standard]", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
