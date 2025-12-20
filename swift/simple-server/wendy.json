@@ -1,7 +1,5 @@
 {
-  "appId" : "com.example.helloworld",
-  "entitlements" : [
-
-  ],
-  "version" : "0.0.1"
+  "appId": "com.example.simple-server",
+  "entitlements": [],
+  "version": "0.0.1"
 }
