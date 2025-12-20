@@ -6,6 +6,10 @@
         {
             "type": "network",
             "mode": "host"
+        },
+        {
+            "type": "bluetooth",
+            "mode": "bluez"
         }
     ]
 }
