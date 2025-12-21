@@ -1,0 +1,17 @@
+{
+    "appId": "sh.wendy.examples.speech-to-text",
+    "version": "1.0.0",
+    "language": "python",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "audio"
+        },
+        {
+            "type": "gpu"
+        }
+    ]
+}

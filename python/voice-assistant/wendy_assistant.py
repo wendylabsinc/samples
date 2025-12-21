@@ -11,6 +11,7 @@ import sounddevice as sd
 import os
 import socket
 import urllib.request
+import threading
 from typing import Optional
 
 import openwakeword
@@ -63,6 +64,32 @@ FRAME_LENGTH = int(SAMPLE_RATE * FRAME_DURATION)
 WAKE_WORD_THRESHOLD = 0.5     # Threshold for wake word detection
 BUFFER_DURATION = 3.0         # Seconds to record after wake word
 
+# Default to the smallest official Whisper release for minimal footprint.
+DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny.en")
+DEFAULT_WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
+
+
+def find_usb_microphone() -> Optional[int]:
+    """
+    Auto-detect USB microphone device ID.
+    Returns the device ID of the first USB microphone found, or None.
+    """
+    devices = sd.query_devices()
+
+    # Keywords that indicate a USB microphone
+    usb_keywords = ['usb', 'brio', 'webcam', 'logitech', 'blue', 'yeti',
+                    'snowball', 'at2020', 'rode', 'samson', 'fifine']
+
+    for i, device in enumerate(devices):
+        if device['max_input_channels'] > 0:
+            name_lower = device['name'].lower()
+            for keyword in usb_keywords:
+                if keyword in name_lower:
+                    print(f"USB microphone auto-detected: Device {i} ({device['name']})")
+                    return i
+
+    return None
+
 
 def check_dns_connectivity(host: str = "github.com", timeout: int = 5) -> bool:
     """Check if DNS resolution and network connectivity are working."""
@@ -106,23 +133,73 @@ def check_dns_connectivity(host: str = "github.com", timeout: int = 5) -> bool:
 class WhisperSTT:
     """Speech-to-text using OpenAI Whisper."""
 
-    def __init__(self, model_name: str = "base", language: str = "en"):
+    def __init__(
+        self,
+        model_name: str = DEFAULT_WHISPER_MODEL,
+        language: str = DEFAULT_WHISPER_LANGUAGE,
+    ):
         import torch
 
-        # Detect device (GPU if available)
-        if torch.cuda.is_available():
-            self.device = "cuda"
-            print(f"✓ Whisper will use GPU (CUDA)")
+        requested_device = os.environ.get("WHISPER_DEVICE", "auto").strip().lower()
+        if requested_device in ("cuda", "gpu"):
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            else:
+                self.device = "cpu"
+                print("⚠ WHISPER_DEVICE=cuda requested, but CUDA is not available. Falling back to CPU.")
+        elif requested_device == "cpu":
+            self.device = "cpu"
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if self.device == "cuda":
+            print("✓ Whisper will use GPU (CUDA)")
             print(f"  GPU: {torch.cuda.get_device_name(0)}")
             print(f"  CUDA Version: {torch.version.cuda}")
         else:
-            self.device = "cpu"
-            print(f"⚠ Whisper will use CPU (CUDA not available)")
+            if requested_device == "cpu":
+                print("Whisper will use CPU (WHISPER_DEVICE=cpu)")
+            else:
+                print("⚠ Whisper will use CPU (CUDA not available)")
 
         print(f"Loading Whisper model: {model_name}...")
-        self.model = whisper.load_model(model_name, device=self.device)
+        print(f"  Step 1: Download/cache check complete")
+        print(f"  Step 2: Initializing model on {self.device}...")
+        print(f"  (This may take several minutes on first run due to JIT compilation)")
+        sys.stdout.flush()
+
+        try:
+            progress_interval = float(os.environ.get("WHISPER_LOAD_PROGRESS_SECS", "30"))
+        except ValueError:
+            progress_interval = 30.0
+        try:
+            warn_after = float(os.environ.get("WHISPER_LOAD_WARN_SECS", "120"))
+        except ValueError:
+            warn_after = 120.0
+
+        _start = time.time()
+        _stop_event = threading.Event()
+
+        def _log_progress():
+            warned = False
+            while not _stop_event.wait(progress_interval):
+                elapsed = time.time() - _start
+                print(f"Whisper load in progress on {self.device} ({elapsed:.0f}s)...", flush=True)
+                if not warned and elapsed >= warn_after:
+                    print("If this is taking too long, try WHISPER_DEVICE=cpu to force CPU load.", flush=True)
+                    warned = True
+
+        if progress_interval > 0:
+            threading.Thread(target=_log_progress, daemon=True).start()
+
+        try:
+            self.model = whisper.load_model(model_name, device=self.device)
+        finally:
+            _stop_event.set()
+        _elapsed = time.time() - _start
+
         self.language = language
-        print(f"✓ Whisper model loaded on {self.device}")
+        print(f"✓ Whisper model loaded on {self.device} in {_elapsed:.1f}s")
 
     def transcribe(self, audio_data: np.ndarray, sample_rate: int) -> str:
         """Transcribe audio to text."""
@@ -319,8 +396,8 @@ class WendyAssistant:
     """Main assistant class."""
     
     def __init__(self, 
-                 whisper_model: str = "base",
-                 whisper_language: str = "en",
+                 whisper_model: str = DEFAULT_WHISPER_MODEL,
+                 whisper_language: str = DEFAULT_WHISPER_LANGUAGE,
                  piper_model_path: Optional[str] = None,
                  piper_voice: str = "en_US-lessac-medium"):
         """Initialize Wendy Assistant."""
@@ -554,17 +631,23 @@ def main():
     def callback(indata, frames, time_info, status):
         audio_callback(indata, frames, time_info, status, assistant, model)
     
-    # 5) Open microphone and start streaming
+    # 5) Auto-detect USB microphone
+    usb_device = find_usb_microphone()
+    if usb_device is None:
+        print("No USB microphone detected, using default audio device")
+
+    # 6) Open microphone and start streaming
     print("Opening microphone…")
     print("Listening for wake words...")
     print("(Try saying: 'alexa', 'hey jarvis', 'hey mycroft', etc.)")
     print("=" * 60)
-    
+
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype="int16",
         blocksize=FRAME_LENGTH,
+        device=usb_device,
         callback=callback,
     ):
         try:

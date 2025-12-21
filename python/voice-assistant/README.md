@@ -10,6 +10,13 @@ A smart voice assistant for NVIDIA Jetson that responds to the wake word "wendy"
 - **Text-to-Speech**: Piper TTS generates natural speech responses
 - **Tool Calls**: Extensible tool system (currently includes light control stub)
 
+## Models
+
+- STT: defaults to OpenAI Whisper `tiny.en` (smallest official Whisper release) to minimize RAM/CPU and download time
+- Override with `WHISPER_MODEL=<model>` (e.g., `base`, `small`) before running if you want a larger model
+- Force device selection with `WHISPER_DEVICE=cpu` or `WHISPER_DEVICE=cuda` (use CPU if CUDA init takes too long)
+- Control load logging with `WHISPER_LOAD_PROGRESS_SECS` and `WHISPER_LOAD_WARN_SECS`
+
 ## Prerequisites
 
 - WendyOS device compatible with NVIDIA Jetson device
