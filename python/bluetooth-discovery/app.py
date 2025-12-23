@@ -80,3 +80,10 @@ async def root():
     """Serve the index.html file."""
     index_path = Path(__file__).parent / "index.html"
     return FileResponse(index_path, media_type="text/html")
+
+
+@app.get("/logo.svg")
+async def logo():
+    """Serve the logo.svg file."""
+    logo_path = Path(__file__).parent / "logo.svg"
+    return FileResponse(logo_path, media_type="image/svg+xml")

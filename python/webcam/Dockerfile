@@ -1,10 +1,16 @@
 # Use uv with Python 3.14 (slim variant for better compatibility)
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
-# Install BlueZ dependencies for Bluetooth support
+# Install build tools and OpenCV dependencies for video capture
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bluez \
-    libdbus-1-dev \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libv4l-0 \
+    v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -26,8 +32,8 @@ RUN useradd --create-home --shell /bin/bash app && \
     chown -R app:app /app
 USER app
 
-# Expose port 8000
-EXPOSE 8000
+# Expose port 8100
+EXPOSE 8100
 
 # Run the application with uvicorn (dependencies already installed)
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8100"]
