@@ -1,0 +1,258 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YOLOv8 Face Detection</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  </head>
+  <body class="bg-gray-100 min-h-screen p-8">
+    <div class="max-w-4xl mx-auto">
+      <img src="/logo.svg" alt="Wendy Logo" class="h-10 mb-4" />
+      <h1 class="text-3xl font-bold text-gray-800 mb-1">YOLOv8 Face Detection</h1>
+      <p class="mb-2">
+        <span id="status" class="inline-flex items-center gap-1.5 text-sm font-medium">
+          <span id="status-dot" class="w-2 h-2 rounded-full bg-yellow-500"></span>
+          <span id="status-text" class="text-yellow-600">Connecting...</span>
+        </span>
+      </p>
+      <p class="text-gray-600 mb-6">Real-time face detection on the edge device</p>
+
+      <div class="bg-black rounded-lg shadow overflow-hidden relative">
+        <div id="video-container" class="relative w-full" style="aspect-ratio: 4/3;">
+          <img
+            id="video-frame"
+            class="absolute inset-0 w-full h-full object-contain bg-gray-900"
+            alt="Video stream"
+          />
+          <canvas
+            id="overlay-canvas"
+            class="absolute inset-0 w-full h-full pointer-events-none"
+          ></canvas>
+        </div>
+        <div
+          id="loading-overlay"
+          class="absolute inset-0 flex items-center justify-center bg-gray-900"
+        >
+          <div class="text-center">
+            <svg
+              class="animate-spin h-10 w-10 text-blue-500 mx-auto mb-3"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                class="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                stroke-width="4"
+              ></circle>
+              <path
+                class="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              ></path>
+            </svg>
+            <p class="text-gray-400">Loading YOLOv8 model...</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-4 flex flex-wrap items-center gap-6 text-sm text-gray-500">
+        <span>
+          <span class="font-medium">FPS:</span>
+          <span id="fps-counter">0</span>
+        </span>
+        <span>
+          <span class="font-medium">Latency:</span>
+          <span id="latency">--</span> ms
+        </span>
+        <span>
+          <span class="font-medium">Resolution:</span>
+          <span id="resolution">--</span>
+        </span>
+        <span>
+          <span class="font-medium">Detections:</span>
+          <span id="face-count">0</span>
+        </span>
+      </div>
+    </div>
+
+    <script>
+      const videoFrame = document.getElementById("video-frame");
+      const overlayCanvas = document.getElementById("overlay-canvas");
+      const ctx = overlayCanvas.getContext("2d");
+      const loadingOverlay = document.getElementById("loading-overlay");
+      const statusDot = document.getElementById("status-dot");
+      const statusText = document.getElementById("status-text");
+      const fpsCounter = document.getElementById("fps-counter");
+      const latencyDisplay = document.getElementById("latency");
+      const resolutionDisplay = document.getElementById("resolution");
+      const faceCountDisplay = document.getElementById("face-count");
+
+      let frameCount = 0;
+      let lastFpsUpdate = performance.now();
+      let ws = null;
+      let reconnectTimeout = null;
+      let imageWidth = 640;
+      let imageHeight = 480;
+
+      function updateFps() {
+        const now = performance.now();
+        const elapsed = now - lastFpsUpdate;
+        if (elapsed >= 1000) {
+          const fps = Math.round((frameCount * 1000) / elapsed);
+          fpsCounter.textContent = fps;
+          frameCount = 0;
+          lastFpsUpdate = now;
+        }
+      }
+
+      function setStatus(status, color) {
+        statusDot.className = `w-2 h-2 rounded-full bg-${color}-500`;
+        statusText.textContent = status;
+        statusText.className = `text-${color}-600`;
+      }
+
+      function drawDetections(detections) {
+        // Clear previous drawings
+        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+        // Calculate scale factors
+        const scaleX = overlayCanvas.width / imageWidth;
+        const scaleY = overlayCanvas.height / imageHeight;
+
+        // Draw each detection
+        detections.forEach((det) => {
+          const x = det.x1 * scaleX;
+          const y = det.y1 * scaleY;
+          const width = (det.x2 - det.x1) * scaleX;
+          const height = (det.y2 - det.y1) * scaleY;
+
+          // Draw bounding box
+          ctx.strokeStyle = "#22c55e"; // Green color
+          ctx.lineWidth = 3;
+          ctx.strokeRect(x, y, width, height);
+
+          // Draw label background
+          const label = `${det.class} ${(det.confidence * 100).toFixed(0)}%`;
+          ctx.font = "bold 14px sans-serif";
+          const textWidth = ctx.measureText(label).width;
+          const textHeight = 20;
+          const padding = 4;
+
+          ctx.fillStyle = "#22c55e";
+          ctx.fillRect(
+            x,
+            y - textHeight - padding,
+            textWidth + padding * 2,
+            textHeight + padding
+          );
+
+          // Draw label text
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(label, x + padding, y - padding - 4);
+        });
+
+        // Update face count
+        faceCountDisplay.textContent = detections.length;
+      }
+
+      function resizeCanvas() {
+        const container = document.getElementById("video-container");
+        overlayCanvas.width = container.clientWidth;
+        overlayCanvas.height = container.clientHeight;
+      }
+
+      function connect() {
+        if (ws) {
+          ws.close();
+        }
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(`${protocol}//${window.location.host}/stream`);
+
+        ws.onopen = () => {
+          setStatus("Connected", "green");
+          if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const frameStart = performance.now();
+            const data = JSON.parse(event.data);
+
+            if (data.type === "frame") {
+              // Update image dimensions
+              imageWidth = data.width;
+              imageHeight = data.height;
+
+              // Update resolution display
+              resolutionDisplay.textContent = `${imageWidth}x${imageHeight}`;
+
+              // Display the image
+              videoFrame.src = `data:image/jpeg;base64,${data.image}`;
+
+              // Draw detection boxes
+              drawDetections(data.detections);
+
+              // Hide loading overlay on first frame
+              if (loadingOverlay.style.display !== "none") {
+                loadingOverlay.style.display = "none";
+                resizeCanvas();
+              }
+
+              // Update stats
+              frameCount++;
+              updateFps();
+
+              // Estimate display latency
+              const latency = Math.round(performance.now() - frameStart);
+              latencyDisplay.textContent = latency;
+            }
+          } catch (e) {
+            // Ignore parse errors (might be ping/pong)
+          }
+        };
+
+        ws.onerror = () => {
+          setStatus("Error", "red");
+        };
+
+        ws.onclose = () => {
+          setStatus("Disconnected", "red");
+          loadingOverlay.style.display = "flex";
+
+          // Attempt to reconnect after 2 seconds
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              setStatus("Reconnecting...", "yellow");
+              connect();
+            }, 2000);
+          }
+        };
+      }
+
+      // Handle window resize
+      window.addEventListener("resize", resizeCanvas);
+
+      // Initial canvas setup
+      resizeCanvas();
+
+      // Start connection
+      connect();
+
+      // Cleanup on page unload
+      window.addEventListener("beforeunload", () => {
+        if (ws) {
+          ws.close();
+        }
+      });
+    </script>
+  </body>
+</html>

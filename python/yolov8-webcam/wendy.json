@@ -1,0 +1,17 @@
+{
+    "appId": "sh.wendy.examples.yolov8-webcam",
+    "version": "1.0.0",
+    "language": "python",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "video"
+        },
+        {
+            "type": "gpu"
+        }
+    ]
+}
