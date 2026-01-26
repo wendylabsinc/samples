@@ -1,0 +1,12 @@
+{
+  "appId": "sh.wendy.examples.persistent-volume",
+  "version": "1.0.0",
+  "language": "python",
+  "entitlements": [
+    {
+      "type": "persist",
+      "name": "appdata",
+      "path": "/data"
+    }
+  ]
+}

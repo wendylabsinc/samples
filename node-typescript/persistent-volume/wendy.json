@@ -1,0 +1,11 @@
+{
+  "appId": "sh.wendy.examples.persistent-volume",
+  "version": "1.0.0",
+  "entitlements": [
+    {
+      "type": "persist",
+      "name": "appdata",
+      "path": "/data"
+    }
+  ]
+}
