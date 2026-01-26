@@ -3,9 +3,17 @@
 /// Demonstrates using SQLite with a persistent volume that survives container restarts.
 
 import Foundation
-import SQLite
+import GRDB
 
 let dataDir = "/data"
+
+struct Run: Codable, FetchableRecord, PersistableRecord {
+    var id: Int64?
+    var timestamp: String
+    var message: String
+
+    static let databaseTableName = "runs"
+}
 
 @main
 struct SQLitePersistence {
@@ -22,25 +30,24 @@ struct SQLitePersistence {
 
         // Connect to SQLite database
         print("\nConnecting to database: \(dbPath)")
-        let db = try Connection(dbPath)
-
-        // Define table schema
-        let runs = Table("runs")
-        let id = SQLite.Expression<Int64>("id")
-        let timestamp = SQLite.Expression<String>("timestamp")
-        let message = SQLite.Expression<String>("message")
+        let dbQueue = try DatabaseQueue(path: dbPath)
 
         // Create table if it doesn't exist
-        try db.run(runs.create(ifNotExists: true) { t in
-            t.column(id, primaryKey: .autoincrement)
-            t.column(timestamp)
-            t.column(message)
-        })
+        try dbQueue.write { db in
+            try db.create(table: "runs", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("timestamp", .text).notNull()
+                t.column("message", .text).notNull()
+            }
+        }
 
         // Insert a new record for this run
         let now = ISO8601DateFormatter().string(from: Date())
         let msg = "Application started at \(now)"
-        try db.run(runs.insert(timestamp <- now, message <- msg))
+        let run = Run(id: nil, timestamp: now, message: msg)
+        try dbQueue.write { db in
+            try run.insert(db)
+        }
         print("Inserted: \(msg)")
 
         // Query all records
@@ -48,13 +55,15 @@ struct SQLitePersistence {
         print("All recorded runs:")
         print(String(repeating: "-", count: 40))
 
-        var count = 0
-        for run in try db.prepare(runs.order(id)) {
-            print("  [\(run[id])] \(run[timestamp]): \(run[message])")
-            count += 1
+        let runs = try dbQueue.read { db in
+            try Run.order(Column("id")).fetchAll(db)
         }
 
-        print("\nTotal runs: \(count)")
+        for run in runs {
+            print("  [\(run.id ?? 0)] \(run.timestamp): \(run.message)")
+        }
+
+        print("\nTotal runs: \(runs.count)")
         print(String(repeating: "-", count: 40))
 
         print("\nSQLite persistence example complete!")

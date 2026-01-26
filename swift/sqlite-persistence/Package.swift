@@ -8,13 +8,14 @@ let package = Package(
         .macOS(.v14)
     ],
     dependencies: [
-        .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.9.0"),
+        .package(url: "https://github.com/apple/swift-container-plugin", from: "1.0.0"),
     ],
     targets: [
         .executableTarget(
             name: "SQLitePersistence",
             dependencies: [
-                .product(name: "SQLite", package: "SQLite.swift"),
+                .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
     ]
