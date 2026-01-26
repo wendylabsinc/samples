@@ -1,0 +1,11 @@
+{
+  "appId": "sh.wendy.examples.sqlite-persistence",
+  "version": "1.0.0",
+  "entitlements": [
+    {
+      "type": "persist",
+      "name": "database",
+      "path": "/data"
+    }
+  ]
+}
