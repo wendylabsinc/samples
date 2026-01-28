@@ -4,16 +4,19 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::env;
 
 #[tokio::main]
 async fn main() {
+    let hostname = env::var("WENDY_HOSTNAME").unwrap_or_else(|_| "0.0.0.0".to_string());
+
     let app = Router::new()
         .route("/", get(root))
         .route("/hello/:name", get(hello))
         .route("/users", post(create_user));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("Server running on http://localhost:3000");
+    println!("Server running on http://{}:3000", hostname);
     axum::serve(listener, app).await.unwrap();
 }
 

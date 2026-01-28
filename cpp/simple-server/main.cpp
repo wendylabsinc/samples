@@ -1,6 +1,7 @@
 #include "httplib.h"
 #include "json.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -8,6 +9,9 @@ using json = nlohmann::json;
 
 int main() {
     httplib::Server svr;
+
+    const char* env_hostname = std::getenv("WENDY_HOSTNAME");
+    std::string hostname = env_hostname ? env_hostname : "0.0.0.0";
 
     // GET / - Returns "Hello, World!"
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
@@ -38,7 +42,7 @@ int main() {
         }
     });
 
-    std::cout << "Server running on http://localhost:3000" << std::endl;
+    std::cout << "Server running on http://" << hostname << ":3000" << std::endl;
     svr.listen("0.0.0.0", 3000);
 
     return 0;
