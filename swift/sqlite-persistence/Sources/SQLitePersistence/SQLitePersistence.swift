@@ -55,6 +55,7 @@ struct SQLitePersistence {
         }
 
         print("\nTotal runs: \(count)")
+        print("\n" + String(repeating: "-", count: 40))
         print(String(repeating: "-", count: 40))
 
         print("\nSQLite persistence example complete!")

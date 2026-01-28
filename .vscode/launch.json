@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:samples}/swift/sqlite-persistence",
+            "name": "Debug SQLitePersistence (swift/sqlite-persistence)",
+            "target": "SQLitePersistence",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SQLitePersistence (swift/sqlite-persistence)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:samples}/swift/sqlite-persistence",
+            "name": "Release SQLitePersistence (swift/sqlite-persistence)",
+            "target": "SQLitePersistence",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SQLitePersistence (swift/sqlite-persistence)"
+        }
+    ]
+}

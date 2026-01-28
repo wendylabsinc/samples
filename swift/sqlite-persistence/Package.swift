@@ -8,7 +8,7 @@ let package = Package(
         .macOS(.v14)
     ],
     dependencies: [
-        .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.4"),
+        .package(url: "https://github.com/stephencelis/SQLite.swift.git", exact: "0.15.4"),
         .package(url: "https://github.com/apple/swift-container-plugin", from: "1.0.0"),
     ],
     targets: [
@@ -20,3 +20,4 @@ let package = Package(
         ),
     ]
 )
+
