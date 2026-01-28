@@ -1,3 +1,4 @@
+import Foundation
 import Hummingbird
 
 struct Car: Codable {
@@ -8,6 +9,8 @@ struct Car: Codable {
 @main
 struct SimpleServer {
     static func main() async throws {
+        let hostname = ProcessInfo.processInfo.environment["WENDY_HOSTNAME"] ?? "0.0.0.0"
+
         let router = Router()
 
         // GET / - Returns "hello-world"
@@ -25,7 +28,7 @@ struct SimpleServer {
             configuration: .init(address: .hostname("0.0.0.0", port: 8000))
         )
 
-        print("Server running on http://0.0.0.0:8000")
+        print("Server running on http://\(hostname):8000")
         try await app.runService()
     }
 }
