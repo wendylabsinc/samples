@@ -1,0 +1,304 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nemotron Speech ASR</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+      #spectrogram-canvas {
+        image-rendering: pixelated;
+      }
+    </style>
+  </head>
+  <body class="bg-gray-900 min-h-screen flex flex-col">
+    <div class="flex flex-col h-screen">
+      <!-- Header -->
+      <div class="p-4 bg-gray-800 border-b border-gray-700">
+        <h1 class="text-2xl font-bold text-white">Nemotron Speech ASR</h1>
+        <p class="text-gray-400 text-sm">
+          Real-time speech transcription on the edge
+          <span id="status" class="ml-2 inline-flex items-center gap-1.5">
+            <span id="status-dot" class="w-2 h-2 rounded-full bg-yellow-500"></span>
+            <span id="status-text" class="text-yellow-400">Connecting...</span>
+          </span>
+        </p>
+      </div>
+
+      <!-- Spectrogram Area (4/5 of remaining height) -->
+      <div class="flex-1 relative" style="height: 80%;">
+        <canvas
+          id="spectrogram-canvas"
+          class="absolute inset-0 w-full h-full bg-gray-950"
+        ></canvas>
+        <div
+          id="loading-overlay"
+          class="absolute inset-0 flex items-center justify-center bg-gray-950"
+        >
+          <div class="text-center">
+            <svg
+              class="animate-spin h-12 w-12 text-blue-500 mx-auto mb-4"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                class="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                stroke-width="4"
+              ></circle>
+              <path
+                class="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              ></path>
+            </svg>
+            <p id="loading-text" class="text-gray-400">
+              Loading Nemotron ASR model...
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Transcription Area (1/5 of remaining height) -->
+      <div
+        id="transcription-area"
+        class="bg-gray-800 border-t border-gray-700 p-6 flex items-center justify-center"
+        style="height: 20%;"
+      >
+        <div id="transcription-content" class="text-center max-w-4xl w-full">
+          <p
+            id="transcription-text"
+            class="text-2xl font-medium text-gray-400"
+          >
+            Waiting for audio...
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const spectrogramCanvas = document.getElementById("spectrogram-canvas");
+      const ctx = spectrogramCanvas.getContext("2d");
+      const loadingOverlay = document.getElementById("loading-overlay");
+      const loadingText = document.getElementById("loading-text");
+      const statusDot = document.getElementById("status-dot");
+      const statusText = document.getElementById("status-text");
+      const transcriptionText = document.getElementById("transcription-text");
+
+      let ws = null;
+      let reconnectTimeout = null;
+      let spectrogramHistory = [];
+      const MAX_SPECTROGRAM_COLUMNS = 200;
+
+      // Color map for spectrogram (dark blue to yellow/white)
+      function getSpectrogramColor(value) {
+        // value is 0-1
+        const v = Math.max(0, Math.min(1, value));
+
+        if (v < 0.25) {
+          // Dark blue to blue
+          const t = v / 0.25;
+          return `rgb(${Math.floor(10 + t * 20)}, ${Math.floor(10 + t * 30)}, ${Math.floor(40 + t * 80)})`;
+        } else if (v < 0.5) {
+          // Blue to cyan
+          const t = (v - 0.25) / 0.25;
+          return `rgb(${Math.floor(30 + t * 20)}, ${Math.floor(40 + t * 150)}, ${Math.floor(120 + t * 80)})`;
+        } else if (v < 0.75) {
+          // Cyan to yellow
+          const t = (v - 0.5) / 0.25;
+          return `rgb(${Math.floor(50 + t * 200)}, ${Math.floor(190 + t * 60)}, ${Math.floor(200 - t * 150)})`;
+        } else {
+          // Yellow to white
+          const t = (v - 0.75) / 0.25;
+          return `rgb(${Math.floor(250)}, ${Math.floor(250)}, ${Math.floor(50 + t * 200)})`;
+        }
+      }
+
+      function drawSpectrogram() {
+        const width = spectrogramCanvas.width;
+        const height = spectrogramCanvas.height;
+
+        // Clear canvas
+        ctx.fillStyle = "#030712";
+        ctx.fillRect(0, 0, width, height);
+
+        if (spectrogramHistory.length === 0) return;
+
+        // Calculate dimensions
+        const columnWidth = Math.max(1, Math.floor(width / MAX_SPECTROGRAM_COLUMNS));
+        const startX = width - spectrogramHistory.length * columnWidth;
+
+        // Draw each column
+        spectrogramHistory.forEach((column, colIndex) => {
+          if (!column || column.length === 0) return;
+
+          const x = startX + colIndex * columnWidth;
+          const binHeight = height / column.length;
+
+          column.forEach((value, binIndex) => {
+            // Flip vertically so low frequencies are at bottom
+            const y = height - (binIndex + 1) * binHeight;
+            ctx.fillStyle = getSpectrogramColor(value);
+            ctx.fillRect(x, y, columnWidth, binHeight + 1);
+          });
+        });
+      }
+
+      function resizeCanvas() {
+        const container = spectrogramCanvas.parentElement;
+        spectrogramCanvas.width = container.clientWidth;
+        spectrogramCanvas.height = container.clientHeight;
+        drawSpectrogram();
+      }
+
+      function setStatus(status, color) {
+        statusDot.className = `w-2 h-2 rounded-full bg-${color}-500`;
+        statusText.textContent = status;
+        statusText.className = `text-${color}-400`;
+      }
+
+      function setTranscription(text, type) {
+        transcriptionText.textContent = text;
+
+        switch (type) {
+          case "error":
+            transcriptionText.className = "text-2xl font-medium text-red-500";
+            break;
+          case "transcribing":
+            transcriptionText.className =
+              "text-2xl font-medium text-yellow-400 animate-pulse";
+            break;
+          case "recording":
+            transcriptionText.className =
+              "text-2xl font-medium text-blue-400 animate-pulse";
+            break;
+          case "loading":
+            transcriptionText.className =
+              "text-2xl font-medium text-gray-400 animate-pulse";
+            break;
+          case "success":
+            transcriptionText.className = "text-2xl font-medium text-white";
+            break;
+          case "no_speech":
+            transcriptionText.className = "text-2xl font-medium text-gray-500";
+            break;
+          default:
+            transcriptionText.className = "text-2xl font-medium text-gray-400";
+        }
+      }
+
+      function connect() {
+        if (ws) {
+          ws.close();
+        }
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(`${protocol}//${window.location.host}/stream`);
+
+        ws.onopen = () => {
+          setStatus("Connected", "green");
+          if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            switch (data.type) {
+              case "status":
+                if (data.status === "loading") {
+                  loadingOverlay.style.display = "flex";
+                  loadingText.textContent = data.message;
+                  setTranscription(data.message, "loading");
+                } else if (data.status === "error") {
+                  setTranscription(data.message, "error");
+                } else if (data.status === "transcribing") {
+                  setTranscription("Transcribing...", "transcribing");
+                } else if (data.status === "recording") {
+                  setTranscription("Recording...", "recording");
+                }
+                break;
+
+              case "spectrogram":
+                // Hide loading overlay on first spectrogram
+                if (loadingOverlay.style.display !== "none") {
+                  loadingOverlay.style.display = "none";
+                }
+
+                // Add new spectrogram data to history
+                if (data.data && data.data.length > 0) {
+                  // Each column in data.data represents a time slice
+                  data.data.forEach((column) => {
+                    spectrogramHistory.push(column);
+                  });
+
+                  // Keep history limited
+                  while (spectrogramHistory.length > MAX_SPECTROGRAM_COLUMNS) {
+                    spectrogramHistory.shift();
+                  }
+
+                  drawSpectrogram();
+                }
+                break;
+
+              case "transcription":
+                if (data.has_speech) {
+                  setTranscription(data.text, "success");
+                } else {
+                  setTranscription(data.text, "no_speech");
+                }
+                break;
+
+              case "ping":
+                // Respond to ping
+                ws.send(JSON.stringify({ type: "pong" }));
+                break;
+            }
+          } catch (e) {
+            console.error("Parse error:", e);
+          }
+        };
+
+        ws.onerror = () => {
+          setStatus("Error", "red");
+        };
+
+        ws.onclose = () => {
+          setStatus("Disconnected", "red");
+          loadingOverlay.style.display = "flex";
+          loadingText.textContent = "Connection lost...";
+
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              setStatus("Reconnecting...", "yellow");
+              connect();
+            }, 2000);
+          }
+        };
+      }
+
+      // Handle window resize
+      window.addEventListener("resize", resizeCanvas);
+
+      // Initial canvas setup
+      resizeCanvas();
+
+      // Start connection
+      connect();
+
+      // Cleanup on page unload
+      window.addEventListener("beforeunload", () => {
+        if (ws) {
+          ws.close();
+        }
+      });
+    </script>
+  </body>
+</html>

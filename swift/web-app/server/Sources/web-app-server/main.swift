@@ -50,6 +50,7 @@ struct WebAppServer {
 
         // API route for random car
         router.get("/api/random-car") { _, _ in
+            print("Random car request received")
             return randomCar()
         }
 
@@ -66,4 +67,3 @@ struct WebAppServer {
         try await app.runService()
     }
 }
-no
