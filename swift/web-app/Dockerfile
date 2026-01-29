@@ -8,7 +8,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Build Swift server
-FROM swift:6.0-jammy AS swift-builder
+FROM swift:6.2.3-noble AS swift-builder
 
 WORKDIR /app
 COPY server/Package.swift server/Package.resolved* ./
@@ -17,7 +17,7 @@ COPY server/Sources ./Sources
 RUN swift build -c release
 
 # Runtime stage
-FROM swift:6.0-jammy-slim
+FROM swift:6.2.3-noble-slim
 
 WORKDIR /app
 

@@ -81,6 +81,7 @@ async fn main() {
         .route("/api/random-car", get(get_random_car))
         .fallback_service(serve_dir);
 
+    // Bind to 0.0.0.0 to accept connections from all interfaces (required for container networking)
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4002").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

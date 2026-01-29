@@ -1,4 +1,5 @@
 import express from "express";
+import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -25,7 +26,7 @@ function randomCar() {
 // Serve the frontend dist folder
 const frontendDist =
   process.env.FRONTEND_DIST ||
-  (require("fs").existsSync("/app/frontend/dist") ? "/app/frontend/dist" : path.join(__dirname, "../../frontend/dist"));
+  (fs.existsSync("/app/frontend/dist") ? "/app/frontend/dist" : path.join(__dirname, "../../frontend/dist"));
 
 console.log(`Serving frontend from: ${frontendDist}`);
 
@@ -42,6 +43,7 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(frontendDist, "index.html"));
 });
 
-app.listen(port, () => {
+// Bind to 0.0.0.0 to accept connections from all interfaces (required for container networking)
+app.listen(port, "0.0.0.0", () => {
   console.log(`Server running on http://${hostname}:${port}`);
 });

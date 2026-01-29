@@ -39,6 +39,26 @@
             "target": "simple-server",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release simple-server (swift/simple-server)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:samples}/swift/web-app/server",
+            "name": "Debug web-app-server (swift/web-app/server)",
+            "target": "web-app-server",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug web-app-server (swift/web-app/server)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:samples}/swift/web-app/server",
+            "name": "Release web-app-server (swift/web-app/server)",
+            "target": "web-app-server",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release web-app-server (swift/web-app/server)"
         }
     ]
 }

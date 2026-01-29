@@ -1,7 +1,7 @@
 import Foundation
 import Hummingbird
 
-struct Car: Encodable {
+struct Car: ResponseEncodable {
     let name: String
     let make: String
     let year: Int
@@ -53,36 +53,10 @@ struct WebAppServer {
             return randomCar()
         }
 
-        // Serve static files from frontend dist
-        router.get("/*") { request, context in
-            let path = request.uri.path.removingPercentEncoding ?? request.uri.path
-            let cleanPath = path == "/" ? "/index.html" : path
+        // Serve static files from frontend dist using FileMiddleware
+        router.add(middleware: FileMiddleware(frontendDist, searchForIndexHtml: true))
 
-            let filePath = frontendDist + cleanPath
-            let fileURL = URL(fileURLWithPath: filePath)
-
-            // Check if file exists
-            if FileManager.default.fileExists(atPath: filePath) {
-                let data = try Data(contentsOf: fileURL)
-                let contentType = getContentType(for: filePath)
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: contentType],
-                    body: .init(byteBuffer: .init(data: data))
-                )
-            }
-
-            // Fallback to index.html for SPA routing
-            let indexPath = frontendDist + "/index.html"
-            let indexURL = URL(fileURLWithPath: indexPath)
-            let data = try Data(contentsOf: indexURL)
-            return Response(
-                status: .ok,
-                headers: [.contentType: "text/html"],
-                body: .init(byteBuffer: .init(data: data))
-            )
-        }
-
+        // Bind to 0.0.0.0 to accept connections from all interfaces (required for container networking)
         let app = Application(
             router: router,
             configuration: .init(address: .hostname("0.0.0.0", port: 6002))
@@ -91,18 +65,5 @@ struct WebAppServer {
         print("Server running on http://\(hostname):6002")
         try await app.runService()
     }
-
-    static func getContentType(for path: String) -> String {
-        if path.hasSuffix(".html") { return "text/html" }
-        if path.hasSuffix(".css") { return "text/css" }
-        if path.hasSuffix(".js") { return "application/javascript" }
-        if path.hasSuffix(".json") { return "application/json" }
-        if path.hasSuffix(".png") { return "image/png" }
-        if path.hasSuffix(".jpg") || path.hasSuffix(".jpeg") { return "image/jpeg" }
-        if path.hasSuffix(".svg") { return "image/svg+xml" }
-        if path.hasSuffix(".ico") { return "image/x-icon" }
-        if path.hasSuffix(".woff") { return "font/woff" }
-        if path.hasSuffix(".woff2") { return "font/woff2" }
-        return "application/octet-stream"
-    }
 }
+no
