@@ -1,0 +1,16 @@
+{
+  "appId": "com.example.python-yolov8",
+  "version": "0.0.1",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "gpu"
+    },
+    {
+      "type": "video"
+    }
+  ]
+}
