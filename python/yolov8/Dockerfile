@@ -12,8 +12,13 @@ FROM dustynv/pytorch:2.7-r36.4.0-cu128-24.04
 
 WORKDIR /app
 
-# Install additional Python dependencies
+# Reset pip config to use PyPI as primary, Jetson AI Lab as extra
+RUN pip3 config unset global.index-url || true && \
+    pip3 config unset global.extra-index-url || true
+
+# Install additional Python dependencies from PyPI
 RUN pip3 install --no-cache-dir \
+    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu128 \
     fastapi \
     "uvicorn[standard]" \
     ultralytics \
