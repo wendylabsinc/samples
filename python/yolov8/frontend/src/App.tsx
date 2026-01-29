@@ -40,7 +40,7 @@ function App() {
       <img
         src="/api/video-feed"
         alt="YOLOv8 Detection Feed"
-        className="absolute inset-0 h-full w-full object-cover"
+        className="absolute inset-0 h-full w-full object-contain"
       />
 
       {/* Bottom overlay for detection log */}
