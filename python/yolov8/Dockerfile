@@ -15,6 +15,9 @@ WORKDIR /app
 # Only need to install web server dependencies (ultralytics + opencv already included)
 RUN pip3 install --no-cache-dir fastapi "uvicorn[standard]"
 
+# Pre-download the YOLOv8 model during build (so it works offline on device)
+RUN python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+
 # Copy server files
 COPY server/app.py ./
 
