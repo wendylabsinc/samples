@@ -15,20 +15,23 @@ async fn main() {
         .route("/hello/:name", get(hello))
         .route("/users", post(create_user));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("Server running on http://{}:3000", hostname);
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:4001").await.unwrap();
+    println!("Server running on http://{}:4001", hostname);
     axum::serve(listener, app).await.unwrap();
 }
 
 async fn root() -> &'static str {
+    println!("Received request: GET /");
     "Hello, World!"
 }
 
 async fn hello(axum::extract::Path(name): axum::extract::Path<String>) -> String {
+    println!("Received request: GET /hello/{}", name);
     format!("Hello, {}!", name)
 }
 
 async fn create_user(Json(payload): Json<CreateUser>) -> (StatusCode, Json<User>) {
+    println!("Received request: POST /users");
     let user = User {
         id: 1,
         username: payload.username,

@@ -1,0 +1,11 @@
+# Rust
+/target
+Cargo.lock
+**/*.rs.bk
+
+# Editor
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store

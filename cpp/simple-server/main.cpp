@@ -15,17 +15,20 @@ int main() {
 
     // GET / - Returns "Hello, World!"
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        std::cout << "Received request: GET /" << std::endl;
         res.set_content("Hello, World!", "text/plain");
     });
 
     // GET /hello/:name - Returns personalized greeting
     svr.Get(R"(/hello/(\w+))", [](const httplib::Request& req, httplib::Response& res) {
+        std::cout << "Received request: GET /hello/" << req.matches[1] << std::endl;
         std::string name = req.matches[1];
         res.set_content("Hello, " + name + "!", "text/plain");
     });
 
     // POST /users - Creates a new user from JSON body
     svr.Post("/users", [](const httplib::Request& req, httplib::Response& res) {
+        std::cout << "Received request: POST /users" << std::endl;
         try {
             auto body = json::parse(req.body);
             std::string username = body.value("username", "");
@@ -42,8 +45,8 @@ int main() {
         }
     });
 
-    std::cout << "Server running on http://" << hostname << ":3000" << std::endl;
-    svr.listen("0.0.0.0", 3000);
+    std::cout << "Server running on http://" << hostname << ":7001" << std::endl;
+    svr.listen("0.0.0.0", 7001);
 
     return 0;
 }

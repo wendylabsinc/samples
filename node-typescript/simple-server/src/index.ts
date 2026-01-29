@@ -1,16 +1,18 @@
 import express, { Request, Response } from "express";
 
 const app = express();
-const port = 3000;
+const port = 5001;
 const hostname = process.env.WENDY_HOSTNAME || "0.0.0.0";
 
 app.use(express.json());
 
 app.get("/", (_req: Request, res: Response) => {
+  console.log("Received request: GET /");
   res.send("Hello, World!");
 });
 
 app.get("/hello/:name", (req: Request, res: Response) => {
+  console.log(`Received request: GET /hello/${req.params.name}`);
   res.send(`Hello, ${req.params.name}!`);
 });
 
@@ -24,6 +26,7 @@ interface User {
 }
 
 app.post("/users", (req: Request<{}, User, CreateUserBody>, res: Response) => {
+  console.log("Received request: POST /users");
   const user: User = {
     id: 1,
     username: req.body.username,

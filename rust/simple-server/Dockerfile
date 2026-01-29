@@ -16,6 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/simple-server /usr/local/bin/simple-server
 
-EXPOSE 3000
+EXPOSE 4001
 
 CMD ["simple-server"]
