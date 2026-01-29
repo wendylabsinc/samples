@@ -1,7 +1,7 @@
 import Foundation
 import Hummingbird
 
-struct Car: Codable {
+struct Car: ResponseEncodable {
     let make: String
     let year: Int
 }
