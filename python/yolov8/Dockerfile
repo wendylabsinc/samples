@@ -12,21 +12,14 @@ FROM dustynv/pytorch:2.7-r36.4.0-cu128-24.04
 
 WORKDIR /app
 
-# Install system dependencies for OpenCV
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libxcb1 \
-    libgl1 \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install additional Python dependencies from PyPI (explicitly set index to override image defaults)
+# Install additional Python dependencies from PyPI
+# Note: OpenCV is pre-installed in dustynv image, ultralytics will use it
 RUN pip3 install --no-cache-dir \
     --index-url https://pypi.org/simple/ \
     --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu128 \
     fastapi \
     "uvicorn[standard]" \
-    ultralytics \
-    opencv-python-headless
+    ultralytics
 
 # Copy server files
 COPY server/app.py ./
