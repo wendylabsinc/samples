@@ -6,8 +6,31 @@
     <title>Nemotron Speech ASR</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <style>
-      #spectrogram-canvas {
-        image-rendering: pixelated;
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 8px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-track {
+        background: #1f2937;
+        border-radius: 4px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-radius: 4px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+        background: #6b7280;
+      }
+      .tab-active {
+        border-bottom: 2px solid #3b82f6;
+        color: #3b82f6;
+      }
+      .tab-inactive {
+        border-bottom: 2px solid transparent;
+        color: #9ca3af;
+      }
+      .tab-inactive:hover {
+        color: #d1d5db;
+        border-bottom-color: #4b5563;
       }
     </style>
   </head>
@@ -25,134 +48,279 @@
         </p>
       </div>
 
-      <!-- Spectrogram Area (4/5 of remaining height) -->
-      <div class="flex-1 relative" style="height: 80%;">
-        <canvas
-          id="spectrogram-canvas"
-          class="absolute inset-0 w-full h-full bg-gray-950"
-        ></canvas>
-        <div
-          id="loading-overlay"
-          class="absolute inset-0 flex items-center justify-center bg-gray-950"
-        >
-          <div class="text-center">
-            <svg
-              class="animate-spin h-12 w-12 text-blue-500 mx-auto mb-4"
-              xmlns="http://www.w3.org/2000/svg"
-              fill="none"
-              viewBox="0 0 24 24"
-            >
-              <circle
-                class="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                stroke-width="4"
-              ></circle>
-              <path
-                class="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-              ></path>
-            </svg>
-            <p id="loading-text" class="text-gray-400">
-              Loading Nemotron ASR model...
-            </p>
+      <!-- Main Content Area -->
+      <div class="flex-1 flex flex-col overflow-hidden">
+        <!-- Audiogram Area -->
+        <div class="relative h-40 bg-gray-950 border-b border-gray-700">
+          <canvas id="audiogram-canvas" class="absolute inset-0 w-full h-full"></canvas>
+          <div
+            id="loading-overlay"
+            class="absolute inset-0 flex items-center justify-center bg-gray-950"
+          >
+            <div class="text-center">
+              <svg
+                class="animate-spin h-12 w-12 text-blue-500 mx-auto mb-4"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  class="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                ></circle>
+                <path
+                  class="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                ></path>
+              </svg>
+              <p id="loading-text" class="text-gray-400">
+                Loading Nemotron ASR model...
+              </p>
+            </div>
+          </div>
+          <!-- Recording indicator -->
+          <div id="recording-indicator" class="absolute top-3 right-3 hidden">
+            <span class="flex items-center gap-2 bg-red-500/20 text-red-400 px-3 py-1 rounded-full text-sm">
+              <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+              Recording
+            </span>
+          </div>
+        </div>
+
+        <!-- Tab Navigation -->
+        <div class="flex border-b border-gray-700 bg-gray-800/50 px-4">
+          <button
+            id="tab-transcriptions"
+            class="px-4 py-3 text-sm font-medium transition-colors tab-active"
+            onclick="switchTab('transcriptions')"
+          >
+            Transcriptions
+            <span id="transcription-badge" class="ml-2 px-2 py-0.5 text-xs bg-gray-700 rounded-full">0</span>
+          </button>
+          <button
+            id="tab-logs"
+            class="px-4 py-3 text-sm font-medium transition-colors tab-inactive"
+            onclick="switchTab('logs')"
+          >
+            Logs
+            <span id="log-badge" class="ml-2 px-2 py-0.5 text-xs bg-gray-700 rounded-full">0</span>
+          </button>
+        </div>
+
+        <!-- Tab Content -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+          <!-- Transcriptions Tab -->
+          <div id="panel-transcriptions" class="flex-1 flex flex-col overflow-hidden p-4">
+            <div class="flex-1 overflow-hidden rounded-lg border border-gray-700 bg-gray-800/50">
+              <div class="overflow-y-auto h-full scrollbar-thin" id="transcription-container">
+                <table class="w-full">
+                  <thead class="sticky top-0 bg-gray-800 border-b border-gray-700">
+                    <tr>
+                      <th class="text-left text-xs font-medium text-gray-400 uppercase tracking-wider px-4 py-3 w-24">Time</th>
+                      <th class="text-left text-xs font-medium text-gray-400 uppercase tracking-wider px-4 py-3">Transcription</th>
+                      <th class="text-left text-xs font-medium text-gray-400 uppercase tracking-wider px-4 py-3 w-20">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="transcription-tbody" class="divide-y divide-gray-700">
+                  </tbody>
+                </table>
+                <!-- Empty state -->
+                <div id="empty-state" class="flex flex-col items-center justify-center py-12 text-gray-500">
+                  <svg class="w-12 h-12 mb-3 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </svg>
+                  <p class="text-sm">Waiting for transcriptions...</p>
+                  <p class="text-xs text-gray-600 mt-1">Speak into the microphone to begin</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Logs Tab -->
+          <div id="panel-logs" class="flex-1 flex flex-col overflow-hidden p-4 hidden">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs text-gray-500">System and debug messages</span>
+              <button onclick="clearLogs()" class="text-xs text-gray-500 hover:text-gray-300 px-2 py-1 rounded hover:bg-gray-700">
+                Clear
+              </button>
+            </div>
+            <div class="flex-1 overflow-hidden rounded-lg border border-gray-700 bg-gray-900 font-mono text-sm">
+              <div class="overflow-y-auto h-full scrollbar-thin p-3" id="logs-container">
+                <div id="logs-content"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- Transcription Area (1/5 of remaining height) -->
-      <div
-        id="transcription-area"
-        class="bg-gray-800 border-t border-gray-700 p-6 flex items-center justify-center"
-        style="height: 20%;"
-      >
-        <div id="transcription-content" class="text-center max-w-4xl w-full">
-          <p
-            id="transcription-text"
-            class="text-2xl font-medium text-gray-400"
-          >
-            Waiting for audio...
-          </p>
-        </div>
+      <!-- Status Bar -->
+      <div id="status-bar" class="bg-gray-800 border-t border-gray-700 px-4 py-2">
+        <p id="current-status" class="text-sm text-gray-400 text-center">
+          Waiting for audio...
+        </p>
       </div>
     </div>
 
     <script>
-      const spectrogramCanvas = document.getElementById("spectrogram-canvas");
-      const ctx = spectrogramCanvas.getContext("2d");
+      const audiogramCanvas = document.getElementById("audiogram-canvas");
+      const ctx = audiogramCanvas.getContext("2d");
       const loadingOverlay = document.getElementById("loading-overlay");
       const loadingText = document.getElementById("loading-text");
       const statusDot = document.getElementById("status-dot");
       const statusText = document.getElementById("status-text");
-      const transcriptionText = document.getElementById("transcription-text");
+      const currentStatus = document.getElementById("current-status");
+      const transcriptionTbody = document.getElementById("transcription-tbody");
+      const transcriptionBadge = document.getElementById("transcription-badge");
+      const logBadge = document.getElementById("log-badge");
+      const emptyState = document.getElementById("empty-state");
+      const recordingIndicator = document.getElementById("recording-indicator");
+      const logsContent = document.getElementById("logs-content");
 
       let ws = null;
       let reconnectTimeout = null;
-      let spectrogramHistory = [];
-      const MAX_SPECTROGRAM_COLUMNS = 200;
+      let waveformData = [];
+      const MAX_WAVEFORM_POINTS = 500;
+      let transcriptions = [];
+      let logs = [];
+      let activeTab = "transcriptions";
 
-      // Color map for spectrogram (dark blue to yellow/white)
-      function getSpectrogramColor(value) {
-        // value is 0-1
-        const v = Math.max(0, Math.min(1, value));
+      function addLog(level, message) {
+        const entry = {
+          time: new Date(),
+          level: level,
+          message: message,
+        };
+        logs.unshift(entry);
 
-        if (v < 0.25) {
-          // Dark blue to blue
-          const t = v / 0.25;
-          return `rgb(${Math.floor(10 + t * 20)}, ${Math.floor(10 + t * 30)}, ${Math.floor(40 + t * 80)})`;
-        } else if (v < 0.5) {
-          // Blue to cyan
-          const t = (v - 0.25) / 0.25;
-          return `rgb(${Math.floor(30 + t * 20)}, ${Math.floor(40 + t * 150)}, ${Math.floor(120 + t * 80)})`;
-        } else if (v < 0.75) {
-          // Cyan to yellow
-          const t = (v - 0.5) / 0.25;
-          return `rgb(${Math.floor(50 + t * 200)}, ${Math.floor(190 + t * 60)}, ${Math.floor(200 - t * 150)})`;
+        // Keep logs limited
+        if (logs.length > 500) {
+          logs.pop();
+        }
+
+        logBadge.textContent = logs.length;
+        updateLogsDisplay();
+      }
+
+      function updateLogsDisplay() {
+        const colors = {
+          info: "text-blue-400",
+          error: "text-red-400",
+          warn: "text-yellow-400",
+          debug: "text-gray-500",
+        };
+
+        logsContent.innerHTML = logs
+          .map((log) => {
+            const time = log.time.toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false,
+            });
+            const color = colors[log.level] || "text-gray-400";
+            return `<div class="py-1"><span class="text-gray-600">[${time}]</span> <span class="${color}">[${log.level.toUpperCase()}]</span> <span class="text-gray-300">${escapeHtml(log.message)}</span></div>`;
+          })
+          .join("");
+      }
+
+      function clearLogs() {
+        logs = [];
+        logBadge.textContent = "0";
+        logsContent.innerHTML = '<div class="text-gray-600 italic">No logs</div>';
+      }
+
+      function switchTab(tab) {
+        activeTab = tab;
+        const tabTranscriptions = document.getElementById("tab-transcriptions");
+        const tabLogs = document.getElementById("tab-logs");
+        const panelTranscriptions = document.getElementById("panel-transcriptions");
+        const panelLogs = document.getElementById("panel-logs");
+
+        if (tab === "transcriptions") {
+          tabTranscriptions.className = "px-4 py-3 text-sm font-medium transition-colors tab-active";
+          tabLogs.className = "px-4 py-3 text-sm font-medium transition-colors tab-inactive";
+          panelTranscriptions.classList.remove("hidden");
+          panelLogs.classList.add("hidden");
         } else {
-          // Yellow to white
-          const t = (v - 0.75) / 0.25;
-          return `rgb(${Math.floor(250)}, ${Math.floor(250)}, ${Math.floor(50 + t * 200)})`;
+          tabTranscriptions.className = "px-4 py-3 text-sm font-medium transition-colors tab-inactive";
+          tabLogs.className = "px-4 py-3 text-sm font-medium transition-colors tab-active";
+          panelTranscriptions.classList.add("hidden");
+          panelLogs.classList.remove("hidden");
         }
       }
 
-      function drawSpectrogram() {
-        const width = spectrogramCanvas.width;
-        const height = spectrogramCanvas.height;
+      function drawAudiogram() {
+        const width = audiogramCanvas.width;
+        const height = audiogramCanvas.height;
+        const centerY = height / 2;
 
-        // Clear canvas
         ctx.fillStyle = "#030712";
         ctx.fillRect(0, 0, width, height);
 
-        if (spectrogramHistory.length === 0) return;
+        ctx.strokeStyle = "#374151";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+        ctx.lineTo(width, centerY);
+        ctx.stroke();
 
-        // Calculate dimensions
-        const columnWidth = Math.max(1, Math.floor(width / MAX_SPECTROGRAM_COLUMNS));
-        const startX = width - spectrogramHistory.length * columnWidth;
+        if (waveformData.length < 2) return;
 
-        // Draw each column
-        spectrogramHistory.forEach((column, colIndex) => {
-          if (!column || column.length === 0) return;
+        const pointWidth = width / MAX_WAVEFORM_POINTS;
+        const startX = width - waveformData.length * pointWidth;
 
-          const x = startX + colIndex * columnWidth;
-          const binHeight = height / column.length;
+        const gradient = ctx.createLinearGradient(0, 0, 0, height);
+        gradient.addColorStop(0, "#3b82f6");
+        gradient.addColorStop(0.5, "#60a5fa");
+        gradient.addColorStop(1, "#3b82f6");
 
-          column.forEach((value, binIndex) => {
-            // Flip vertically so low frequencies are at bottom
-            const y = height - (binIndex + 1) * binHeight;
-            ctx.fillStyle = getSpectrogramColor(value);
-            ctx.fillRect(x, y, columnWidth, binHeight + 1);
-          });
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
+        waveformData.forEach((value, index) => {
+          const x = startX + index * pointWidth;
+          const amplitude = value * (height * 0.4);
+          const y = centerY - amplitude;
+
+          if (index === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
         });
+
+        ctx.stroke();
+
+        ctx.strokeStyle = "#1d4ed8";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
+        waveformData.forEach((value, index) => {
+          const x = startX + index * pointWidth;
+          const amplitude = value * (height * 0.35);
+          const y = centerY + amplitude;
+
+          if (index === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        });
+
+        ctx.stroke();
       }
 
       function resizeCanvas() {
-        const container = spectrogramCanvas.parentElement;
-        spectrogramCanvas.width = container.clientWidth;
-        spectrogramCanvas.height = container.clientHeight;
-        drawSpectrogram();
+        const container = audiogramCanvas.parentElement;
+        audiogramCanvas.width = container.clientWidth;
+        audiogramCanvas.height = container.clientHeight;
+        drawAudiogram();
       }
 
       function setStatus(status, color) {
@@ -161,34 +329,92 @@
         statusText.className = `text-${color}-400`;
       }
 
-      function setTranscription(text, type) {
-        transcriptionText.textContent = text;
+      function setCurrentStatus(text, type) {
+        currentStatus.textContent = text;
 
         switch (type) {
           case "error":
-            transcriptionText.className = "text-2xl font-medium text-red-500";
+            currentStatus.className = "text-sm text-red-500 text-center";
             break;
           case "transcribing":
-            transcriptionText.className =
-              "text-2xl font-medium text-yellow-400 animate-pulse";
+            currentStatus.className = "text-sm text-yellow-400 text-center animate-pulse";
             break;
           case "recording":
-            transcriptionText.className =
-              "text-2xl font-medium text-blue-400 animate-pulse";
+            currentStatus.className = "text-sm text-blue-400 text-center";
+            recordingIndicator.classList.remove("hidden");
             break;
           case "loading":
-            transcriptionText.className =
-              "text-2xl font-medium text-gray-400 animate-pulse";
-            break;
-          case "success":
-            transcriptionText.className = "text-2xl font-medium text-white";
-            break;
-          case "no_speech":
-            transcriptionText.className = "text-2xl font-medium text-gray-500";
+            currentStatus.className = "text-sm text-gray-400 text-center animate-pulse";
             break;
           default:
-            transcriptionText.className = "text-2xl font-medium text-gray-400";
+            currentStatus.className = "text-sm text-gray-400 text-center";
+            recordingIndicator.classList.add("hidden");
         }
+
+        if (type !== "recording") {
+          recordingIndicator.classList.add("hidden");
+        }
+      }
+
+      function formatTime(date) {
+        return date.toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        });
+      }
+
+      function addTranscription(text, hasSpeech) {
+        const entry = {
+          id: transcriptions.length + 1,
+          time: new Date(),
+          text: text,
+          hasSpeech: hasSpeech,
+        };
+
+        transcriptions.unshift(entry);
+        updateTranscriptionTable();
+        addLog("info", `Transcription: "${text}"`);
+      }
+
+      function updateTranscriptionTable() {
+        if (transcriptions.length > 0) {
+          emptyState.style.display = "none";
+        } else {
+          emptyState.style.display = "flex";
+        }
+
+        transcriptionBadge.textContent = transcriptions.length;
+
+        transcriptionTbody.innerHTML = "";
+
+        transcriptions.forEach((entry) => {
+          const row = document.createElement("tr");
+          row.className = "hover:bg-gray-700/50 transition-colors";
+
+          const textClass = entry.hasSpeech
+            ? "text-white"
+            : "text-gray-500 italic";
+
+          const statusBadge = entry.hasSpeech
+            ? '<span class="px-2 py-1 text-xs rounded-full bg-green-500/20 text-green-400">Speech</span>'
+            : '<span class="px-2 py-1 text-xs rounded-full bg-gray-500/20 text-gray-500">Silent</span>';
+
+          row.innerHTML = `
+            <td class="px-4 py-3 text-sm text-gray-400 whitespace-nowrap">${formatTime(entry.time)}</td>
+            <td class="px-4 py-3 text-sm ${textClass}">${escapeHtml(entry.text)}</td>
+            <td class="px-4 py-3 text-sm">${statusBadge}</td>
+          `;
+
+          transcriptionTbody.appendChild(row);
+        });
+      }
+
+      function escapeHtml(text) {
+        const div = document.createElement("div");
+        div.textContent = text;
+        return div.innerHTML;
       }
 
       function connect() {
@@ -196,11 +422,14 @@
           ws.close();
         }
 
+        addLog("info", "Connecting to WebSocket...");
+
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         ws = new WebSocket(`${protocol}//${window.location.host}/stream`);
 
         ws.onopen = () => {
           setStatus("Connected", "green");
+          addLog("info", "WebSocket connected");
           if (reconnectTimeout) {
             clearTimeout(reconnectTimeout);
             reconnectTimeout = null;
@@ -210,68 +439,113 @@
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+            addLog("debug", `Received: ${data.type}`);
 
             switch (data.type) {
               case "status":
+                if (data.status !== "listening") {
+                  addLog("info", `Status: ${data.status} - ${data.message}`);
+                }
                 if (data.status === "loading") {
                   loadingOverlay.style.display = "flex";
                   loadingText.textContent = data.message;
-                  setTranscription(data.message, "loading");
+                  setCurrentStatus(data.message, "loading");
                 } else if (data.status === "error") {
-                  setTranscription(data.message, "error");
+                  setCurrentStatus(data.message, "error");
+                  addLog("error", data.message);
                 } else if (data.status === "transcribing") {
-                  setTranscription("Transcribing...", "transcribing");
+                  setCurrentStatus("Transcribing...", "transcribing");
                 } else if (data.status === "recording") {
-                  setTranscription("Recording...", "recording");
+                  setCurrentStatus("Recording speech...", "recording");
+                } else if (data.status === "listening") {
+                  setCurrentStatus("Listening for speech...", "default");
+                  if (loadingOverlay.style.display !== "none") {
+                    loadingOverlay.style.display = "none";
+                  }
                 }
                 break;
 
-              case "spectrogram":
-                // Hide loading overlay on first spectrogram
+              case "waveform":
                 if (loadingOverlay.style.display !== "none") {
                   loadingOverlay.style.display = "none";
                 }
 
-                // Add new spectrogram data to history
                 if (data.data && data.data.length > 0) {
-                  // Each column in data.data represents a time slice
-                  data.data.forEach((column) => {
-                    spectrogramHistory.push(column);
-                  });
+                  // Downsample raw audio samples for visualization
+                  const samples = data.data;
+                  const targetPoints = 16; // Points per chunk for smooth display
+                  const chunkSize = Math.max(1, Math.floor(samples.length / targetPoints));
 
-                  // Keep history limited
-                  while (spectrogramHistory.length > MAX_SPECTROGRAM_COLUMNS) {
-                    spectrogramHistory.shift();
+                  for (let i = 0; i < samples.length; i += chunkSize) {
+                    const chunk = samples.slice(i, i + chunkSize);
+                    // Calculate RMS of chunk
+                    const rms = Math.sqrt(
+                      chunk.reduce((sum, val) => sum + val * val, 0) / chunk.length
+                    );
+                    waveformData.push(rms);
                   }
 
-                  drawSpectrogram();
+                  while (waveformData.length > MAX_WAVEFORM_POINTS) {
+                    waveformData.shift();
+                  }
+
+                  drawAudiogram();
+                }
+                break;
+
+              case "spectrogram":
+                // Legacy support for spectrogram data
+                if (loadingOverlay.style.display !== "none") {
+                  loadingOverlay.style.display = "none";
+                }
+
+                if (data.data && data.data.length > 0) {
+                  data.data.forEach((column) => {
+                    const rms = Math.sqrt(
+                      column.reduce((sum, val) => sum + val * val, 0) / column.length
+                    );
+                    waveformData.push(rms);
+                  });
+
+                  while (waveformData.length > MAX_WAVEFORM_POINTS) {
+                    waveformData.shift();
+                  }
+
+                  drawAudiogram();
                 }
                 break;
 
               case "transcription":
-                if (data.has_speech) {
-                  setTranscription(data.text, "success");
-                } else {
-                  setTranscription(data.text, "no_speech");
-                }
+                addLog("info", `Transcription received: "${data.text}" (has_speech: ${data.has_speech})`);
+                addTranscription(data.text, data.has_speech);
+                setCurrentStatus(
+                  data.has_speech ? "Speech detected" : "No speech detected",
+                  "default"
+                );
+                break;
+
+              case "log":
+                addLog(data.level || "info", data.message);
                 break;
 
               case "ping":
-                // Respond to ping
                 ws.send(JSON.stringify({ type: "pong" }));
                 break;
             }
           } catch (e) {
             console.error("Parse error:", e);
+            addLog("error", `Parse error: ${e.message}`);
           }
         };
 
-        ws.onerror = () => {
+        ws.onerror = (e) => {
           setStatus("Error", "red");
+          addLog("error", "WebSocket error");
         };
 
         ws.onclose = () => {
           setStatus("Disconnected", "red");
+          addLog("warn", "WebSocket disconnected");
           loadingOverlay.style.display = "flex";
           loadingText.textContent = "Connection lost...";
 
@@ -284,16 +558,11 @@
         };
       }
 
-      // Handle window resize
       window.addEventListener("resize", resizeCanvas);
-
-      // Initial canvas setup
       resizeCanvas();
-
-      // Start connection
+      addLog("info", "Application started");
       connect();
 
-      // Cleanup on page unload
       window.addEventListener("beforeunload", () => {
         if (ws) {
           ws.close();

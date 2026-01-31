@@ -1,9 +1,17 @@
 import os
+import sys
 import asyncio
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
+
+# Block ONNX Runtime entirely - it crashes on Jetson before Python can init it
+# YOLO will use PyTorch/CUDA instead which works fine
+sys.modules["onnxruntime"] = None
+
+os.environ["YOLO_VERBOSE"] = "False"
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -12,8 +20,36 @@ from ultralytics import YOLO
 
 app = FastAPI()
 
+# Model configuration
+MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/models"))
+
+def load_model():
+    """Load YOLOv8 model from persistent storage or download if needed."""
+    model_path = MODELS_DIR / MODEL_NAME
+
+    if model_path.exists():
+        print(f"Loading model from persistent storage: {model_path}")
+        return YOLO(str(model_path))
+
+    # Model not in persistent storage - download and save
+    print(f"Model not found at {model_path}, downloading {MODEL_NAME}...")
+    model = YOLO(MODEL_NAME)
+
+    # Save to persistent storage for future runs
+    if MODELS_DIR.exists():
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        # Export/copy the downloaded model to persistent storage
+        import shutil
+        default_model_path = Path.home() / ".cache" / "ultralytics" / MODEL_NAME
+        if default_model_path.exists():
+            shutil.copy(default_model_path, model_path)
+            print(f"Model saved to persistent storage: {model_path}")
+
+    return model
+
 # Load YOLOv8 model
-model = YOLO("yolov8n.pt")
+model = load_model()
 
 # Store recent detections for the log (thread-safe deque)
 detection_log: deque = deque(maxlen=100)

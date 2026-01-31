@@ -11,6 +11,11 @@
     },
     {
       "type": "video"
+    },
+    {
+      "type": "persist",
+      "name": "app-yolov8-models",
+      "path": "/models"
     }
   ]
 }
