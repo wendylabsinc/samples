@@ -43,13 +43,13 @@ function AudioVisualizer({
     const width = canvas.width;
     const height = canvas.height;
 
-    // Clear canvas
-    ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+    // Clear canvas with dark background (actual color, not CSS variable)
+    ctx.fillStyle = "#27272a"; // zinc-800
     ctx.fillRect(0, 0, width, height);
 
     if (!isListening || audioData.length === 0) {
       // Draw flat line when not listening
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+      ctx.strokeStyle = "#52525b"; // zinc-600
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(0, height / 2);
@@ -58,8 +58,21 @@ function AudioVisualizer({
       return;
     }
 
-    // Draw waveform
-    ctx.strokeStyle = "#22c55e";
+    // Draw frequency bars first (behind waveform)
+    const barCount = 32;
+    const barWidth = width / barCount - 2;
+    ctx.fillStyle = "rgba(34, 197, 94, 0.3)"; // green-500 with opacity
+
+    for (let i = 0; i < barCount; i++) {
+      const dataIndex = Math.floor((i / barCount) * audioData.length);
+      const barHeight = Math.abs(audioData[dataIndex]) * height * 0.8;
+      const x = i * (barWidth + 2);
+      const y = height - barHeight;
+      ctx.fillRect(x, y, barWidth, barHeight);
+    }
+
+    // Draw waveform on top
+    ctx.strokeStyle = "#22c55e"; // green-500
     ctx.lineWidth = 2;
     ctx.beginPath();
 
@@ -80,19 +93,6 @@ function AudioVisualizer({
     }
 
     ctx.stroke();
-
-    // Draw frequency bars
-    const barCount = 32;
-    const barWidth = width / barCount - 2;
-    ctx.fillStyle = "rgba(34, 197, 94, 0.5)";
-
-    for (let i = 0; i < barCount; i++) {
-      const dataIndex = Math.floor((i / barCount) * audioData.length);
-      const barHeight = Math.abs(audioData[dataIndex]) * height * 0.8;
-      const x = i * (barWidth + 2);
-      const y = height - barHeight;
-      ctx.fillRect(x, y, barWidth, barHeight);
-    }
   }, [audioData, isListening]);
 
   return (
@@ -100,7 +100,8 @@ function AudioVisualizer({
       ref={canvasRef}
       width={600}
       height={150}
-      className="rounded-lg border border-white/20"
+      className="w-full max-w-full rounded-lg border border-border"
+      style={{ maxWidth: "600px" }}
     />
   );
 }
@@ -112,6 +113,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const nextPlayTimeRef = useRef<number>(0);
 
   const playSound = async (sound: string) => {
     setPlayingSound(sound);
@@ -138,6 +140,7 @@ function App() {
 
     // Create audio context for playback
     audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+    nextPlayTimeRef.current = 0;
 
     ws.onopen = () => {
       setIsListening(true);
@@ -162,22 +165,32 @@ function App() {
           const normalizedData = Array.from(samples).map((s) => s / 32768);
           setAudioData(normalizedData);
 
-          // Play audio in browser
-          if (audioContextRef.current && audioContextRef.current.state === "running") {
-            const audioBuffer = audioContextRef.current.createBuffer(
-              1,
-              samples.length,
-              message.sampleRate
-            );
+          // Play audio in browser with proper scheduling
+          const ctx = audioContextRef.current;
+          if (ctx && ctx.state === "running") {
+            const sampleRate = message.sampleRate || 16000;
+            const audioBuffer = ctx.createBuffer(1, samples.length, sampleRate);
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < samples.length; i++) {
               channelData[i] = samples[i] / 32768;
             }
 
-            const source = audioContextRef.current.createBufferSource();
+            const source = ctx.createBufferSource();
             source.buffer = audioBuffer;
-            source.connect(audioContextRef.current.destination);
-            source.start();
+            source.connect(ctx.destination);
+
+            // Schedule this chunk to play right after the previous one
+            const currentTime = ctx.currentTime;
+            const startTime = Math.max(currentTime, nextPlayTimeRef.current);
+            source.start(startTime);
+
+            // Update next play time to end of this buffer
+            nextPlayTimeRef.current = startTime + audioBuffer.duration;
+
+            // Reset if we've fallen too far behind (catches up to live)
+            if (nextPlayTimeRef.current - currentTime > 0.5) {
+              nextPlayTimeRef.current = currentTime + 0.05;
+            }
           }
         } else if (message.type === "error") {
           setError(message.message);
@@ -208,6 +221,7 @@ function App() {
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
+    nextPlayTimeRef.current = 0;
     setIsListening(false);
     setAudioData([]);
   }, []);
@@ -225,10 +239,10 @@ function App() {
   }, []);
 
   return (
-    <div className="relative flex min-h-screen w-full flex-col items-center overflow-hidden bg-blue-700">
+    <div className="relative flex min-h-screen w-full flex-col items-center overflow-hidden bg-background">
       <div className="relative flex h-[300px] w-full flex-col items-center justify-center">
         <ShaderAnimation />
-        <span className="absolute pointer-events-none z-10 text-center text-6xl leading-none font-semibold tracking-tighter whitespace-pre-wrap text-white">
+        <span className="absolute pointer-events-none z-10 text-center text-6xl leading-none font-semibold tracking-tighter whitespace-pre-wrap text-foreground">
           Audio Demo
         </span>
       </div>
@@ -236,7 +250,7 @@ function App() {
       <div className="z-10 flex flex-col items-center gap-8 p-8 w-full max-w-2xl">
         {/* Sound Buttons */}
         <div className="flex flex-col items-center gap-4">
-          <h2 className="text-xl font-semibold text-white">Play Sounds on Jetson</h2>
+          <h2 className="text-xl font-semibold text-foreground">Play Sounds on Jetson</h2>
           <div className="flex gap-4">
             <Button
               onClick={() => playSound("cat")}
@@ -273,7 +287,7 @@ function App() {
 
         {/* Microphone Section */}
         <div className="flex flex-col items-center gap-4 w-full">
-          <h2 className="text-xl font-semibold text-white">Microphone Stream</h2>
+          <h2 className="text-xl font-semibold text-foreground">Microphone Stream</h2>
           <Button
             onClick={isListening ? stopListening : startListening}
             size="lg"
@@ -294,9 +308,9 @@ function App() {
           </Button>
 
           {/* Audio Visualizer */}
-          <div className="w-full bg-black/30 rounded-lg p-4">
+          <div className="w-full bg-muted rounded-lg p-4">
             <AudioVisualizer audioData={audioData} isListening={isListening} />
-            <p className="text-white/60 text-sm mt-2 text-center">
+            <p className="text-muted-foreground text-sm mt-2 text-center">
               {isListening
                 ? "Streaming audio from Jetson microphone..."
                 : "Click Listen to stream microphone audio"}
@@ -306,8 +320,8 @@ function App() {
 
         {/* Error Display */}
         {error && (
-          <div className="w-full bg-red-500/20 border border-red-500/50 rounded-lg p-4">
-            <p className="text-red-200 text-center">{error}</p>
+          <div className="w-full bg-destructive/20 border border-destructive/50 rounded-lg p-4">
+            <p className="text-destructive text-center">{error}</p>
           </div>
         )}
       </div>
