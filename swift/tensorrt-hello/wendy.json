@@ -1,0 +1,9 @@
+{
+  "appId": "sh.wendy.examples.tensorrt-hello",
+  "entitlements": [
+    {
+      "type": "gpu"
+    }
+  ],
+  "version": "0.0.1"
+}

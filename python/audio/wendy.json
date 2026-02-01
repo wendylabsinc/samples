@@ -1,0 +1,13 @@
+{
+  "appId": "com.example.audio-demo",
+  "version": "0.0.1",
+  "entitlements": [
+    {
+      "type": "network",
+      "network": "host"
+    },
+    {
+      "type": "audio"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "appId": "sh.wendy.examples.tensorrt-llm-streaming",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+     { "type": "gpu" }
+  ],
+  "version": "0.0.1"
+}

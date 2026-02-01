@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
+import numpy as np
 
 # Block ONNX Runtime entirely - it crashes on Jetson before Python can init it
 # YOLO will use PyTorch/CUDA instead which works fine
@@ -72,52 +73,99 @@ print(f"Serving frontend from: {frontend_dist}")
 
 def generate_frames():
     """Generate MJPEG frames with YOLOv8 detection overlay."""
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    retry_delay = 0.5
+    max_retry_delay = 5.0
 
-    if not cap.isOpened():
-        print("Error: Could not open webcam")
-        return
+    def make_status_frame(message: str, detail: str | None = None):
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.putText(
+            frame,
+            message,
+            (40, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            (0, 200, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        if detail:
+            cv2.putText(
+                frame,
+                detail,
+                (40, 160),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (200, 200, 200),
+                2,
+                cv2.LINE_AA,
+            )
+        return frame
 
-    print("Webcam opened successfully")
+    def encode_frame(frame):
+        _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return buffer.tobytes()
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Error: Could not read frame")
-                break
+    while True:
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-            # Run YOLOv8 inference
-            results = model(frame, verbose=False)
+        if not cap.isOpened():
+            print("Webcam not available. Waiting for device...")
+            status_frame = make_status_frame(
+                "Webcam not available",
+                f"Retrying in {retry_delay:.1f}s",
+            )
+            frame_bytes = encode_frame(status_frame)
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+            )
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_retry_delay)
+            continue
 
-            # Process detections and add to log
-            timestamp = datetime.now(timezone.utc).isoformat()
-            for result in results:
-                for box in result.boxes:
-                    cls_id = int(box.cls[0])
-                    cls_name = model.names[cls_id]
-                    conf = float(box.conf[0])
+        print("Webcam opened successfully")
+        retry_delay = 0.5
 
-                    if conf > 0.5:
-                        detection_log.append({
-                            "label": cls_name,
-                            "confidence": round(conf * 100, 1),
-                            "timestamp": timestamp
-                        })
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Webcam disconnected. Reconnecting...")
+                    break
 
-            # Draw bounding boxes on frame
-            annotated_frame = results[0].plot()
+                # Run YOLOv8 inference
+                results = model(frame, verbose=False)
 
-            # Encode frame as JPEG
-            _, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            frame_bytes = buffer.tobytes()
+                # Process detections and add to log
+                timestamp = datetime.now(timezone.utc).isoformat()
+                for result in results:
+                    for box in result.boxes:
+                        cls_id = int(box.cls[0])
+                        cls_name = model.names[cls_id]
+                        conf = float(box.conf[0])
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-    finally:
-        cap.release()
+                        if conf > 0.5:
+                            detection_log.append(
+                                {
+                                    "label": cls_name,
+                                    "confidence": round(conf * 100, 1),
+                                    "timestamp": timestamp,
+                                }
+                            )
+
+                # Draw bounding boxes on frame
+                annotated_frame = results[0].plot()
+
+                frame_bytes = encode_frame(annotated_frame)
+
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                )
+        finally:
+            cap.release()
 
 
 async def event_generator():
