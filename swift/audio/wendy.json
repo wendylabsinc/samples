@@ -1,0 +1,13 @@
+{
+  "appId": "com.example.swift-audio",
+  "version": "0.0.1",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "audio"
+    }
+  ]
+}

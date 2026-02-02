@@ -66,3 +66,7 @@ xcuserdata/
 DerivedData/
 *.playground/
 Packages/
+
+# Large binaries
+*.tar.gz
+llama.cpp/

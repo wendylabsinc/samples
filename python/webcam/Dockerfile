@@ -27,9 +27,10 @@ COPY app.py .
 COPY index.html .
 COPY logo.svg .
 
-# Create a non-root user for security
+# Create a non-root user for security and fix permissions
 RUN useradd --create-home --shell /bin/bash app && \
-    chown -R app:app /app
+    chown -R app:app /app && \
+    chmod -R u+r /app
 USER app
 
 # Expose port 8100
