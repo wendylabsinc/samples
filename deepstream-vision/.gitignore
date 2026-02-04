@@ -1,0 +1,8 @@
+.env
+vlm/models/
+models/
+*.safetensors
+*.engine
+
+# Local Claude skills and context
+.claude/
