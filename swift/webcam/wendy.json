@@ -1,7 +1,7 @@
 {
-    "appId": "sh.wendy.examples.webcam",
+    "appId": "sh.wendy.examples.swift-webcam",
     "version": "1.0.0",
-    "language": "python",
+    "language": "swift",
     "entitlements": [
         {
             "type": "network",

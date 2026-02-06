@@ -1,0 +1,16 @@
+{
+  "appId": "com.example.pipecat-assistant",
+  "version": "0.0.1",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "audio"
+    },
+    {
+      "type": "gpu"
+    }
+  ]
+}

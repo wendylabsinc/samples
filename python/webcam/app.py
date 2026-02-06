@@ -1,154 +1,214 @@
 #!/usr/bin/env python3
+"""
+Webcam streaming using GStreamer for capture/encoding, WebSocket for transport.
+Simple and efficient - hardware encoding on Jetson, JPEG frames to browser.
+"""
 import asyncio
-import base64
+import logging
+import threading
 from pathlib import Path
 
-import cv2
+import gi
+
+gi.require_version("Gst", "1.0")
+gi.require_version("GstApp", "1.0")
+
+from gi.repository import Gst, GstApp, GLib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+Gst.init(None)
+
 app = FastAPI()
 
-# Webcam capture settings
-CAMERA_INDEX = 0
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
-JPEG_QUALITY = 80
-TARGET_FPS = 30
+# Video settings
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+FRAMERATE = 30
+JPEG_QUALITY = 85
 
 
-class CameraManager:
-    """Manages webcam capture with shared access for multiple clients."""
+class GStreamerCamera:
+    """GStreamer-based camera capture with hardware encoding support."""
 
     def __init__(self):
-        self._cap: cv2.VideoCapture | None = None
-        self._lock = asyncio.Lock()
-        self._clients: set[WebSocket] = set()
-        self._running = False
-        self._task: asyncio.Task | None = None
+        self.pipeline: Gst.Pipeline | None = None
+        self.appsink: GstApp.AppSink | None = None
+        self.clients: set[WebSocket] = set()
+        self.running = False
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._broadcast_task: asyncio.Task | None = None
 
-    async def _init_camera(self) -> bool:
-        """Initialize the camera if not already open."""
-        if self._cap is None or not self._cap.isOpened():
-            self._cap = cv2.VideoCapture(CAMERA_INDEX)
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
-        return self._cap.isOpened()
+    def _create_pipeline(self) -> Gst.Pipeline:
+        """Create GStreamer pipeline - tries hardware encoder first."""
 
-    async def _capture_loop(self):
-        """Continuously capture and broadcast frames to all clients."""
-        frame_interval = 1.0 / TARGET_FPS
-        while self._running and self._clients:
-            start_time = asyncio.get_event_loop().time()
+        # Hardware pipeline for Jetson (NVJPEG encoder)
+        hw_pipeline = f"""
+            v4l2src device=/dev/video0 !
+            video/x-raw,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={FRAMERATE}/1 !
+            nvvidconv !
+            video/x-raw(memory:NVMM) !
+            nvjpegenc quality={JPEG_QUALITY} !
+            appsink name=sink emit-signals=true max-buffers=2 drop=true
+        """
 
-            # Capture frame in executor to avoid blocking
-            frame = await asyncio.get_event_loop().run_in_executor(
-                None, self._capture_frame
+        # Software pipeline (works everywhere)
+        sw_pipeline = f"""
+            v4l2src device=/dev/video0 !
+            videoconvert !
+            videoscale !
+            videorate !
+            video/x-raw,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={FRAMERATE}/1,format=I420 !
+            jpegenc quality={JPEG_QUALITY} !
+            appsink name=sink emit-signals=true max-buffers=2 drop=true
+        """
+
+        # Try hardware first
+        for name, pipeline_str in [("hardware", hw_pipeline), ("software", sw_pipeline)]:
+            try:
+                pipeline = Gst.parse_launch(pipeline_str)
+                # Test if it can reach PAUSED state
+                ret = pipeline.set_state(Gst.State.PAUSED)
+                if ret != Gst.StateChangeReturn.FAILURE:
+                    logger.info(f"Using {name} JPEG encoder")
+                    pipeline.set_state(Gst.State.NULL)
+                    return Gst.parse_launch(pipeline_str)
+                pipeline.set_state(Gst.State.NULL)
+            except Exception as e:
+                logger.debug(f"{name} pipeline failed: {e}")
+
+        raise RuntimeError("No working GStreamer pipeline found")
+
+    def start(self, loop: asyncio.AbstractEventLoop):
+        """Start the GStreamer pipeline."""
+        with self._lock:
+            if self.pipeline is not None:
+                return
+
+            self._loop = loop
+            self.pipeline = self._create_pipeline()
+            self.appsink = self.pipeline.get_by_name("sink")
+            self.appsink.connect("new-sample", self._on_new_sample)
+
+            ret = self.pipeline.set_state(Gst.State.PLAYING)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                raise RuntimeError("Failed to start pipeline")
+
+            self.running = True
+            logger.info("Camera pipeline started")
+
+    def stop(self):
+        """Stop the GStreamer pipeline."""
+        with self._lock:
+            if self.pipeline is None:
+                return
+
+            self.running = False
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+            self.appsink = None
+            logger.info("Camera pipeline stopped")
+
+    def _on_new_sample(self, sink) -> Gst.FlowReturn:
+        """Called by GStreamer when a new frame is ready."""
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.OK
+
+        buffer = sample.get_buffer()
+        success, map_info = buffer.map(Gst.MapFlags.READ)
+        if not success:
+            return Gst.FlowReturn.OK
+
+        # Copy frame data
+        frame_data = bytes(map_info.data)
+        buffer.unmap(map_info)
+
+        # Schedule broadcast on asyncio loop
+        if self._loop and self.clients:
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_frame(frame_data),
+                self._loop
             )
 
-            if frame is not None:
-                # Broadcast to all connected clients
-                disconnected = set()
-                for ws in self._clients.copy():
-                    try:
-                        await ws.send_bytes(frame)
-                    except Exception:
-                        disconnected.add(ws)
+        return Gst.FlowReturn.OK
 
-                # Remove disconnected clients
-                self._clients -= disconnected
+    async def _broadcast_frame(self, frame_data: bytes):
+        """Send frame to all connected clients."""
+        if not self.clients:
+            return
 
-            # Maintain target FPS
-            elapsed = asyncio.get_event_loop().time() - start_time
-            sleep_time = max(0, frame_interval - elapsed)
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+        disconnected = set()
+        for ws in self.clients.copy():
+            try:
+                await ws.send_bytes(frame_data)
+            except Exception:
+                disconnected.add(ws)
 
-        self._running = False
-
-    def _capture_frame(self) -> bytes | None:
-        """Capture a single frame and encode as JPEG."""
-        if self._cap is None:
-            return None
-
-        ret, frame = self._cap.read()
-        if not ret:
-            return None
-
-        # Encode as JPEG for efficient transfer
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-        _, buffer = cv2.imencode(".jpg", frame, encode_params)
-        return buffer.tobytes()
+        self.clients -= disconnected
 
     async def add_client(self, websocket: WebSocket) -> bool:
-        """Add a new client and start streaming if needed."""
-        async with self._lock:
-            if not await self._init_camera():
+        """Add a client and start pipeline if needed."""
+        self.clients.add(websocket)
+
+        if self.pipeline is None:
+            try:
+                self.start(asyncio.get_event_loop())
+            except Exception as e:
+                logger.error(f"Failed to start camera: {e}")
+                self.clients.discard(websocket)
                 return False
 
-            self._clients.add(websocket)
-
-            # Start capture loop if not running
-            if not self._running:
-                self._running = True
-                self._task = asyncio.create_task(self._capture_loop())
-
-            return True
+        return True
 
     async def remove_client(self, websocket: WebSocket):
-        """Remove a client and cleanup if no clients remain."""
-        async with self._lock:
-            self._clients.discard(websocket)
+        """Remove a client and stop pipeline if no clients remain."""
+        self.clients.discard(websocket)
 
-            if not self._clients:
-                self._running = False
-                if self._task:
-                    await self._task
-                    self._task = None
-
-                if self._cap:
-                    self._cap.release()
-                    self._cap = None
+        if not self.clients:
+            self.stop()
 
 
-camera_manager = CameraManager()
+# Global camera instance
+camera = GStreamerCamera()
 
 
 @app.websocket("/stream")
 async def websocket_stream(websocket: WebSocket):
-    """WebSocket endpoint for low-latency video streaming."""
+    """WebSocket endpoint for video streaming."""
     await websocket.accept()
 
-    if not await camera_manager.add_client(websocket):
+    if not await camera.add_client(websocket):
         await websocket.close(code=1011, reason="Failed to open camera")
         return
 
     try:
-        # Keep connection alive until client disconnects
         while True:
+            # Keep connection alive, handle pings
             try:
-                # Wait for any message (ping/pong or close)
                 await asyncio.wait_for(websocket.receive(), timeout=30.0)
             except asyncio.TimeoutError:
-                # Send ping to check if client is still alive
                 await websocket.send_json({"type": "ping"})
     except WebSocketDisconnect:
         pass
     finally:
-        await camera_manager.remove_client(websocket)
+        await camera.remove_client(websocket)
 
 
 @app.get("/status")
 async def get_status():
-    """Return camera status information."""
+    """Return camera status."""
     return {
-        "connected_clients": len(camera_manager._clients),
-        "camera_active": camera_manager._running,
+        "connected_clients": len(camera.clients),
+        "camera_active": camera.running,
         "settings": {
             "width": FRAME_WIDTH,
             "height": FRAME_HEIGHT,
-            "target_fps": TARGET_FPS,
+            "framerate": FRAMERATE,
             "jpeg_quality": JPEG_QUALITY,
         },
     }
@@ -157,12 +217,10 @@ async def get_status():
 @app.get("/")
 async def root():
     """Serve the index.html file."""
-    index_path = Path(__file__).parent / "index.html"
-    return FileResponse(index_path, media_type="text/html")
+    return FileResponse(Path(__file__).parent / "index.html", media_type="text/html")
 
 
 @app.get("/logo.svg")
 async def logo():
     """Serve the logo.svg file."""
-    logo_path = Path(__file__).parent / "logo.svg"
-    return FileResponse(logo_path, media_type="image/svg+xml")
+    return FileResponse(Path(__file__).parent / "logo.svg", media_type="image/svg+xml")

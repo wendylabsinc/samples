@@ -32,6 +32,6 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 ENV FRONTEND_DIST=/app/frontend/dist
 
-EXPOSE 3005
+EXPOSE 3006
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3005"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3006"]

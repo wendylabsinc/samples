@@ -37,7 +37,7 @@ else:
     audio_dir = local_sounds_path
 
 hostname = os.environ.get("WENDY_HOSTNAME", "localhost")
-PORT = 3005
+PORT = 3006
 
 print(f"Serving frontend from: {frontend_dist}")
 print(f"Audio files from: {audio_dir}")

@@ -474,5 +474,5 @@ async def serve_spa(full_path: str):
 if __name__ == "__main__":
     import uvicorn
 
-    print(f"Server running on http://{hostname}:3003")
-    uvicorn.run(app, host="0.0.0.0", port=3003)
+    print(f"Server running on http://{hostname}:3007")
+    uvicorn.run(app, host="0.0.0.0", port=3007)
