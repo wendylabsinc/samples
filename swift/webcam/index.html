@@ -18,10 +18,11 @@
       </p>
       <p class="text-gray-600 mb-6">Low-latency video stream from the edge device</p>
 
-      <div class="bg-black rounded-lg shadow overflow-hidden relative">
+      <div class="bg-black rounded-lg shadow overflow-hidden relative flex items-center justify-center">
         <canvas
           id="video-frame"
-          class="w-full aspect-video bg-gray-900"
+          class="bg-gray-900 max-w-full h-auto"
+          style="display: block;"
           aria-label="Video stream"
         ></canvas>
         <div

@@ -70,16 +70,57 @@ actor WebcamManager {
       appsink name=sink max-buffers=2 drop=true
       """
 
-    // Software fallback (works everywhere)
+    // Software fallback for Linux (V4L2)
     let swPipeline = """
       v4l2src device=/dev/video0 ! \
-      videoconvert ! videoscale ! videorate ! \
+      videoconvert ! videoscale add-borders=true ! videorate ! \
       video/x-raw,width=\(frameWidth),height=\(frameHeight),framerate=\(framerate)/1,format=I420 ! \
       jpegenc quality=\(jpegQuality) ! \
       appsink name=sink max-buffers=2 drop=true
       """
 
-    for (name, desc) in [("hardware", hwPipeline), ("software", swPipeline)] {
+    // Cross-platform source selector (auto)
+    let autoPipeline = """
+      autovideosrc ! \
+      videoconvert ! videoscale add-borders=true ! videorate ! \
+      video/x-raw,width=\(frameWidth),height=\(frameHeight),framerate=\(framerate)/1,format=I420 ! \
+      jpegenc quality=\(jpegQuality) ! \
+      appsink name=sink max-buffers=2 drop=true
+      """
+
+    // macOS AVFoundation pipeline
+    let macPipeline = """
+      avfvideosrc device-index=0 ! \
+      videoconvert ! videoscale method=lanczos ! aspectratiocrop aspect-ratio=16/9 ! videorate ! \
+      video/x-raw,width=\(frameWidth),height=\(frameHeight),framerate=\(framerate)/1,format=I420 ! \
+      jpegenc quality=\(jpegQuality) ! \
+      appsink name=sink max-buffers=2 drop=true
+      """
+
+    func hasFactory(_ name: String) -> Bool {
+      do {
+        try GStreamer.initialize()
+        _ = try Element.make(factory: name)
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    // Prefer Linux pipelines first, then macOS, then auto.
+    let candidates: [(name: String, desc: String, requires: [String])] = [
+      ("hardware", hwPipeline, ["v4l2src", "nvvidconv", "nvjpegenc"]),
+      ("software", swPipeline, ["v4l2src", "jpegenc"]),
+      ("macOS", macPipeline, ["avfvideosrc", "jpegenc"]),
+      ("auto", autoPipeline, ["autovideosrc", "jpegenc"])
+    ]
+
+    let available = candidates.filter { candidate in
+      candidate.requires.allSatisfy(hasFactory)
+    }
+    let pipelines = (available.isEmpty ? candidates : available).map { ($0.name, $0.desc) }
+
+    for (name, desc) in pipelines {
       do {
         let p = try Pipeline(desc)
         let sink = try p.appSink(named: "sink")
@@ -200,7 +241,7 @@ struct WebcamServer {
 
     // Determine static file paths
     let containerPath = "/app"
-    let cwdPath = FileManager.default.currentDirectoryPath + "/.."
+    let cwdPath = FileManager.default.currentDirectoryPath
     let staticRoot: String
     if FileManager.default.fileExists(atPath: containerPath + "/index.html") {
       staticRoot = containerPath

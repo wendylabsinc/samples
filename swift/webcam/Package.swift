@@ -16,12 +16,13 @@ let package = Package(
   ],
   targets: [
     .executableTarget(
-      name: "webcam-server",
+      name: "WebcamServer",
       dependencies: [
         .product(name: "Hummingbird", package: "hummingbird"),
         .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
         .product(name: "GStreamer", package: "gstreamer-swift"),
       ],
+      path: "Server/Sources/WebcamServer",
       swiftSettings: [
         .unsafeFlags(["-parse-as-library"])
       ]
