@@ -38,6 +38,8 @@ RUN apt-get update && apt-get install -y \
     libdrm2 \
     libinput10 \
     libxkbcommon0 \
+    # Mesa DRI drivers (required for EGL/GPU rendering)
+    libgl1-mesa-dri \
     # Fonts
     fonts-dejavu-core \
     # D-Bus (required for GTK)
@@ -46,7 +48,7 @@ RUN apt-get update && apt-get install -y \
 
 # Create a non-root user (cage refuses to run as root)
 # Add to video group for DRM access
-RUN useradd -m -s /bin/bash -G video kioskuser
+RUN useradd -m -s /bin/bash -G video,render kioskuser
 
 WORKDIR /app
 
