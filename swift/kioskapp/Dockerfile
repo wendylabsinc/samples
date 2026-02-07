@@ -9,13 +9,17 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY Package.swift ./
+
+# Resolve dependencies first (cached unless Package.swift changes)
+RUN swift package resolve
+
 COPY Sources/ ./Sources/
 
-# Build the application in release mode
+# Build the application
 RUN swift build
 
 # Stage 2: Runtime with Cage compositor
-FROM ubuntu:24.04
+FROM ubuntu:22.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -40,24 +44,17 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Copy Swift runtime libraries from builder
+COPY --from=builder /usr/lib/swift/linux /usr/lib/swift/linux
+ENV LD_LIBRARY_PATH=/usr/lib/swift/linux
+
 # Copy the built binary from builder stage
 COPY --from=builder /app/.build/debug/KioskApp ./app
 
 # Environment variables for Wayland/GTK
-ENV XDG_RUNTIME_DIR=/tmp/runtime-appuser
+ENV XDG_RUNTIME_DIR=/tmp/runtime-dir
 ENV GDK_BACKEND=wayland
 ENV GTK_THEME=Adwaita
 
-# Create runtime directory and set permissions
-RUN mkdir -p /tmp/runtime-appuser && \
-    chmod 700 /tmp/runtime-appuser
-
-RUN mkdir -p /tmp/runtime-appuser
-RUN chmod 700 /tmp/runtime-appuser
-
-USER root
-
 # Run GTK app inside Cage kiosk compositor
-# Use -- to separate cage options from the application
-# Create runtime directory at container start (in case /tmp is ephemeral)
-CMD ["/bin/sh", "-c", "export XDG_RUNTIME_DIR=/tmp/runtime-appuser WLR_BACKENDS=drm WLR_LIBINPUT_NO_DEVICES=0; LIBSEAT_BACKEND=builtin cage -s -- /app/app"]
+CMD ["/bin/sh", "-c", "mkdir -p $XDG_RUNTIME_DIR && chmod 700 $XDG_RUNTIME_DIR && LIBSEAT_BACKEND=builtin WLR_BACKENDS=drm cage -s -- /app/app"]
