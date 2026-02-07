@@ -1,0 +1,306 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YOLOv8 Object Detection</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  </head>
+  <body class="bg-gray-100 min-h-screen p-8">
+    <div class="max-w-5xl mx-auto">
+      <img src="/logo.svg" alt="Wendy Logo" class="h-10 mb-4" />
+      <h1 class="text-3xl font-bold text-gray-800 mb-1">YOLOv8 Object Detection</h1>
+      <p class="mb-2">
+        <span class="inline-flex items-center gap-1.5 text-sm font-medium">
+          <span id="status-dot" class="w-2 h-2 rounded-full bg-yellow-500"></span>
+          <span id="status-text" class="text-yellow-600">Connecting...</span>
+        </span>
+      </p>
+      <p class="text-gray-600 mb-6">Real-time object detection powered by YOLOv8</p>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="lg:col-span-2">
+          <div class="bg-black rounded-lg shadow overflow-hidden relative">
+            <canvas
+              id="video-frame"
+              class="bg-gray-900 w-full h-auto"
+              style="display: block;"
+              aria-label="Video stream with object detections"
+            ></canvas>
+            <div
+              id="loading-overlay"
+              class="absolute inset-0 flex items-center justify-center bg-gray-900"
+            >
+              <div class="text-center">
+                <svg
+                  class="animate-spin h-10 w-10 text-blue-500 mx-auto mb-3"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    class="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  ></circle>
+                  <path
+                    class="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  ></path>
+                </svg>
+                <p class="text-gray-400">Connecting to camera...</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-4 flex items-center gap-6 text-sm text-gray-500">
+            <span><span class="font-medium">FPS:</span> <span id="fps">0</span></span>
+            <span><span class="font-medium">Resolution:</span> <span id="resolution">--</span></span>
+            <span><span class="font-medium">Detections:</span> <span id="detection-count">0</span></span>
+          </div>
+        </div>
+
+        <div class="lg:col-span-1">
+          <div class="bg-white rounded-lg shadow p-4">
+            <h2 class="text-lg font-semibold text-gray-800 mb-3">Detected Objects</h2>
+            <div id="detections-list" class="space-y-2 max-h-96 overflow-y-auto">
+              <p class="text-gray-400 text-sm">No objects detected</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const videoFrame = document.getElementById("video-frame");
+      const loadingOverlay = document.getElementById("loading-overlay");
+      const statusDot = document.getElementById("status-dot");
+      const statusText = document.getElementById("status-text");
+      const fpsDisplay = document.getElementById("fps");
+      const resolutionDisplay = document.getElementById("resolution");
+      const detectionCount = document.getElementById("detection-count");
+      const detectionsList = document.getElementById("detections-list");
+      const ctx = videoFrame.getContext("2d", { alpha: false, desynchronized: true });
+
+      let videoWs = null;
+      let detectWs = null;
+      let reconnectTimeout = null;
+      let frameCount = 0;
+      let lastFpsTime = performance.now();
+      let latestFrame = null;
+      let latestDetections = [];
+      let decoding = false;
+
+      // Color palette for different object classes
+      const colors = [
+        "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
+        "#F7DC6F", "#BB8FCE", "#85C1E2", "#F8B739", "#52B788"
+      ];
+
+      function getColorForClass(classId) {
+        return colors[classId % colors.length];
+      }
+
+      function setStatus(text, color) {
+        statusDot.className = `w-2 h-2 rounded-full bg-${color}-500`;
+        statusText.textContent = text;
+        statusText.className = `text-${color}-600`;
+      }
+
+      function updateFps() {
+        const now = performance.now();
+        const elapsed = now - lastFpsTime;
+        if (elapsed >= 1000) {
+          fpsDisplay.textContent = Math.round((frameCount * 1000) / elapsed);
+          frameCount = 0;
+          lastFpsTime = now;
+        }
+      }
+
+      function updateDetectionsList(detections) {
+        if (!detections || detections.length === 0) {
+          detectionsList.innerHTML = '<p class="text-gray-400 text-sm">No objects detected</p>';
+          return;
+        }
+
+        detectionsList.innerHTML = detections
+          .sort((a, b) => b.confidence - a.confidence)
+          .map((det, idx) => {
+            const color = getColorForClass(det.classId);
+            return `
+              <div class="flex items-center justify-between p-2 bg-gray-50 rounded border-l-4" style="border-color: ${color}">
+                <div>
+                  <span class="font-medium text-gray-800">${det.label}</span>
+                  <span class="text-xs text-gray-500 ml-2">${(det.confidence * 100).toFixed(1)}%</span>
+                </div>
+                <div class="w-3 h-3 rounded-full" style="background-color: ${color}"></div>
+              </div>
+            `;
+          })
+          .join("");
+      }
+
+      function drawDetections(detections) {
+        if (!detections || detections.length === 0) return;
+
+        const width = videoFrame.width;
+        const height = videoFrame.height;
+
+        ctx.lineWidth = 3;
+        ctx.font = "16px system-ui, -apple-system, sans-serif";
+        ctx.textBaseline = "top";
+
+        detections.forEach((det) => {
+          const color = getColorForClass(det.classId);
+          const x = det.bbox.x * width;
+          const y = det.bbox.y * height;
+          const w = det.bbox.width * width;
+          const h = det.bbox.height * height;
+
+          // Draw bounding box
+          ctx.strokeStyle = color;
+          ctx.strokeRect(x, y, w, h);
+
+          // Draw label background
+          const label = `${det.label} ${(det.confidence * 100).toFixed(0)}%`;
+          const textWidth = ctx.measureText(label).width;
+          const textHeight = 20;
+
+          ctx.fillStyle = color;
+          ctx.fillRect(x, y - textHeight - 4, textWidth + 8, textHeight + 4);
+
+          // Draw label text
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText(label, x + 4, y - textHeight);
+        });
+      }
+
+      function renderFrame(buffer) {
+        const blob = new Blob([buffer], { type: "image/jpeg" });
+
+        if ("createImageBitmap" in window) {
+          return createImageBitmap(blob).then((bitmap) => {
+            if (videoFrame.width !== bitmap.width || videoFrame.height !== bitmap.height) {
+              videoFrame.width = bitmap.width;
+              videoFrame.height = bitmap.height;
+              resolutionDisplay.textContent = `${bitmap.width}x${bitmap.height}`;
+            }
+
+            ctx.drawImage(bitmap, 0, 0, videoFrame.width, videoFrame.height);
+            drawDetections(latestDetections);
+            if (typeof bitmap.close === "function") bitmap.close();
+          });
+        }
+
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            if (videoFrame.width !== img.naturalWidth || videoFrame.height !== img.naturalHeight) {
+              videoFrame.width = img.naturalWidth;
+              videoFrame.height = img.naturalHeight;
+              resolutionDisplay.textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+            }
+            ctx.drawImage(img, 0, 0, videoFrame.width, videoFrame.height);
+            drawDetections(latestDetections);
+            URL.revokeObjectURL(img.src);
+            resolve();
+          };
+          img.onerror = reject;
+          img.src = URL.createObjectURL(blob);
+        });
+      }
+
+      function scheduleRender() {
+        if (decoding || !latestFrame) return;
+        const buffer = latestFrame;
+        latestFrame = null;
+        decoding = true;
+
+        renderFrame(buffer)
+          .catch(() => null)
+          .finally(() => {
+            decoding = false;
+            if (loadingOverlay.style.display !== "none") {
+              loadingOverlay.style.display = "none";
+            }
+            frameCount++;
+            updateFps();
+            scheduleRender();
+          });
+      }
+
+      function connectVideo() {
+        if (videoWs) videoWs.close();
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        videoWs = new WebSocket(`${protocol}//${window.location.host}/stream`);
+        videoWs.binaryType = "arraybuffer";
+
+        videoWs.onopen = () => {
+          setStatus("Connected", "green");
+          if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+          }
+        };
+
+        videoWs.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            latestFrame = event.data;
+            scheduleRender();
+          }
+        };
+
+        videoWs.onerror = () => setStatus("Error", "red");
+
+        videoWs.onclose = () => {
+          setStatus("Disconnected", "red");
+          loadingOverlay.style.display = "flex";
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              setStatus("Reconnecting...", "yellow");
+              connectVideo();
+              connectDetections();
+            }, 2000);
+          }
+        };
+      }
+
+      function connectDetections() {
+        if (detectWs) detectWs.close();
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        detectWs = new WebSocket(`${protocol}//${window.location.host}/detections`);
+
+        detectWs.onmessage = (event) => {
+          try {
+            const detectionFrame = JSON.parse(event.data);
+            latestDetections = detectionFrame.detections || [];
+            detectionCount.textContent = latestDetections.length;
+            updateDetectionsList(latestDetections);
+          } catch (e) {
+            console.error("Failed to parse detections:", e);
+          }
+        };
+
+        detectWs.onerror = () => console.error("Detection WebSocket error");
+        detectWs.onclose = () => {
+          if (!reconnectTimeout) {
+            setTimeout(connectDetections, 2000);
+          }
+        };
+      }
+
+      connectVideo();
+      connectDetections();
+      window.addEventListener("beforeunload", () => {
+        videoWs?.close();
+        detectWs?.close();
+      });
+    </script>
+  </body>
+</html>

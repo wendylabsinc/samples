@@ -1,0 +1,21 @@
+# Swift build artifacts
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+
+# YOLOv8 model files (auto-downloaded by build plugin)
+*.onnx
+*.pt
+*.engine
+*.trt
+
+# Build outputs
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Logs
+*.log

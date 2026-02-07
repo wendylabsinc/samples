@@ -1,0 +1,5 @@
+module CONNXRuntime {
+    header "/opt/homebrew/Cellar/onnxruntime/1.24.1/include/onnxruntime/onnxruntime_c_api.h"
+    link "onnxruntime"
+    export *
+}
