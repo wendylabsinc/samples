@@ -1,5 +1,5 @@
 # Stage 1: Build the Swift GTK application
-FROM swiftlang/swift:6.2-jammy AS builder
+FROM swift:6.2-jammy AS builder
 
 # Install GTK4 development dependencies
 RUN apt-get update && apt-get install -y \
