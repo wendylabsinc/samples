@@ -25,6 +25,8 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y \
     # Cage Wayland compositor
     cage \
+    # Seat management daemon
+    seatd \
     # GTK4 runtime
     libgtk-4-1 \
     # Wayland and graphics
@@ -43,7 +45,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user (cage refuses to run as root)
-RUN useradd -m -s /bin/bash kioskuser
+# Add to video group for DRM access
+RUN useradd -m -s /bin/bash -G video kioskuser
 
 WORKDIR /app
 
@@ -55,14 +58,13 @@ ENV LD_LIBRARY_PATH=/usr/lib/swift/linux
 COPY --from=builder /app/.build/debug/KioskApp ./app
 
 # Environment variables for Wayland/GTK
-ENV XDG_RUNTIME_DIR=/run/user/1000
 ENV GDK_BACKEND=wayland
 ENV GTK_THEME=Adwaita
 
-# Create runtime directory with correct ownership
-RUN mkdir -p /run/user/1000 && chown kioskuser:kioskuser /run/user/1000 && chmod 700 /run/user/1000
-
-USER kioskuser
-
-# Run GTK app inside Cage kiosk compositor
-CMD ["/bin/sh", "-c", "LIBSEAT_BACKEND=builtin WLR_BACKENDS=drm cage -s -- /app/app"]
+# Entrypoint: start seatd, then run cage as kioskuser
+CMD ["/bin/sh", "-c", "\
+    mkdir -p /run/user/1000 && chown kioskuser:kioskuser /run/user/1000 && chmod 700 /run/user/1000 && \
+    seatd -g video &\
+    sleep 0.5 && \
+    runuser -u kioskuser -- env XDG_RUNTIME_DIR=/run/user/1000 LIBSEAT_BACKEND=seatd WLR_BACKENDS=drm cage -s -- /app/app \
+"]
