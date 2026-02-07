@@ -48,7 +48,7 @@ RUN apt-get update && apt-get install -y \
 
 # Create a non-root user (cage refuses to run as root)
 # Add to video group for DRM access
-RUN useradd -m -s /bin/bash -G video,render kioskuser
+RUN groupadd -f render && useradd -m -s /bin/bash -G video,render kioskuser
 
 WORKDIR /app
 
