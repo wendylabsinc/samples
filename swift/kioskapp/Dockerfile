@@ -66,6 +66,7 @@ ENV GTK_THEME=Adwaita
 # Entrypoint: start seatd, then run cage as kioskuser
 CMD ["/bin/sh", "-c", "\
     mkdir -p /run/user/1000 && chown kioskuser:kioskuser /run/user/1000 && chmod 700 /run/user/1000 && \
+    chmod 666 /dev/dri/* && \
     seatd -g video &\
     sleep 0.5 && \
     runuser -u kioskuser -- env XDG_RUNTIME_DIR=/run/user/1000 LIBSEAT_BACKEND=seatd WLR_BACKENDS=drm cage -s -- /app/app \
