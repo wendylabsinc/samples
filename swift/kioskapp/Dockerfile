@@ -42,6 +42,9 @@ RUN apt-get update && apt-get install -y \
     dbus \
     && rm -rf /var/lib/apt/lists/*
 
+# Create a non-root user (cage refuses to run as root)
+RUN useradd -m -s /bin/bash kioskuser
+
 WORKDIR /app
 
 # Copy Swift runtime libraries from builder
@@ -52,9 +55,14 @@ ENV LD_LIBRARY_PATH=/usr/lib/swift/linux
 COPY --from=builder /app/.build/debug/KioskApp ./app
 
 # Environment variables for Wayland/GTK
-ENV XDG_RUNTIME_DIR=/tmp/runtime-dir
+ENV XDG_RUNTIME_DIR=/run/user/1000
 ENV GDK_BACKEND=wayland
 ENV GTK_THEME=Adwaita
 
+# Create runtime directory with correct ownership
+RUN mkdir -p /run/user/1000 && chown kioskuser:kioskuser /run/user/1000 && chmod 700 /run/user/1000
+
+USER kioskuser
+
 # Run GTK app inside Cage kiosk compositor
-CMD ["/bin/sh", "-c", "mkdir -p $XDG_RUNTIME_DIR && chmod 700 $XDG_RUNTIME_DIR && LIBSEAT_BACKEND=builtin WLR_BACKENDS=drm cage -s -- /app/app"]
+CMD ["/bin/sh", "-c", "LIBSEAT_BACKEND=builtin WLR_BACKENDS=drm cage -s -- /app/app"]
