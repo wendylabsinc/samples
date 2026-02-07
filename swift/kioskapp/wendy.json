@@ -1,0 +1,37 @@
+{
+  "appId" : "com.example.kioskapp",
+  "entitlements" : [
+    {
+      "type" : "audio"
+    },
+    {
+      "mode" : "bluez",
+      "type" : "bluetooth"
+    },
+    {
+      "mode" : "host",
+      "type" : "network"
+    },
+    {
+      "allowlist" : [
+
+      ],
+      "mode" : "all",
+      "type" : "video"
+    },
+    {
+      "name" : "app-com.example.kioskapp",
+      "path" : "\/mnt\/app",
+      "type" : "persist"
+    },
+    {
+      "name" : "wendy-shared",
+      "path" : "\/mnt\/shared",
+      "type" : "persist"
+    },
+    {
+      "type" : "gpu"
+    }
+  ],
+  "version" : "0.0.1"
+}
