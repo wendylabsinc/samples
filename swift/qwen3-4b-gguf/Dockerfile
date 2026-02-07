@@ -59,7 +59,7 @@ COPY server/Package.swift server/Package.resolved* ./
 COPY server/Sources ./Sources
 
 RUN swift package resolve
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM dustynv/tensorrt:8.6-r36.2.0
@@ -81,7 +81,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY --from=builder /opt/swift/usr/lib/swift /opt/swift/usr/lib/swift
-COPY --from=builder /repo/.build/release/qwen3-chat-server /usr/local/bin/qwen3-chat-server
+COPY --from=builder /repo/.build/debug/qwen3-chat-server /usr/local/bin/qwen3-chat-server
 COPY --from=builder /opt/llama.cpp/build/bin/llama-cli /opt/llama/llama-cli
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 

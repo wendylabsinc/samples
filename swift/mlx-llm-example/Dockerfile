@@ -14,7 +14,7 @@ WORKDIR /app
 COPY server/Package.swift server/Package.resolved* ./
 COPY server/Sources ./Sources
 
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM swift:6.2.3-noble-slim
@@ -22,7 +22,7 @@ FROM swift:6.2.3-noble-slim
 WORKDIR /app
 
 # Copy the built Swift binary
-COPY --from=swift-builder /app/.build/release/mlx-llm-server /usr/local/bin/mlx-llm-server
+COPY --from=swift-builder /app/.build/debug/mlx-llm-server /usr/local/bin/mlx-llm-server
 
 # Copy the built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

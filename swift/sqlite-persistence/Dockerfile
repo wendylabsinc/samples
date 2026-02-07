@@ -12,7 +12,7 @@ RUN swift package resolve
 
 COPY Sources ./Sources
 
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM swift:6.2.3-jammy-slim
@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/.build/release/SQLitePersistence /app/
+COPY --from=builder /app/.build/debug/SQLitePersistence /app/
 
 VOLUME ["/data"]
 

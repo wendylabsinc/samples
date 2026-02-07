@@ -33,7 +33,7 @@ struct WebAppServer {
         // Determine frontend dist path
         let envPath = ProcessInfo.processInfo.environment["FRONTEND_DIST"]
         let containerPath = "/app/frontend/dist"
-        let cwdPath = FileManager.default.currentDirectoryPath + "/../frontend/dist"
+        let cwdPath = FileManager.default.currentDirectoryPath + "/frontend/dist"
 
         let frontendDist: String
         if let env = envPath {
@@ -48,14 +48,15 @@ struct WebAppServer {
 
         let router = Router()
 
+        // Serve static files from frontend dist using FileMiddleware
+        router.middlewares.add(FileMiddleware(frontendDist, searchForIndexHtml: true))
+        router.middlewares.add(LogRequestsMiddleware(.info))
+
         // API route for random car
         router.get("/api/random-car") { _, _ in
             print("Random car request received")
             return randomCar()
         }
-
-        // Serve static files from frontend dist using FileMiddleware
-        router.add(middleware: FileMiddleware(frontendDist, searchForIndexHtml: true))
 
         // Bind to 0.0.0.0 to accept connections from all interfaces (required for container networking)
         let app = Application(

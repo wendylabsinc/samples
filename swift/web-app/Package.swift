@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "web-app-server",
+    name: "WebAppServer",
     platforms: [
         .macOS(.v14)
     ],
@@ -13,7 +13,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "web-app-server",
+            name: "WebAppServer",
             dependencies: [
                 .product(name: "Hummingbird", package: "hummingbird")
             ]

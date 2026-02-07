@@ -31,7 +31,7 @@ WORKDIR /repo
 COPY . .
 
 RUN swift package resolve
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM dustynv/tensorrt:8.6-r36.2.0
@@ -53,7 +53,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY --from=builder /opt/swift/usr/lib/swift /opt/swift/usr/lib/swift
-COPY --from=builder /repo/.build/release/tensorrt-llm-streaming /app/tensorrt-llm-streaming
+COPY --from=builder /repo/.build/debug/tensorrt-llm-streaming /app/tensorrt-llm-streaming
 
 ENV LD_LIBRARY_PATH="/opt/swift/usr/lib/swift/linux:/opt/swift/usr/lib/swift"
 

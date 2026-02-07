@@ -25,7 +25,7 @@ WORKDIR /app
 COPY server/Package.swift server/Package.resolved* ./
 COPY server/Sources ./Sources
 
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM swift:6.2.3-noble-slim
@@ -44,8 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy the built Swift binary and its resource bundle
-COPY --from=swift-builder /app/.build/release/audio-server /usr/local/bin/audio-server
-COPY --from=swift-builder /app/.build/release/audio-server_audio-server.resources /usr/local/bin/audio-server_audio-server.resources
+COPY --from=swift-builder /app/.build/debug/audio-server /usr/local/bin/audio-server
+COPY --from=swift-builder /app/.build/debug/audio-server_audio-server.resources /usr/local/bin/audio-server_audio-server.resources
 
 # Copy the built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

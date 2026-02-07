@@ -251,38 +251,13 @@ struct WebcamServer {
 
     logger.info("Serving static files from: \(staticRoot)")
 
-    let capturedStaticRoot = staticRoot
     let capturedWebcam = webcam
 
     let router = Router()
 
-    router.get("/") { _, _ in
-      let path = capturedStaticRoot + "/index.html"
-      guard let data = FileManager.default.contents(atPath: path),
-        let html = String(data: data, encoding: .utf8)
-      else {
-        return Response(status: .notFound, body: .init(byteBuffer: ByteBuffer(string: "Not found")))
-      }
-      return Response(
-        status: .ok,
-        headers: [.contentType: "text/html"],
-        body: .init(byteBuffer: ByteBuffer(string: html))
-      )
-    }
-
-    router.get("/logo.svg") { _, _ in
-      let path = capturedStaticRoot + "/logo.svg"
-      guard let data = FileManager.default.contents(atPath: path),
-        let svg = String(data: data, encoding: .utf8)
-      else {
-        return Response(status: .notFound, body: .init(byteBuffer: ByteBuffer(string: "Not found")))
-      }
-      return Response(
-        status: .ok,
-        headers: [.contentType: "image/svg+xml"],
-        body: .init(byteBuffer: ByteBuffer(string: svg))
-      )
-    }
+    // Serve static files with FileMiddleware
+    router.middlewares.add(FileMiddleware(staticRoot, searchForIndexHtml: true))
+    router.middlewares.add(LogRequestsMiddleware(.info))
 
     router.get("/status") { _, _ in
       await capturedWebcam.status

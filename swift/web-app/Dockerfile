@@ -11,10 +11,10 @@ RUN npm run build
 FROM swift:6.2.3-noble AS swift-builder
 
 WORKDIR /app
-COPY server/Package.swift server/Package.resolved* ./
-COPY server/Sources ./Sources
+COPY Package.swift Package.resolved* ./
+COPY Sources ./Sources
 
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM swift:6.2.3-noble-slim
@@ -22,7 +22,7 @@ FROM swift:6.2.3-noble-slim
 WORKDIR /app
 
 # Copy the built Swift binary
-COPY --from=swift-builder /app/.build/release/web-app-server /usr/local/bin/web-app-server
+COPY --from=swift-builder /app/.build/debug/WebAppServer /usr/local/bin/WebAppServer
 
 # Copy the built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
@@ -31,4 +31,4 @@ ENV FRONTEND_DIST=/app/frontend/dist
 
 EXPOSE 6002
 
-CMD ["web-app-server"]
+CMD ["WebAppServer"]

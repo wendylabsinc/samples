@@ -14,7 +14,7 @@ WORKDIR /app
 COPY server/Package.swift server/Package.resolved* ./
 COPY server/Sources ./Sources
 
-RUN swift build -c release
+RUN swift build
 
 # Runtime stage
 FROM swift:6.2.3-noble-slim
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy the built Swift binary
-COPY --from=swift-builder /app/.build/release/webcam-server /usr/local/bin/webcam-server
+COPY --from=swift-builder /app/.build/debug/webcam-server /usr/local/bin/webcam-server
 
 # Copy static files
 COPY index.html .
