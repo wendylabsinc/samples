@@ -1,0 +1,14 @@
+{
+    "appId": "sh.wendy.examples.mlx-qwen3-4b-4bit",
+    "version": "1.0.0",
+    "language": "python",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "gpu"
+        }
+    ]
+}

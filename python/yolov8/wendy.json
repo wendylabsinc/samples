@@ -1,6 +1,11 @@
 {
   "appId": "com.example.python-yolov8",
   "version": "0.0.1",
+  "local": {
+    "darwin-arm64": "cd server && python3 app.py",
+    "darwin-x86_64": "cd server && python3 app.py",
+    "linux-arm64-cuda": "cd server && python3 app.py"
+  },
   "entitlements": [
     {
       "type": "network",
