@@ -31,9 +31,9 @@ MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/models"))
 ENGINE_NAME = os.environ.get("YOLO_ENGINE", "")
 EXPORT_TRT = os.environ.get("YOLO_EXPORT_TRT", "0").lower() in ("1", "true", "yes")
-DEVICE = os.environ.get("YOLO_DEVICE", "0")
+DEVICE = os.environ.get("YOLO_DEVICE", "").strip()
 IMG_SIZE = int(os.environ.get("YOLO_IMGSZ", "640"))
-HALF = os.environ.get("YOLO_HALF", "1").lower() in ("1", "true", "yes")
+HALF = os.environ.get("YOLO_HALF", "0").lower() in ("1", "true", "yes")
 CONF = float(os.environ.get("YOLO_CONF", "0.5"))
 WARMUP_ITERS = int(os.environ.get("YOLO_WARMUP", "3"))
 DRAW_OVERLAY = os.environ.get("DRAW_OVERLAY", "1").lower() in ("1", "true", "yes")
@@ -41,13 +41,19 @@ JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "80"))
 TARGET_FPS = float(os.environ.get("TARGET_FPS", "15"))
 
 # Camera configuration
-USE_GSTREAMER = os.environ.get("USE_GSTREAMER", "1").lower() in ("1", "true", "yes")
+DEFAULT_USE_GSTREAMER = "1" if sys.platform.startswith("linux") else "0"
+USE_GSTREAMER = os.environ.get("USE_GSTREAMER", DEFAULT_USE_GSTREAMER).lower() in (
+    "1",
+    "true",
+    "yes",
+)
 CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "0"))
 CAMERA_WIDTH = int(os.environ.get("CAMERA_WIDTH", "1280"))
 CAMERA_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "720"))
 CAMERA_FPS = int(os.environ.get("CAMERA_FPS", "30"))
 CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "").lower()  # csi|v4l2|""
 CAMERA_PIPELINE = os.environ.get("CAMERA_GSTREAMER_PIPELINE", "")
+CAMERA_URL = os.environ.get("CAMERA_URL", "").strip()
 
 # Logging configuration
 LOG_SIZE = int(os.environ.get("YOLO_LOG_SIZE", "100"))
@@ -141,8 +147,65 @@ def _build_v4l2_pipeline() -> str:
     )
 
 
+def _device_arg() -> str | None:
+    return DEVICE or None
+
+
+def _is_gstreamer_available() -> bool:
+    try:
+        info = cv2.getBuildInformation()
+    except Exception:
+        return False
+
+    for line in info.splitlines():
+        if line.strip().startswith("GStreamer"):
+            return "YES" in line.upper()
+    return False
+
+
+def _configure_capture(cap: cv2.VideoCapture) -> None:
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+
+def _index_capture_backends() -> list[tuple[int, str]]:
+    backends: list[tuple[int, str]] = []
+
+    if sys.platform == "darwin":
+        backends.append((getattr(cv2, "CAP_AVFOUNDATION", cv2.CAP_ANY), "avfoundation"))
+    elif sys.platform.startswith("linux"):
+        backends.append((getattr(cv2, "CAP_V4L2", cv2.CAP_ANY), "v4l2"))
+    elif sys.platform.startswith("win"):
+        backends.append((getattr(cv2, "CAP_MSMF", cv2.CAP_ANY), "msmf"))
+        backends.append((getattr(cv2, "CAP_DSHOW", cv2.CAP_ANY), "dshow"))
+
+    backends.append((cv2.CAP_ANY, "any"))
+
+    deduped_backends: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for backend, label in backends:
+        if backend in seen:
+            continue
+        seen.add(backend)
+        deduped_backends.append((backend, label))
+
+    return deduped_backends
+
+
+GSTREAMER_AVAILABLE = _is_gstreamer_available()
+
+
 def _open_capture():
-    if USE_GSTREAMER:
+    if CAMERA_URL:
+        cap = cv2.VideoCapture(CAMERA_URL)
+        if cap.isOpened():
+            _configure_capture(cap)
+            return cap, f"url:{CAMERA_URL}"
+        cap.release()
+
+    if USE_GSTREAMER and GSTREAMER_AVAILABLE:
         pipelines = []
         if CAMERA_PIPELINE:
             pipelines = [CAMERA_PIPELINE]
@@ -156,17 +219,17 @@ def _open_capture():
         for pipeline in pipelines:
             cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened():
+                _configure_capture(cap)
                 return cap, f"gstreamer:{pipeline}"
             cap.release()
 
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if cap.isOpened():
-        return cap, f"opencv:/dev/video{CAMERA_INDEX}"
-    cap.release()
+    for backend, backend_label in _index_capture_backends():
+        cap = cv2.VideoCapture(CAMERA_INDEX, backend)
+        _configure_capture(cap)
+        if cap.isOpened():
+            return cap, f"opencv:index={CAMERA_INDEX},backend={backend_label}"
+        cap.release()
+
     return None, "none"
 
 
@@ -203,7 +266,7 @@ def _export_engine(model: YOLO, engine_path: Path) -> Path | None:
     try:
         export_result = model.export(
             format="engine",
-            device=DEVICE,
+            device=_device_arg(),
             imgsz=IMG_SIZE,
             half=HALF,
         )
@@ -273,7 +336,8 @@ if hasattr(model, "fuse"):
     except Exception:
         pass
 
-torch.backends.cudnn.benchmark = True
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 if hasattr(torch, "set_float32_matmul_precision"):
     torch.set_float32_matmul_precision("high")
 
@@ -286,7 +350,7 @@ def _warmup_model() -> None:
         for _ in range(WARMUP_ITERS):
             _ = model.predict(
                 source=dummy,
-                device=DEVICE,
+                device=_device_arg(),
                 imgsz=IMG_SIZE,
                 half=HALF,
                 conf=CONF,
@@ -351,7 +415,7 @@ def _inference_loop() -> None:
                 with torch.inference_mode():
                     results = model.predict(
                         source=frame,
-                        device=DEVICE,
+                        device=_device_arg(),
                         imgsz=IMG_SIZE,
                         half=HALF,
                         conf=CONF,

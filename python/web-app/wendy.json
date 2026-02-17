@@ -1,5 +1,32 @@
 {
   "appId": "com.example.python-web-app",
+  "version": "0.0.2",
   "entitlements": [],
-  "version": "0.0.2"
+  "defaultProfile": "local-dev",
+  "profiles": [
+    {
+      "id": "local-dev",
+      "when": {
+        "target": "local",
+        "os": "macos",
+        "arch": "arm64"
+      },
+      "run": {
+        "type": "host",
+        "command": "cd server && uv run --with-requirements requirements.txt app.py"
+      }
+    },
+    {
+      "id": "device-default",
+      "when": {
+        "target": "device"
+      },
+      "build": {
+        "type": "docker"
+      },
+      "run": {
+        "type": "container"
+      }
+    }
+  ]
 }

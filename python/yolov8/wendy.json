@@ -1,11 +1,7 @@
 {
   "appId": "com.example.python-yolov8",
   "version": "0.0.1",
-  "local": {
-    "darwin-arm64": "cd server && python3 app.py",
-    "darwin-x86_64": "cd server && python3 app.py",
-    "linux-arm64-cuda": "cd server && python3 app.py"
-  },
+  "defaultProfile": "local-dev-macos-arm64",
   "entitlements": [
     {
       "type": "network",
@@ -21,6 +17,56 @@
       "type": "persist",
       "name": "app-yolov8-models",
       "path": "/models"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "local-dev-macos-arm64",
+      "when": {
+        "target": "local",
+        "os": "macos",
+        "arch": "arm64"
+      },
+      "run": {
+        "type": "host",
+        "command": "cd server && MODELS_DIR=../models uv run --with-requirements requirements.txt app.py"
+      }
+    },
+    {
+      "id": "local-dev-macos-x86_64",
+      "when": {
+        "target": "local",
+        "os": "macos",
+        "arch": "x86_64"
+      },
+      "run": {
+        "type": "host",
+        "command": "cd server && MODELS_DIR=../models uv run --with-requirements requirements.txt app.py"
+      }
+    },
+    {
+      "id": "local-dev-linux-arm64",
+      "when": {
+        "target": "local",
+        "os": "linux",
+        "arch": "arm64"
+      },
+      "run": {
+        "type": "host",
+        "command": "cd server && MODELS_DIR=../models python3 app.py"
+      }
+    },
+    {
+      "id": "device-default",
+      "when": {
+        "target": "device"
+      },
+      "build": {
+        "type": "docker"
+      },
+      "run": {
+        "type": "container"
+      }
     }
   ]
 }
