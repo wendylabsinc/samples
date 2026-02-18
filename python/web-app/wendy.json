@@ -14,6 +14,29 @@
       "run": {
         "type": "host",
         "command": "cd server && uv run --with-requirements requirements.txt app.py"
+      },
+      "hooks": {
+        "preBuild": [
+          {
+            "name": "Show build context",
+            "command": "echo Building {{profile.id}} for {{target.platform}}"
+          }
+        ],
+        "postBuild": [],
+        "preRun": [
+          {
+            "name": "Show run context",
+            "command": "echo Running {{profile.id}} on {{target.kind}} {{device.host}}"
+          }
+        ],
+        "postRun": [],
+        "preStop": [
+          {
+            "name": "Best-effort cleanup",
+            "command": "echo Stopping {{profile.id}}",
+            "continueOnError": true
+          }
+        ]
       }
     },
     {
@@ -22,10 +45,41 @@
         "target": "device"
       },
       "build": {
-        "type": "docker"
+        "type": "docker",
+        "platform": "{{target.platform}}",
+        "buildArgs": {
+          "TARGET_PLATFORM": "{{target.platform}}",
+          "TARGET_KIND": "{{target.kind}}"
+        },
+        "env": {
+          "DOCKER_BUILDKIT": "1"
+        }
       },
       "run": {
         "type": "container"
+      },
+      "hooks": {
+        "preBuild": [
+          {
+            "name": "Show build context",
+            "command": "echo Building {{profile.id}} for {{target.platform}}"
+          }
+        ],
+        "postBuild": [],
+        "preRun": [
+          {
+            "name": "Show run context",
+            "command": "echo Running {{profile.id}} on {{target.kind}} {{device.host}}"
+          }
+        ],
+        "postRun": [],
+        "preStop": [
+          {
+            "name": "Best-effort cleanup",
+            "command": "echo Stopping {{profile.id}}",
+            "continueOnError": true
+          }
+        ]
       }
     }
   ]
