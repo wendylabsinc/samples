@@ -9,5 +9,80 @@
     {
       "type": "audio"
     }
+  ],
+  "defaultProfile": "local-dev",
+  "profiles": [
+    {
+      "id": "local-dev",
+      "when": {
+        "target": "local"
+      },
+      "run": {
+        "type": "host",
+        "command": "uv run --with-requirements requirements.txt app.py"
+      },
+      "hooks": {
+        "preBuild": [
+          {
+            "name": "Show build context",
+            "command": "echo Building {{profile.id}} for {{target.platform}}"
+          }
+        ],
+        "preRun": [
+          {
+            "name": "Show run context",
+            "command": "echo Running {{profile.id}} on {{target.kind}} {{device.host}}"
+          }
+        ],
+        "preStop": [
+          {
+            "name": "Best-effort cleanup",
+            "command": "echo Stopping {{profile.id}}",
+            "continueOnError": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "device-default",
+      "when": {
+        "target": "device"
+      },
+      "build": {
+        "type": "docker",
+        "platform": "{{target.platform}}",
+        "buildArgs": {
+          "TARGET_PLATFORM": "{{target.platform}}",
+          "TARGET_KIND": "{{target.kind}}"
+        },
+        "env": {
+          "DOCKER_BUILDKIT": "1"
+        }
+      },
+      "run": {
+        "type": "container"
+      },
+      "hooks": {
+        "preBuild": [
+          {
+            "name": "Show build context",
+            "command": "echo Building {{profile.id}} for {{target.platform}}"
+          }
+        ],
+        "preRun": [
+          {
+            "name": "Show run context",
+            "command": "echo Running {{profile.id}} on {{target.kind}} {{device.host}}"
+          }
+        ],
+        "preStop": [
+          {
+            "name": "Best-effort cleanup",
+            "command": "echo Stopping {{profile.id}}",
+            "continueOnError": true
+          }
+        ]
+      }
+    }
   ]
 }

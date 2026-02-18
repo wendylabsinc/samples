@@ -1,17 +1,92 @@
 {
-    "appId": "sh.wendy.examples.wendy-voice-ai-speaker",
-    "version": "1.0.0",
-    "language": "python",
-    "entitlements": [
-        {
-            "type": "network",
-            "mode": "host"
+  "appId": "sh.wendy.examples.wendy-voice-ai-speaker",
+  "version": "1.0.0",
+  "language": "python",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "audio"
+    },
+    {
+      "type": "gpu"
+    }
+  ],
+  "defaultProfile": "local-dev",
+  "profiles": [
+    {
+      "id": "local-dev",
+      "when": {
+        "target": "local"
+      },
+      "run": {
+        "type": "host",
+        "command": "uv run --with-requirements requirements.txt wendy_assistant.py"
+      },
+      "hooks": {
+        "preBuild": [
+          {
+            "name": "Show build context",
+            "command": "echo Building {{profile.id}} for {{target.platform}}"
+          }
+        ],
+        "preRun": [
+          {
+            "name": "Show run context",
+            "command": "echo Running {{profile.id}} on {{target.kind}} {{device.host}}"
+          }
+        ],
+        "preStop": [
+          {
+            "name": "Best-effort cleanup",
+            "command": "echo Stopping {{profile.id}}",
+            "continueOnError": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "device-default",
+      "when": {
+        "target": "device"
+      },
+      "build": {
+        "type": "docker",
+        "platform": "{{target.platform}}",
+        "buildArgs": {
+          "TARGET_PLATFORM": "{{target.platform}}",
+          "TARGET_KIND": "{{target.kind}}"
         },
-        {
-            "type": "audio"
-        },
-        {
-            "type": "gpu"
+        "env": {
+          "DOCKER_BUILDKIT": "1"
         }
-    ]
+      },
+      "run": {
+        "type": "container"
+      },
+      "hooks": {
+        "preBuild": [
+          {
+            "name": "Show build context",
+            "command": "echo Building {{profile.id}} for {{target.platform}}"
+          }
+        ],
+        "preRun": [
+          {
+            "name": "Show run context",
+            "command": "echo Running {{profile.id}} on {{target.kind}} {{device.host}}"
+          }
+        ],
+        "preStop": [
+          {
+            "name": "Best-effort cleanup",
+            "command": "echo Stopping {{profile.id}}",
+            "continueOnError": true
+          }
+        ]
+      }
+    }
+  ]
 }
