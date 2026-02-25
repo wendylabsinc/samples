@@ -20,9 +20,6 @@ import NIOCore
     internal import Foundation
 #endif
 
-// MetricsRegistry is defined in Metrics.swift (Mutex-based final class, not an actor).
-// The render() method is synchronous and lock-free from the caller's perspective.
-
 // MARK: - DetectorState
 
 /// Shared mutable state that the HTTP server reads from the detection pipeline.
@@ -163,7 +160,7 @@ func buildRouter(
     // Matches Python: {'status': 'healthy', 'timestamp': datetime.utcnow().isoformat()}
     // ------------------------------------------------------------------
     router.get("health") { _, _ -> Response in
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let timestamp = Date().ISO8601Format()
         let json = "{\"status\":\"healthy\",\"timestamp\":\"\(timestamp)\"}"
         var headers = HTTPFields()
         headers[.contentType] = "application/json"
@@ -182,8 +179,9 @@ func buildRouter(
     // flag tells the pipeline whether it is worth spending CPU time encoding
     // frames.
     //
-    // If no frame arrives within 1 second an empty boundary marker is sent to
-    // keep the TCP connection alive and prevent browser / proxy timeouts.
+    // Frames and 1-second keepalive ticks are merged into a single
+    // AsyncStream<[UInt8]?> so the writer loop is a plain `for await`
+    // without touching any non-Sendable iterators from multiple tasks.
     // ------------------------------------------------------------------
     router.get("stream") { _, _ -> Response in
         let (clientID, frameStream) = await state.connectMJPEGClient()
@@ -194,13 +192,38 @@ func buildRouter(
         headers[.cacheControl] = "no-cache, no-store, must-revalidate"
         headers[.pragma] = "no-cache"
 
+        // Merge the frame stream with a 1-second keepalive clock into a single
+        // AsyncStream<[UInt8]?> where Some([UInt8]) is a frame and nil is a tick.
+        // AsyncStream.Continuation is Sendable so both tasks may safely share it.
+        let (mergedStream, mergedContinuation) = AsyncStream<[UInt8]?>.makeStream()
+
+        // Frame forwarder: relays real JPEG frames and finishes the merged
+        // stream when the detection pipeline closes.
+        let forwarderTask = Task {
+            for await jpeg in frameStream {
+                mergedContinuation.yield(jpeg)
+            }
+            mergedContinuation.finish()
+        }
+
+        // Keepalive clock: yields nil every second so the writer can send an
+        // empty boundary marker when the pipeline is idle.
+        let tickerTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                mergedContinuation.yield(nil)
+            }
+        }
+
         // Build a streaming ResponseBody. Hummingbird calls the closure with a
         // ResponseBodyWriter and keeps the TCP connection open until the closure
         // returns or throws.
         let body = ResponseBody { [state] (writer: inout any ResponseBodyWriter) in
             defer {
-                // Schedule actor mutation; defer blocks are synchronous so a
-                // Task is required to call the async actor method.
+                // Cancel background tasks and update the actor. The defer block
+                // is synchronous, so Task{} is used for the async actor call.
+                forwarderTask.cancel()
+                tickerTask.cancel()
                 Task { await state.disconnectMJPEGClient(id: clientID) }
             }
 
@@ -210,40 +233,25 @@ func buildRouter(
                 try await writer.write(mjpegPart(jpeg: existing))
             }
 
-            // Relay subsequent frames as they arrive from the pipeline. When no
-            // frame arrives for 1 second send an empty boundary to keep the
-            // connection alive and avoid proxy / browser timeouts.
-            var iterator = frameStream.makeAsyncIterator()
-            while !Task.isCancelled {
-                // withTaskGroup lets us race the frame stream against a timeout.
-                let jpeg: [UInt8]? = try await withThrowingTaskGroup(
-                    of: [UInt8]?.self
-                ) { group in
-                    group.addTask {
-                        await iterator.next()
-                    }
-                    group.addTask {
-                        try await Task.sleep(for: .seconds(1))
-                        return nil  // timeout fires
-                    }
-                    // Take whichever completes first.
-                    let first = try await group.next()
-                    group.cancelAll()
-                    return first ?? nil
-                }
-
-                if let jpeg {
+            // Relay frames and keepalive ticks. The loop exits when the merged
+            // stream finishes (pipeline shutdown) or the task is cancelled
+            // (client disconnected / server shutting down).
+            for await element in mergedStream {
+                if Task.isCancelled { break }
+                if let jpeg = element {
+                    // Real detection frame - encode as a MJPEG part.
                     try await writer.write(mjpegPart(jpeg: jpeg))
                 } else {
-                    // Keepalive: send an empty boundary so the client knows
-                    // the server is still alive.
-                    var keepalive = ByteBuffer()
-                    keepalive.writeString("--frame\r\n\r\n")
-                    try await writer.write(keepalive)
+                    // Keepalive tick - send an empty boundary so browsers and
+                    // reverse proxies do not close the idle connection.
+                    var buf = ByteBuffer()
+                    buf.writeString("--frame\r\n\r\n")
+                    try await writer.write(buf)
                 }
             }
 
-            // Reached only on task cancellation or pipeline shutdown.
+            // Signal end-of-body (only reached on pipeline shutdown or
+            // task cancellation after the loop exits normally).
             try await writer.finish(nil)
         }
 

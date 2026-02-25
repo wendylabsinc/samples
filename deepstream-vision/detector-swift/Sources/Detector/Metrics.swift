@@ -64,9 +64,12 @@ private struct HistogramStorage: Sendable {
     mutating func observe(_ value: Double) {
         sum += value
         count += 1
+        // Increment only the first (smallest) bucket the value fits into.
+        // render() accumulates these into cumulative Prometheus buckets.
         for (i, bound) in bounds.enumerated() {
             if value <= bound {
                 counts[i] += 1
+                break
             }
         }
     }

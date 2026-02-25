@@ -138,8 +138,6 @@ private func runStreamDetectionLoop(
     let fps = fpsGauge(stream: stream.name)
     let framesProcessed = framesProcessedCounter(stream: stream.name)
     let inferenceLatency = inferenceLatencyHistogram(stream: stream.name)
-    let preprocessLatency = preprocessLatencyHistogram(stream: stream.name)
-    let postprocessLatency = postprocessLatencyHistogram(stream: stream.name)
     let totalLatency = totalLatencyHistogram(stream: stream.name)
 
     // Tracker state (mutated per frame).
@@ -162,7 +160,7 @@ private func runStreamDetectionLoop(
             let inferStart = ContinuousClock.now
             var detections = try await engine.detect(frame: frame)
             let inferEnd = ContinuousClock.now
-            inferenceLatency.observe(Double((inferEnd - inferStart).components.attoseconds) / 1e15)
+            inferenceLatency.observe(durationMs(inferEnd - inferStart))
 
             // --- Tracking ---
             detections = tracker.update(detections: detections)
@@ -183,7 +181,7 @@ private func runStreamDetectionLoop(
 
             // FPS: compute over a sliding 1-second window.
             let elapsed = (ContinuousClock.now - fpsWindowStart)
-            let elapsedSeconds = Double(elapsed.components.attoseconds) / 1e18
+            let elapsedSeconds = durationSeconds(elapsed)
             if elapsedSeconds >= 1.0 {
                 fps.set(Double(frameCount) / elapsedSeconds)
                 frameCount = 0
@@ -204,7 +202,7 @@ private func runStreamDetectionLoop(
 
             // --- Total latency ---
             let frameEnd = ContinuousClock.now
-            totalLatency.observe(Double((frameEnd - frameStart).components.attoseconds) / 1e15)
+            totalLatency.observe(durationMs(frameEnd - frameStart))
 
         } catch {
             logger.error("Detection error: \(error)")
@@ -212,4 +210,21 @@ private func runStreamDetectionLoop(
     }
 
     logger.warning("Detection loop ended for stream \(stream.name)")
+}
+
+// MARK: - Duration conversion helpers
+
+/// Converts a Duration to milliseconds, accounting for both the seconds
+/// and attoseconds components. `.components.attoseconds` only returns the
+/// fractional part — without adding the whole-seconds portion the result
+/// silently loses any duration >= 1 second.
+private func durationMs(_ d: Duration) -> Double {
+    let c = d.components
+    return Double(c.seconds) * 1000.0 + Double(c.attoseconds) / 1_000_000_000_000_000
+}
+
+/// Converts a Duration to seconds (Double).
+private func durationSeconds(_ d: Duration) -> Double {
+    let c = d.components
+    return Double(c.seconds) + Double(c.attoseconds) / 1_000_000_000_000_000_000
 }

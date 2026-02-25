@@ -36,12 +36,15 @@ WORKDIR /app
 # Copy the compiled binary
 COPY --from=builder /tmp/.build/release/Detector /app/
 
+# Copy Swift runtime libraries (the binary is dynamically linked)
+COPY --from=builder /root/.swiftly/toolchains/swift-6.2.3/usr/lib/swift/linux/*.so /usr/lib/swift/linux/
+
 # Copy model and config files
 COPY labels.txt /app/
 COPY streams.json /app/
 
 # TensorRT + CUDA libraries are mounted from the host via CDI
-ENV LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-7.1/lib:/usr/local/cuda-12.6/lib:/usr/lib/aarch64-linux-gnu
+ENV LD_LIBRARY_PATH=/usr/lib/swift/linux:/opt/nvidia/deepstream/deepstream-7.1/lib:/usr/local/cuda-12.6/lib:/usr/lib/aarch64-linux-gnu
 
 EXPOSE 9090
 
