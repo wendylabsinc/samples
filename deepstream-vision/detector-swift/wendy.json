@@ -1,0 +1,9 @@
+{
+    "appId": "sh.wendy.examples.deepstream-detector-swift",
+    "version": "1.0.0",
+    "language": "swift",
+    "entitlements": [
+        {"type": "gpu"},
+        {"type": "network", "mode": "host"}
+    ]
+}
