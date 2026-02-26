@@ -84,11 +84,15 @@ struct Detector: AsyncParsableCommand {
         // ---------------------------------------------------------------
 
         let httpTask = Task {
-            try await startHTTPServer(
-                state: detectorState,
-                metrics: metrics,
-                port: port
-            )
+            do {
+                try await startHTTPServer(
+                    state: detectorState,
+                    metrics: metrics,
+                    port: port
+                )
+            } catch {
+                logger.critical("HTTP server failed: \(error)")
+            }
         }
 
         logger.info("HTTP server starting on port \(port)")
@@ -144,6 +148,9 @@ private func runStreamDetectionLoop(
     // Tracker state (mutated per frame).
     var tracker = IOUTracker()
 
+    // Cache for per-class counter handles (avoids Mutex lock per class per frame).
+    var classCounterCache: [String: CounterMetric] = [:]
+
     // FPS calculation state.
     var frameCount: UInt64 = 0
     var fpsWindowStart = ContinuousClock.now
@@ -170,23 +177,31 @@ private func runStreamDetectionLoop(
             frameCount += 1
             framesProcessed.inc()
 
-            // Record per-class detection counts.
+            // Record per-class detection counts. Cache counter handles
+            // to avoid repeated Mutex lock + dictionary lookup per frame.
             var classCounts: [String: Int] = [:]
             for det in detections {
                 classCounts[det.label, default: 0] += 1
             }
             for (className, count) in classCounts {
-                detectionsTotalCounter(stream: stream.name, class_: className)
-                    .inc(by: Double(count))
+                let counter: CounterMetric
+                if let cached = classCounterCache[className] {
+                    counter = cached
+                } else {
+                    let handle = detectionsTotalCounter(stream: stream.name, class_: className)
+                    classCounterCache[className] = handle
+                    counter = handle
+                }
+                counter.inc(by: Double(count))
             }
 
             // FPS: compute over a sliding 1-second window.
-            let elapsed = (ContinuousClock.now - fpsWindowStart)
-            let elapsedSeconds = durationSeconds(elapsed)
+            let now = ContinuousClock.now
+            let elapsedSeconds = durationSeconds(now - fpsWindowStart)
             if elapsedSeconds >= 1.0 {
                 fps.set(Double(frameCount) / elapsedSeconds)
                 frameCount = 0
-                fpsWindowStart = ContinuousClock.now
+                fpsWindowStart = now
             }
 
             // --- Frame rendering (only if MJPEG clients connected) ---

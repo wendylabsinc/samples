@@ -188,69 +188,66 @@ func buildRouter(
 
         var headers = HTTPFields()
         headers[.contentType] = "multipart/x-mixed-replace; boundary=frame"
-        // Ask the client not to buffer; each part should render immediately.
         headers[.cacheControl] = "no-cache, no-store, must-revalidate"
 
-        // Merge the frame stream with a 1-second keepalive clock into a single
-        // AsyncStream<[UInt8]?> where Some([UInt8]) is a frame and nil is a tick.
-        // AsyncStream.Continuation is Sendable so both tasks may safely share it.
-        let (mergedStream, mergedContinuation) = AsyncStream<[UInt8]?>.makeStream()
-
-        // Frame forwarder: relays real JPEG frames and finishes the merged
-        // stream when the detection pipeline closes.
-        let forwarderTask = Task {
-            for await jpeg in frameStream {
-                mergedContinuation.yield(jpeg)
-            }
-            mergedContinuation.finish()
-        }
-
-        // Keepalive clock: yields nil every second so the writer can send an
-        // empty boundary marker when the pipeline is idle.
-        let tickerTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                mergedContinuation.yield(nil)
-            }
-        }
-
-        // Build a streaming ResponseBody. Hummingbird calls the closure with a
-        // ResponseBodyWriter and keeps the TCP connection open until the closure
-        // returns or throws.
-        let body = ResponseBody { [state] (writer: inout any ResponseBodyWriter) in
-            defer {
-                // Cancel background tasks and update the actor. The defer block
-                // is synchronous, so Task{} is used for the async actor call.
-                forwarderTask.cancel()
-                tickerTask.cancel()
-                Task { await state.disconnectMJPEGClient(id: clientID) }
-            }
-
-            // Send the most-recent frame immediately so the browser displays
-            // something without waiting for the next detection cycle.
-            if let existing = await state.getFrame() {
-                try await writer.write(mjpegPart(jpeg: existing))
-            }
-
-            // Relay frames and keepalive ticks. The loop exits when the merged
-            // stream finishes (pipeline shutdown) or the task is cancelled
-            // (client disconnected / server shutting down).
-            for await element in mergedStream {
-                if Task.isCancelled { break }
-                if let jpeg = element {
-                    // Real detection frame - encode as a MJPEG part.
-                    try await writer.write(mjpegPart(jpeg: jpeg))
-                } else {
-                    // Keepalive tick - send an empty boundary so browsers and
-                    // reverse proxies do not close the idle connection.
-                    var buf = ByteBuffer()
-                    buf.writeString("--frame\r\n\r\n")
-                    try await writer.write(buf)
+        // Build a streaming ResponseBody. All background tasks are created
+        // inside the body closure using withTaskGroup for structured
+        // concurrency — they are automatically cancelled when the closure
+        // exits (client disconnect / server shutdown).
+        let body = ResponseBody { [state] writer in
+            do {
+                // Send the most-recent frame immediately so the browser
+                // displays something without waiting for the next detection.
+                if let existing = await state.getFrame() {
+                    try await writer.write(mjpegPart(jpeg: existing))
                 }
+
+                // Merge frame stream + keepalive clock into a single
+                // AsyncStream so the writer loop is a plain `for await`.
+                let (mergedStream, mergedContinuation) = AsyncStream<[UInt8]?>.makeStream(
+                    bufferingPolicy: .bufferingNewest(3)
+                )
+
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    // Frame forwarder
+                    group.addTask {
+                        for await jpeg in frameStream {
+                            mergedContinuation.yield(jpeg)
+                        }
+                        mergedContinuation.finish()
+                    }
+
+                    // Keepalive clock
+                    group.addTask {
+                        while !Task.isCancelled {
+                            try? await Task.sleep(for: .seconds(1))
+                            mergedContinuation.yield(nil)
+                        }
+                    }
+
+                    // Writer loop runs in the parent task (writer is inout
+                    // and cannot be captured by a child task).
+                    for await element in mergedStream {
+                        if Task.isCancelled { break }
+                        if let jpeg = element {
+                            try await writer.write(mjpegPart(jpeg: jpeg))
+                        } else {
+                            var buf = ByteBuffer()
+                            buf.writeString("--frame\r\n\r\n")
+                            try await writer.write(buf)
+                        }
+                    }
+
+                    // Writer finished (stream closed or client disconnected).
+                    // Cancel the forwarder + ticker.
+                    group.cancelAll()
+                }
+            } catch {
+                // Write error (client disconnected) — fall through to cleanup.
             }
 
-            // Signal end-of-body (only reached on pipeline shutdown or
-            // task cancellation after the loop exits normally).
+            // Directly await the actor disconnect — no fire-and-forget Task.
+            await state.disconnectMJPEGClient(id: clientID)
             try await writer.finish(nil)
         }
 

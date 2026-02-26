@@ -236,6 +236,16 @@ struct KalmanFilter2D: Sendable {
                 newP[row * 8 + col] = val
             }
         }
+
+        // Symmetrise P = (P + P^T) / 2 to prevent numerical drift from
+        // accumulating across many predict/update cycles.
+        for row in 0..<8 {
+            for col in (row + 1)..<8 {
+                let avg = (newP[row * 8 + col] + newP[col * 8 + row]) * 0.5
+                newP[row * 8 + col] = avg
+                newP[col * 8 + row] = avg
+            }
+        }
         p = newP
     }
 

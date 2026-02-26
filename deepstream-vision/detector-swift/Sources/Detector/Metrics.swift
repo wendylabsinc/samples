@@ -94,39 +94,39 @@ private struct MetricDescriptor: Sendable {
 // MARK: - Public metric handles
 
 /// A thread-safe handle to a single gauge time series.
-public struct GaugeMetric: Sendable {
+struct GaugeMetric: Sendable {
     fileprivate let key: MetricKey
     fileprivate let registry: MetricsRegistry
 
-    public func set(_ value: Double) {
+    func set(_ value: Double) {
         registry.setGauge(key: key, value: value)
     }
 
-    public func get() -> Double {
+    func get() -> Double {
         registry.getGauge(key: key)
     }
 }
 
 /// A thread-safe handle to a single counter time series.
-public struct CounterMetric: Sendable {
+struct CounterMetric: Sendable {
     fileprivate let key: MetricKey
     fileprivate let registry: MetricsRegistry
 
-    public func inc(by amount: Double = 1.0) {
+    func inc(by amount: Double = 1.0) {
         registry.incCounter(key: key, by: amount)
     }
 
-    public func value() -> Double {
+    func value() -> Double {
         registry.getCounter(key: key)
     }
 }
 
 /// A thread-safe handle to a single histogram time series.
-public struct HistogramMetric: Sendable {
+struct HistogramMetric: Sendable {
     fileprivate let key: MetricKey
     fileprivate let registry: MetricsRegistry
 
-    public func observe(_ value: Double) {
+    func observe(_ value: Double) {
         registry.observeHistogram(key: key, value: value)
     }
 }
@@ -150,10 +150,10 @@ private struct RegistryState: Sendable {
 /// All metric handles returned by this registry are safe to use from any
 /// concurrency domain. The registry uses a `Mutex` so that reads and writes
 /// are atomic without requiring actor hops.
-public final class MetricsRegistry: Sendable {
+final class MetricsRegistry: Sendable {
     private let state: Mutex<RegistryState>
 
-    public init() {
+    init() {
         state = Mutex(RegistryState())
     }
 
@@ -178,7 +178,7 @@ public final class MetricsRegistry: Sendable {
 
     /// Returns a `GaugeMetric` for the given name and labels.
     /// Registering the same name + labels combination twice returns the same logical series.
-    public func gauge(
+    func gauge(
         _ name: String,
         help: String = "",
         labels: [String: String] = [:]
@@ -194,7 +194,7 @@ public final class MetricsRegistry: Sendable {
     }
 
     /// Returns a `CounterMetric` for the given name and labels.
-    public func counter(
+    func counter(
         _ name: String,
         help: String = "",
         labels: [String: String] = [:]
@@ -211,7 +211,7 @@ public final class MetricsRegistry: Sendable {
 
     /// Returns a `HistogramMetric` for the given name and labels.
     /// - Parameter buckets: Upper bounds (exclusive of +Inf, which is always added).
-    public func histogram(
+    func histogram(
         _ name: String,
         help: String = "",
         labels: [String: String] = [:],
@@ -260,7 +260,7 @@ public final class MetricsRegistry: Sendable {
     /// Renders the full Prometheus text format.
     /// Designed to be cheap: one lock acquisition to snapshot state, then
     /// string building outside the lock.
-    public func render() -> String {
+    func render() -> String {
         // Snapshot everything under a single lock.
         let (order, descriptors, gauges, counters, histograms): (
             [String],
@@ -327,8 +327,12 @@ public final class MetricsRegistry: Sendable {
 
     /// Formats a Double for Prometheus output, using integer notation when the
     /// value is a whole number to keep output clean.
+    ///
+    /// Prometheus text format requires: NaN → "NaN", +Inf → "+Inf", -Inf → "-Inf".
     private func formatDouble(_ value: Double) -> String {
-        if value == value.rounded() && !value.isInfinite {
+        if value.isNaN { return "NaN" }
+        if value.isInfinite { return value > 0 ? "+Inf" : "-Inf" }
+        if value == value.rounded() {
             return String(Int64(value))
         }
         return String(value)

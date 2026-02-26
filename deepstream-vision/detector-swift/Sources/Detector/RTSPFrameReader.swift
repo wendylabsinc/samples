@@ -1,4 +1,5 @@
-import Foundation
+internal import Foundation
+import Dispatch
 import Logging
 
 // MARK: - Frame
@@ -61,6 +62,10 @@ actor RTSPFrameReader {
     private var isRunning = false
     private let logger: Logger
 
+    /// Dedicated serial queue for blocking pipe reads so they never stall
+    /// the Swift cooperative thread pool (which has limited threads).
+    private let readQueue = DispatchQueue(label: "rtsp-frame-reader.pipe-read")
+
     /// Byte count for one complete frame (RGB24 = 3 bytes per pixel).
     private var frameByteCount: Int { width * height * 3 }
 
@@ -122,11 +127,14 @@ actor RTSPFrameReader {
             let frameHeight = height
 
             // Reading from the pipe is a blocking call — run it on a
-            // cooperative thread pool thread so we do not stall the actor's
-            // executor (which would starve other tasks on the same thread).
-            let bytes = await Task.detached(priority: .userInitiated) {
-                handle.readData(ofLength: byteCount)
-            }.value
+            // dedicated dispatch queue (NOT the cooperative thread pool, which
+            // has limited threads and would deadlock under multiple streams).
+            let bytes = await withCheckedContinuation { continuation in
+                readQueue.async {
+                    let data = handle.readData(ofLength: byteCount)
+                    continuation.resume(returning: data)
+                }
+            }
 
             if bytes.count == byteCount {
                 return Frame(data: Array(bytes), width: frameWidth, height: frameHeight)

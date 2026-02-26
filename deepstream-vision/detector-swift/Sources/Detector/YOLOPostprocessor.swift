@@ -21,6 +21,15 @@
     internal import Foundation
 #endif
 
+// exp() lives in the platform C library, not FoundationEssentials.
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#elseif canImport(Musl)
+    import Musl
+#endif
+
 // MARK: - Detection
 
 /// A single object detection in model coordinate space (0–640).
@@ -75,7 +84,12 @@ struct YOLOPostprocessor: Sendable {
         // Load labels, tolerating a trailing newline (labels.txt has 81 lines
         // where line 81 is empty).
         let raw = (try? String(contentsOfFile: labelsPath, encoding: .utf8)) ?? ""
-        self.labels = raw.split(separator: "\n").map(String.init)
+        // Strip \r to handle Windows-style \r\n line endings in labels.txt.
+        self.labels = raw.split(separator: "\n").map { line in
+            var s = String(line)
+            while s.last == "\r" { s.removeLast() }
+            return s
+        }
     }
 
     // MARK: Processing
@@ -132,17 +146,21 @@ struct YOLOPostprocessor: Sendable {
             let h  = value(3, anchor)
 
             // Find argmax over the 80 class scores (rows 4–83).
-            // Inline the search to avoid allocating a slice.
-            var maxScore: Float = -Float.infinity
+            // The DeepStream-Yolo ONNX export outputs raw logits; we apply
+            // sigmoid only to the winning score (cheaper than 80 sigmoids).
+            var maxLogit: Float = -Float.infinity
             var maxClass: Int  = 0
 
             for cls in 0 ..< numClasses {
-                let score = value(4 &+ cls, anchor)
-                if score > maxScore {
-                    maxScore = score
+                let logit = value(4 &+ cls, anchor)
+                if logit > maxLogit {
+                    maxLogit = logit
                     maxClass = cls
                 }
             }
+
+            // Sigmoid: 1 / (1 + exp(-x))
+            let maxScore = 1.0 / (1.0 + exp(-maxLogit))
 
             guard maxScore >= confidenceThreshold else { continue }
 

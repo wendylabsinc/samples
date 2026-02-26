@@ -111,8 +111,10 @@ struct YOLOPreprocessor: Sendable {
                     let srcYf = (Float(canvasY - yOffset) + 0.5) * invScale - 0.5
 
                     // Bilinear interpolation corners, clamped to valid range.
-                    let x0 = max(0, Int(srcXf))
-                    let y0 = max(0, Int(srcYf))
+                    // Use floor() not Int() — Int() truncates toward zero,
+                    // which gives wrong fractional weights for negative coords.
+                    let x0 = max(0, Int(srcXf.rounded(.down)))
+                    let y0 = max(0, Int(srcYf.rounded(.down)))
                     let x1 = min(x0 + 1, width - 1)
                     let y1 = min(y0 + 1, height - 1)
 
