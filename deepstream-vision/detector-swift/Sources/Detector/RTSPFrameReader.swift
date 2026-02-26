@@ -269,7 +269,7 @@ struct FrameReader: Sendable {
                     // Reader was stopped cleanly — finish the stream.
                 } catch {
                     // Unexpected error — finish the stream so callers don't hang.
-                    var logger = Logger(label: "FrameReader")
+                    let logger = Logger(label: "FrameReader")
                     logger.error("Unhandled frame-reader error: \(error)")
                 }
                 continuation.finish()

@@ -50,7 +50,7 @@ enum TrackState: Sendable {
 
 /// Axis-aligned bounding box using top-left origin, mirroring Detection layout.
 /// Internal to this file only.
-private struct BBox: Sendable {
+struct BBox: Sendable {
     var x: Float
     var y: Float
     var width: Float

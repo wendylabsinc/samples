@@ -14,9 +14,9 @@ import ArgumentParser
 import Logging
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+    internal import FoundationEssentials
 #else
-    import Foundation
+    internal import Foundation
 #endif
 
 @main
@@ -97,6 +97,7 @@ struct Detector: AsyncParsableCommand {
         // 5. Run one detection loop per enabled stream
         // ---------------------------------------------------------------
 
+        let taskLogger = logger
         await withTaskGroup(of: Void.self) { group in
 
             for stream in enabledStreams {
@@ -105,7 +106,7 @@ struct Detector: AsyncParsableCommand {
                         stream: stream,
                         engine: engine,
                         state: detectorState,
-                        logger: logger
+                        logger: taskLogger
                     )
                 }
             }

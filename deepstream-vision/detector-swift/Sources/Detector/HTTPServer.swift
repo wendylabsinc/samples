@@ -190,7 +190,6 @@ func buildRouter(
         headers[.contentType] = "multipart/x-mixed-replace; boundary=frame"
         // Ask the client not to buffer; each part should render immediately.
         headers[.cacheControl] = "no-cache, no-store, must-revalidate"
-        headers[.pragma] = "no-cache"
 
         // Merge the frame stream with a 1-second keepalive clock into a single
         // AsyncStream<[UInt8]?> where Some([UInt8]) is a frame and nil is a tick.

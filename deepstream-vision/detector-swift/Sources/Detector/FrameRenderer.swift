@@ -330,10 +330,10 @@ struct JPEGEncoder: Sendable {
                 Int32(width),
                 0,              // pitch – 0 means tightly packed rows
                 Int32(height),
-                TJPF_RGB,
+                TJPF_RGB.rawValue,
                 &jpegBuf,
                 &jpegSize,
-                TJSAMP_420,
+                Int32(TJSAMP_420.rawValue),
                 Int32(quality),
                 0               // flags
             )
