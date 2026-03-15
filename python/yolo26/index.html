@@ -3,23 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Webcam Stream</title>
+    <title>YOLO26 Detection</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-    <style>
-      .overlay-gradient {
-        background: linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 100%);
-      }
-    </style>
   </head>
   <body class="h-full flex flex-col m-0 p-0 text-white font-sans overflow-hidden bg-black">
     <div class="fixed inset-0 z-0 flex items-center justify-center bg-black">
-      <video
-        id="video-stream"
-        class="max-w-full max-h-full w-full h-full object-contain"
-        autoplay
-        playsinline
-        muted
-      ></video>
+      <div id="video-container" class="relative max-w-full max-h-full w-full h-full flex items-center justify-center">
+        <video
+          id="video-stream"
+          class="max-w-full max-h-full w-full h-full object-contain"
+          autoplay
+          playsinline
+          muted
+        ></video>
+        <canvas id="detection-canvas" class="absolute top-0 left-0 w-full h-full pointer-events-none"></canvas>
+      </div>
     </div>
 
     <!-- UI Overlay -->
@@ -27,7 +25,7 @@
       <div class="flex justify-between items-start">
         <div class="pointer-events-auto">
           <img src="/logo.svg" alt="Wendy Logo" class="h-8 mb-2 drop-shadow-lg" />
-          <h1 class="text-xl font-bold drop-shadow-md">Webcam Stream</h1>
+          <h1 class="text-xl font-bold drop-shadow-md">YOLO26 Detection</h1>
           <div class="flex items-center gap-2 mt-1">
             <span id="status-dot" class="w-2 h-2 rounded-full bg-yellow-500 shadow-sm"></span>
             <span id="status-text" class="text-xs font-medium uppercase tracking-wider drop-shadow-md">Connecting...</span>
@@ -51,7 +49,8 @@
       <div class="flex items-end justify-between">
         <div class="pointer-events-auto bg-black/40 backdrop-blur-md p-3 rounded-lg border border-white/10 text-[10px] flex gap-4 uppercase tracking-widest text-white/70">
           <div><span class="font-bold text-white">FPS:</span> <span id="fps">0</span></div>
-          <div><span class="font-bold text-white">Status:</span> <span id="protocol-status">RTP/WebRTC</span></div>
+          <div><span class="font-bold text-white">Objects:</span> <span id="object-count">0</span></div>
+          <div><span class="font-bold text-white">Model:</span> YOLO26n</div>
         </div>
       </div>
     </div>
@@ -65,16 +64,19 @@
             <div class="absolute inset-0 border-4 border-blue-500/20 rounded-full"></div>
             <div class="absolute inset-0 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
         </div>
-        <p class="text-gray-400 font-medium tracking-wide">INITIALIZING STREAM</p>
+        <p class="text-gray-400 font-medium tracking-wide">LOADING YOLO26 MODEL</p>
       </div>
     </div>
 
     <script>
       const videoElement = document.getElementById("video-stream");
+      const canvas = document.getElementById("detection-canvas");
+      const ctx = canvas.getContext("2d");
       const loadingOverlay = document.getElementById("loading-overlay");
       const statusDot = document.getElementById("status-dot");
       const statusText = document.getElementById("status-text");
       const fpsDisplay = document.getElementById("fps");
+      const objectCount = document.getElementById("object-count");
       const fullscreenBtn = document.getElementById("fullscreen-btn");
       const cameraSelect = document.getElementById("camera-select");
 
@@ -82,11 +84,85 @@
       let pc = null;
       let frameCount = 0;
       let lastFpsTime = performance.now();
+      let latestDetections = [];
+
+      // Color palette for different classes
+      const classColors = {};
+      const palette = [
+        "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7",
+        "#DDA0DD", "#98D8C8", "#F7DC6F", "#BB8FCE", "#85C1E9",
+        "#F8C471", "#82E0AA", "#F1948A", "#85929E", "#AED6F1",
+      ];
+      let colorIdx = 0;
+
+      function getClassColor(cls) {
+        if (!classColors[cls]) {
+          classColors[cls] = palette[colorIdx % palette.length];
+          colorIdx++;
+        }
+        return classColors[cls];
+      }
 
       function setStatus(text, color) {
         statusDot.className = `w-2 h-2 rounded-full bg-${color}-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]`;
         statusText.textContent = text;
         statusText.className = `text-xs font-medium uppercase tracking-wider drop-shadow-md text-${color}-400`;
+      }
+
+      function drawDetections() {
+        // Match canvas size to its CSS layout size
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (!videoElement.videoWidth || latestDetections.length === 0) {
+          requestAnimationFrame(drawDetections);
+          return;
+        }
+
+        // Compute the video's rendered position within the canvas (object-contain)
+        const videoAspect = videoElement.videoWidth / videoElement.videoHeight;
+        const canvasAspect = canvas.width / canvas.height;
+        let renderW, renderH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          renderW = canvas.width;
+          renderH = canvas.width / videoAspect;
+          offsetX = 0;
+          offsetY = (canvas.height - renderH) / 2;
+        } else {
+          renderH = canvas.height;
+          renderW = canvas.height * videoAspect;
+          offsetX = (canvas.width - renderW) / 2;
+          offsetY = 0;
+        }
+
+        for (const det of latestDetections) {
+          const x = offsetX + det.x1 * renderW;
+          const y = offsetY + det.y1 * renderH;
+          const w = (det.x2 - det.x1) * renderW;
+          const h = (det.y2 - det.y1) * renderH;
+          const color = getClassColor(det.class);
+
+          // Box
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x, y, w, h);
+
+          // Label background
+          const label = `${det.class} ${Math.round(det.confidence * 100)}%`;
+          ctx.font = "bold 12px sans-serif";
+          const textW = ctx.measureText(label).width;
+          ctx.fillStyle = color;
+          ctx.fillRect(x, y - 20, textW + 8, 20);
+
+          // Label text
+          ctx.fillStyle = "#000";
+          ctx.fillText(label, x + 4, y - 6);
+        }
+
+        requestAnimationFrame(drawDetections);
       }
 
       function updateFps() {
@@ -165,6 +241,9 @@
             }
           } else if (msg.ice) {
             if (pc) await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
+          } else if (msg.detections !== undefined) {
+            latestDetections = msg.detections;
+            objectCount.textContent = msg.detections.length;
           }
         };
 
@@ -213,6 +292,7 @@
       loadCameras();
       connect();
       updateFps();
+      requestAnimationFrame(drawDetections);
     </script>
   </body>
 </html>

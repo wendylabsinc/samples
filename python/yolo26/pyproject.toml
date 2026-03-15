@@ -1,0 +1,13 @@
+[project]
+name = "yolo26"
+version = "1.0.0"
+description = "YOLO26 object detection with GStreamer WebRTC streaming"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "PyGObject",
+    "ultralytics",
+    "opencv-python-headless",
+    "numpy",
+]

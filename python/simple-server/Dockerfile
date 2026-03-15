@@ -4,6 +4,12 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 # Set working directory
 WORKDIR /app
 
+# Flush stdout/stderr immediately so logs appear in `wendy run` output.
+ENV PYTHONUNBUFFERED=1
+
+ARG WENDY_DEVICE_HOSTNAME=localhost
+ENV WENDY_DEVICE_HOSTNAME=${WENDY_DEVICE_HOSTNAME}
+
 # Install dependencies during build (baked into image)
 RUN uv pip install --system fastapi "uvicorn[standard]"
 

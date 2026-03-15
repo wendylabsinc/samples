@@ -16,32 +16,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     gstreamer1.0-nice \
+    libopencv-dev \
     v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first for better layer caching
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Copy application files
 COPY app.py .
 COPY index.html .
 COPY logo.svg .
 
-# Create a non-root user for security and fix permissions
+# Create a non-root user for security
 RUN useradd --create-home --shell /bin/bash app && \
     chown -R app:app /app && \
     chmod -R u+r /app && \
     usermod -aG video app
 USER app
 
-# Expose port 3003
-EXPOSE 3003
+# Pre-download the YOLO26n model
+RUN python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
 
-# Run the application with uvicorn
-CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3003"]
+EXPOSE 3008
+
+CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3008"]

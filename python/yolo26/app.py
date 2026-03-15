@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """
-Webcam streaming using GStreamer WebRTC.
-Supports macOS (avfvideosrc) and Linux (v4l2src) camera sources.
+YOLO26 object detection with GStreamer WebRTC video streaming.
+Video streams via WebRTC, detections sent as JSON overlay via WebSocket.
+Supports macOS (avfvideosrc) and Linux (v4l2src).
 """
 import asyncio
 import json
 import logging
 import platform
 import threading
+import time
 from pathlib import Path
+
+import cv2
+import numpy as np
+from ultralytics import YOLO
 
 import gi
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstWebRTC", "1.0")
 gi.require_version("GstSdp", "1.0")
+gi.require_version("GstApp", "1.0")
 
-from gi.repository import Gst, GstWebRTC, GstSdp, GLib
+from gi.repository import Gst, GstWebRTC, GstSdp, GLib, GstApp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -36,6 +43,7 @@ IS_MACOS = platform.system() == "Darwin"
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 FRAMERATE = 30
+DETECTION_INTERVAL = 0.1  # seconds between YOLO inferences
 
 
 def enumerate_cameras() -> list[dict]:
@@ -64,7 +72,6 @@ def enumerate_cameras() -> list[dict]:
 
 
 def build_source_element(device_id: str | None = None) -> str:
-    """Build a GStreamer source element string for the current platform."""
     if IS_MACOS:
         src = "avfvideosrc"
         if device_id is not None:
@@ -75,12 +82,79 @@ def build_source_element(device_id: str | None = None) -> str:
 
 
 def pick_h264_encoder() -> str:
-    """Pick the best available H.264 encoder."""
     if Gst.ElementFactory.find("nvv4l2h264enc"):
         return "nvv4l2h264enc"
     if IS_MACOS and Gst.ElementFactory.find("vtenc_h264"):
         return "vtenc_h264 bitrate=2000 realtime=true"
     return "x264enc tune=zerolatency bitrate=2000 speed-preset=ultrafast"
+
+
+class YOLODetector:
+    """Runs YOLO26 inference on frames pulled from a GStreamer appsink."""
+
+    def __init__(self):
+        logger.info("Loading YOLO26 model...")
+        self.model = YOLO("yolo26n.pt")
+        logger.info("YOLO26 model loaded")
+        self._latest_detections: list[dict] = []
+        self._lock = threading.Lock()
+        self._running = False
+        self._appsink = None
+        self._thread = None
+
+    @property
+    def detections(self) -> list[dict]:
+        with self._lock:
+            return self._latest_detections.copy()
+
+    def start(self, appsink):
+        self._appsink = appsink
+        self._running = True
+        self._thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def _inference_loop(self):
+        while self._running:
+            sample = self._appsink.try_pull_sample(Gst.SECOND)
+            if not sample:
+                continue
+
+            buf = sample.get_buffer()
+            caps = sample.get_caps()
+            struct = caps.get_structure(0)
+            w = struct.get_int("width").value
+            h = struct.get_int("height").value
+
+            ok, mapinfo = buf.map(Gst.MapFlags.READ)
+            if not ok:
+                continue
+
+            frame = np.frombuffer(mapinfo.data, dtype=np.uint8).reshape((h, w, 3))
+            buf.unmap(mapinfo)
+
+            results = self.model(frame, verbose=False)
+            detections = []
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    detections.append({
+                        "x1": x1 / w,
+                        "y1": y1 / h,
+                        "x2": x2 / w,
+                        "y2": y2 / h,
+                        "confidence": round(float(box.conf[0]), 2),
+                        "class": r.names[int(box.cls[0])],
+                    })
+
+            with self._lock:
+                self._latest_detections = detections
+
+            time.sleep(DETECTION_INTERVAL)
 
 
 class WebRTCPeer:
@@ -169,18 +243,28 @@ class GStreamerCamera:
         self._lock = threading.Lock()
         self._loop = None
         self._current_device: str | None = None
+        self.detector = YOLODetector()
 
     def _start_pipeline(self, device_id: str | None = None) -> Gst.Pipeline | None:
         src = build_source_element(device_id)
         caps = f"video/x-raw,width={FRAME_WIDTH},height={FRAME_HEIGHT},framerate={FRAMERATE}/1"
 
-        for p_str in [f"{src} ! {caps} ! videoconvert ! tee name=t",
-                      f"videotestsrc ! {caps} ! videoconvert ! tee name=t"]:
+        # Pipeline: source -> tee -> (WebRTC branches + appsink for YOLO)
+        for p_str in [
+            f"{src} ! {caps} ! videoconvert ! tee name=t "
+            f"t. ! queue ! videoconvert ! video/x-raw,format=BGR ! appsink name=yolo_sink emit-signals=false max-buffers=1 drop=true",
+            f"videotestsrc ! {caps} ! videoconvert ! tee name=t "
+            f"t. ! queue ! videoconvert ! video/x-raw,format=BGR ! appsink name=yolo_sink emit-signals=false max-buffers=1 drop=true",
+        ]:
             try:
                 pipeline = Gst.parse_launch(p_str)
                 if pipeline.set_state(Gst.State.PAUSED) != Gst.StateChangeReturn.FAILURE:
                     pipeline.set_state(Gst.State.PLAYING)
                     logger.info(f"Pipeline started: {p_str.split(' ! ')[0]}")
+
+                    appsink = pipeline.get_by_name("yolo_sink")
+                    self.detector.start(appsink)
+
                     return pipeline
                 pipeline.set_state(Gst.State.NULL)
             except Exception:
@@ -188,6 +272,7 @@ class GStreamerCamera:
         return None
 
     def _stop_pipeline(self):
+        self.detector.stop()
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline = None
@@ -251,6 +336,9 @@ async def websocket_stream(websocket: WebSocket):
         await websocket.close(code=1011)
         return
 
+    # Start sending detections periodically
+    detection_task = asyncio.create_task(_send_detections(websocket))
+
     try:
         while True:
             msg = json.loads(await websocket.receive_text())
@@ -269,7 +357,19 @@ async def websocket_stream(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
+        detection_task.cancel()
         camera.remove_peer(websocket)
+
+
+async def _send_detections(websocket: WebSocket):
+    """Periodically send YOLO detection results to the browser."""
+    try:
+        while True:
+            detections = camera.detector.detections
+            await websocket.send_json({"detections": detections})
+            await asyncio.sleep(DETECTION_INTERVAL)
+    except Exception:
+        pass
 
 
 @app.get("/")
@@ -285,4 +385,4 @@ async def logo():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=3003)
+    uvicorn.run(app, host="0.0.0.0", port=3008)
