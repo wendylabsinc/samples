@@ -1,3 +1,5 @@
 fastapi
 uvicorn[standard]
-mlx-lm
+transformers
+accelerate
+torch
