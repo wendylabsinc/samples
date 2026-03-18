@@ -5,5 +5,9 @@
     "entitlements": [
         {"type": "gpu"},
         {"type": "network", "mode": "host"}
-    ]
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 9091 },
+        "timeoutSeconds": 60
+    }
 }

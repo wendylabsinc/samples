@@ -1,13 +1,22 @@
 {
-  "appId": "sh.wendy.examples.qwen3-chat",
-  "entitlements": [
-    {
-      "type": "network",
-      "mode": "host"
+    "appId": "sh.wendy.examples.qwen3-chat",
+    "version": "0.1.0",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "gpu"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 6002 },
+        "timeoutSeconds": 30
     },
-    {
-      "type": "gpu"
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:6002"
+        }
     }
-  ],
-  "version": "0.1.0"
 }

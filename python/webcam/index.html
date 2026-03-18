@@ -5,21 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Webcam Stream</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-    <style>
-      .overlay-gradient {
-        background: linear-gradient(to bottom, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 100%);
-      }
-    </style>
   </head>
   <body class="h-full flex flex-col m-0 p-0 text-white font-sans overflow-hidden bg-black">
     <div class="fixed inset-0 z-0 flex items-center justify-center bg-black">
-      <video
+      <img
         id="video-stream"
         class="max-w-full max-h-full w-full h-full object-contain"
-        autoplay
-        playsinline
-        muted
-      ></video>
+        alt=""
+      />
     </div>
 
     <!-- UI Overlay -->
@@ -51,7 +44,7 @@
       <div class="flex items-end justify-between">
         <div class="pointer-events-auto bg-black/40 backdrop-blur-md p-3 rounded-lg border border-white/10 text-[10px] flex gap-4 uppercase tracking-widest text-white/70">
           <div><span class="font-bold text-white">FPS:</span> <span id="fps">0</span></div>
-          <div><span class="font-bold text-white">Status:</span> <span id="protocol-status">RTP/WebRTC</span></div>
+          <div><span class="font-bold text-white">Mode:</span> <span id="protocol-status">MJPEG/WS</span></div>
         </div>
       </div>
     </div>
@@ -70,7 +63,7 @@
     </div>
 
     <script>
-      const videoElement = document.getElementById("video-stream");
+      const imgElement = document.getElementById("video-stream");
       const loadingOverlay = document.getElementById("loading-overlay");
       const statusDot = document.getElementById("status-dot");
       const statusText = document.getElementById("status-text");
@@ -79,41 +72,26 @@
       const cameraSelect = document.getElementById("camera-select");
 
       let ws = null;
-      let pc = null;
       let frameCount = 0;
       let lastFpsTime = performance.now();
+      let reconnectDelay = 2000;
+      let prevBlobUrl = null;
 
       function setStatus(text, color) {
-        statusDot.className = `w-2 h-2 rounded-full bg-${color}-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]`;
+        statusDot.className = `w-2 h-2 rounded-full bg-${color}-500`;
         statusText.textContent = text;
-        statusText.className = `text-xs font-medium uppercase tracking-wider drop-shadow-md text-${color}-400`;
       }
 
       function updateFps() {
-        if (videoElement.requestVideoFrameCallback) {
-            videoElement.requestVideoFrameCallback(() => {
-                frameCount++;
-                const now = performance.now();
-                const elapsed = now - lastFpsTime;
-                if (elapsed >= 1000) {
-                    fpsDisplay.textContent = Math.round((frameCount * 1000) / elapsed);
-                    frameCount = 0;
-                    lastFpsTime = now;
-                }
-                updateFps();
-            });
-        } else {
-            setTimeout(() => {
-                frameCount++;
-                const now = performance.now();
-                if (now - lastFpsTime >= 1000) {
-                    fpsDisplay.textContent = frameCount;
-                    frameCount = 0;
-                    lastFpsTime = now;
-                }
-                updateFps();
-            }, 33);
-        }
+        setInterval(() => {
+          const now = performance.now();
+          const elapsed = now - lastFpsTime;
+          if (elapsed >= 1000) {
+            fpsDisplay.textContent = Math.round((frameCount * 1000) / elapsed);
+            frameCount = 0;
+            lastFpsTime = now;
+          }
+        }, 1000);
       }
 
       async function loadCameras() {
@@ -149,22 +127,25 @@
 
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         ws = new WebSocket(`${protocol}//${window.location.host}/stream`);
+        ws.binaryType = "blob";
 
         ws.onopen = () => {
-          setStatus("Negotiating", "yellow");
+          setStatus("Connected", "yellow");
         };
 
-        ws.onmessage = async (event) => {
-          const msg = JSON.parse(event.data);
+        ws.onmessage = (event) => {
+          if (event.data instanceof Blob) {
+            // MJPEG frame received as binary blob
+            const url = URL.createObjectURL(event.data);
+            imgElement.src = url;
+            if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+            prevBlobUrl = url;
 
-          if (msg.sdp) {
-            if (msg.sdp.type === 'offer') {
-                await handleOffer(msg.sdp);
-            } else if (msg.sdp.type === 'answer') {
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-            }
-          } else if (msg.ice) {
-            if (pc) await pc.addIceCandidate(new RTCIceCandidate(msg.ice));
+            frameCount++;
+            loadingOverlay.classList.add("opacity-0");
+            loadingOverlay.classList.add("pointer-events-none");
+            setStatus("Live", "green");
+            reconnectDelay = 2000;
           }
         };
 
@@ -172,34 +153,9 @@
           setStatus("Disconnected", "red");
           loadingOverlay.classList.remove("opacity-0");
           loadingOverlay.classList.remove("pointer-events-none");
-          setTimeout(connect, 2000);
+          setTimeout(connect, reconnectDelay);
+          reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
         };
-      }
-
-      async function handleOffer(offer) {
-        if (pc) pc.close();
-
-        pc = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        pc.ontrack = (event) => {
-          videoElement.srcObject = event.streams[0];
-          loadingOverlay.classList.add("opacity-0");
-          loadingOverlay.classList.add("pointer-events-none");
-          setStatus("Live", "green");
-        };
-
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            ws.send(JSON.stringify({ ice: event.candidate }));
-          }
-        };
-
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ sdp: pc.localDescription }));
       }
 
       fullscreenBtn.onclick = () => {

@@ -1,13 +1,22 @@
 {
-  "appId": "com.example.swift-audio",
-  "version": "0.0.1",
-  "entitlements": [
-    {
-      "type": "network",
-      "mode": "host"
+    "appId": "com.example.swift-audio",
+    "version": "0.0.1",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "audio"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 3005 },
+        "timeoutSeconds": 30
     },
-    {
-      "type": "audio"
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:3005"
+        }
     }
-  ]
 }

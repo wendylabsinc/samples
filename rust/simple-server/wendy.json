@@ -1,5 +1,5 @@
 {
-    "appId": "com.example.node-web-app",
+    "appId": "com.example.rust-simple-server",
     "version": "0.0.1",
     "entitlements": [
         {
@@ -7,12 +7,12 @@
         }
     ],
     "readiness": {
-        "tcpSocket": { "port": 5002 },
+        "tcpSocket": { "port": 4001 },
         "timeoutSeconds": 30
     },
     "hooks": {
         "postStart": {
-            "cli": "open http://${WENDY_HOSTNAME}:5002"
+            "cli": "open http://${WENDY_HOSTNAME}:4001"
         }
     }
 }

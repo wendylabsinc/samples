@@ -13,5 +13,14 @@
         {
             "type": "gpu"
         }
-    ]
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 3003 },
+        "timeoutSeconds": 30
+    },
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:3003"
+        }
+    }
 }

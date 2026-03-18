@@ -1,16 +1,25 @@
 {
-  "appId": "com.example.pipecat-assistant",
-  "version": "0.0.1",
-  "entitlements": [
-    {
-      "type": "network",
-      "mode": "host"
+    "appId": "com.example.pipecat-assistant",
+    "version": "0.0.1",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "audio"
+        },
+        {
+            "type": "gpu"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 3005 },
+        "timeoutSeconds": 30
     },
-    {
-      "type": "audio"
-    },
-    {
-      "type": "gpu"
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:3005"
+        }
     }
-  ]
 }

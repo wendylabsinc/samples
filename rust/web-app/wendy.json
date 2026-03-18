@@ -1,5 +1,18 @@
 {
-  "appId": "com.example.rust-web-app",
-  "entitlements": [],
-  "version": "0.0.1"
+    "appId": "com.example.rust-web-app",
+    "version": "0.0.1",
+    "entitlements": [
+        {
+            "type": "network"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 4002 },
+        "timeoutSeconds": 30
+    },
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:4002"
+        }
+    }
 }

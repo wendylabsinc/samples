@@ -1,26 +1,35 @@
 {
-  "appId": "com.example.python-yolov8",
-  "version": "0.0.1",
-  "local": {
-    "darwin-arm64": "cd server && python3 app.py",
-    "darwin-x86_64": "cd server && python3 app.py",
-    "linux-arm64-cuda": "cd server && python3 app.py"
-  },
-  "entitlements": [
-    {
-      "type": "network",
-      "mode": "host"
+    "appId": "com.example.python-yolov8",
+    "version": "0.0.1",
+    "local": {
+        "darwin-arm64": "cd server && python3 app.py",
+        "darwin-x86_64": "cd server && python3 app.py",
+        "linux-arm64-cuda": "cd server && python3 app.py"
     },
-    {
-      "type": "gpu"
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "gpu"
+        },
+        {
+            "type": "video"
+        },
+        {
+            "type": "persist",
+            "name": "app-yolov8-models",
+            "path": "/models"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 3007 },
+        "timeoutSeconds": 30
     },
-    {
-      "type": "video"
-    },
-    {
-      "type": "persist",
-      "name": "app-yolov8-models",
-      "path": "/models"
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:3007"
+        }
     }
-  ]
 }
