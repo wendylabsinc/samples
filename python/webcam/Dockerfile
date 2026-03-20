@@ -1,6 +1,9 @@
 # Use NVIDIA L4T base for Jetson with GStreamer support
 FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
 
+# Flush stdout/stderr immediately so logs appear in `wendy run` output.
+ENV PYTHONUNBUFFERED=1
+
 # Install GStreamer and Python dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
