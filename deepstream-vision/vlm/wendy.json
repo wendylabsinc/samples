@@ -9,5 +9,10 @@
     "readiness": {
         "tcpSocket": { "port": 8090 },
         "timeoutSeconds": 60
+    },
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:8090"
+        }
     }
 }
