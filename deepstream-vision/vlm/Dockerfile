@@ -17,9 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pre-downloaded Qwen3-VL-2B model EARLY for better layer caching
-# Download once with: huggingface-cli download Qwen/Qwen3-VL-2B-Instruct --local-dir ./models/Qwen3-VL-2B-Instruct
-COPY models/Qwen3-VL-2B-Instruct /app/models/Qwen3-VL-2B-Instruct
+# Download Qwen3-VL-2B model at build time (public model, no token needed)
+# Placed early for better Docker layer caching (model changes rarely)
+RUN pip3 install --no-cache-dir huggingface-hub \
+    && python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-VL-2B-Instruct', local_dir='/app/models/Qwen3-VL-2B-Instruct')"
 
 # Upgrade pip
 RUN pip3 install --no-cache-dir --upgrade pip

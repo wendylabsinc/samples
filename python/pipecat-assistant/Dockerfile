@@ -29,8 +29,7 @@ RUN uv pip install --system -r requirements.txt
 COPY server/app.py ./
 COPY server/sounds ./sounds
 
-# Copy .env file (contains API keys)
-COPY server/.env ./
+# API keys (DEEPGRAM_API_KEY, XAI_API_KEY) are provided as runtime environment variables
 
 # Copy the built frontend
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
