@@ -72,7 +72,7 @@ processor = None
 model_loaded = False
 
 # Configuration
-MODEL_PATH = "/app/models/Qwen3-VL-2B-Instruct"
+MODEL_PATH = "Qwen/Qwen3-VL-2B-Instruct"
 MODEL_NAME = "Qwen3-VL-2B-Instruct"
 MAX_IMAGE_SIZE = 672  # Resize large images for faster processing
 
@@ -100,7 +100,7 @@ def load_model():
         processor = AutoProcessor.from_pretrained(
             MODEL_PATH,
             trust_remote_code=True,
-            local_files_only=True
+            local_files_only=False
         )
         logger.info("Processor loaded successfully")
 
@@ -130,7 +130,7 @@ def load_model():
             "trust_remote_code": True,
             "quantization_config": quantization_config,
             "device_map": 'cuda',
-            "local_files_only": True,
+            "local_files_only": False,
         }
         if attn_impl:
             model_kwargs["attn_implementation"] = attn_impl
