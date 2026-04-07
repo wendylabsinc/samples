@@ -10,7 +10,7 @@
   },
   "hooks": {
     "postStart": {
-      "cli": "open http://${WENDY_HOSTNAME}:3002"
+      "cli": "wendy utils open-browser http://${WENDY_HOSTNAME}:3002"
     }
   }
 }
