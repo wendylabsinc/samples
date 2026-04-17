@@ -1,0 +1,16 @@
+services:
+  wilder-voice-assistant:
+    build:
+      context: .
+      args:
+        L4T_TAG: ${L4T_TAG}
+    env_file:
+      - .env
+    network_mode: host
+    runtime: nvidia
+    restart: unless-stopped
+    environment:
+      XDG_CACHE_HOME: /app/.cache
+      HF_HOME: /app/.cache/huggingface
+    volumes:
+      - ./data/cache:/app/.cache

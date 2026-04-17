@@ -1,0 +1,39 @@
+[project]
+name = "wilder-voice-assistant"
+version = "0.1.0"
+description = "Jetson-friendly Pipecat voice assistant with local STT/TTS and Gemini 3.1 Flash-Lite."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ddgs>=9.13.0,<10",
+    "loguru>=0.7.3,<0.8",
+    "pipecat-ai[google,kokoro,runner,silero,webrtc,whisper]>=0.0.105,<0.1",
+    "python-dotenv>=1.2.2,<2",
+]
+
+[project.optional-dependencies]
+local-audio = [
+    "pyaudio>=0.2.14,<1",
+]
+
+[project.scripts]
+wilder-voice = "wilder_voice_assistant.bot:main"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.404,<2",
+    "ruff>=0.12.11,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wilder_voice_assistant"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

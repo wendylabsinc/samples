@@ -1,0 +1,38 @@
+{
+  "$schema": "https://wendy.sh/schemas/wendy.json",
+  "appId": "sh.wendy.apps.wilder-voice-assistant-jetson4",
+  "version": "0.1.0",
+  "platform": "wendyos",
+  "language": "python",
+  "entitlements": [
+    {
+      "type": "network",
+      "mode": "host"
+    },
+    {
+      "type": "gpu"
+    },
+    {
+      "type": "audio"
+    },
+    {
+      "type": "persist",
+      "name": "wilder-voice-cache",
+      "path": "/app/.cache"
+    }
+  ],
+  "readiness": {
+    "tcpSocket": {
+      "port": 7860
+    },
+    "timeoutSeconds": 180
+  },
+  "hooks": {
+    "postStart": {
+      "cli": "zsh -ic 'python3 scripts/localhost_tcp_forward.py --listen-host 127.0.0.1 --listen-port 17860 --target-host ${WENDY_HOSTNAME} --target-port 7860 & proxy_pid=$!; trap \"kill ${proxy_pid}\" EXIT INT TERM; sleep 1; wendy-dev utils open-browser http://localhost:17860/client/; wait ${proxy_pid}'"
+    }
+  },
+  "python": {
+    "sourceRoot": "src"
+  }
+}

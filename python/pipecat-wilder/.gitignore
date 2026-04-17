@@ -1,0 +1,13 @@
+.env
+.venv
+.python-version
+__pycache__/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.playwright-mcp/
+dist/
+build/
+*.pyc
+data/
