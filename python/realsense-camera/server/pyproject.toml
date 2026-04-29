@@ -1,0 +1,12 @@
+[project]
+name = "realsense-camera-server"
+version = "0.1.0"
+description = "MJPEG streaming server for Intel RealSense D415"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pyrealsense2",
+    "numpy",
+    "opencv-python-headless",
+]

@@ -10,4 +10,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: {
+      "/stream": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/config": "http://localhost:8000",
+      "/health": "http://localhost:8000",
+    },
+  },
 })

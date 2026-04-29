@@ -1,73 +1,59 @@
-# React + TypeScript + Vite
+# RealSense Camera Sample
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Live multi-stream viewer for an Intel RealSense **D415** depth camera.
 
-Currently, two official plugins are available:
+* `./server` — Python (uv, 3.14) server that owns the librealsense
+  pipeline and exposes one MJPEG endpoint per stream.
+* `./` (this directory) — Vite + React + Tailwind v4 + shadcn/ui frontend
+  that drops each MJPEG endpoint into a `<Card>` tile.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The D415 has two IR imagers (a left imager and a right imager) used for
+active-stereo depth. The four UI tiles map directly to the four streams
+the device exposes:
 
-## React Compiler
+| Tile             | RealSense stream                         |
+| ---------------- | ---------------------------------------- |
+| Color Stream     | `rs.stream.color` (BGR8)                 |
+| Left IR Stream   | `rs.stream.infrared` index `1` (Y8)      |
+| Right IR Stream  | `rs.stream.infrared` index `2` (Y8)      |
+| Depth Stream     | `rs.stream.depth` (Z16) → colorized      |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Quick start
 
-## Expanding the ESLint configuration
+In two terminals:
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+```bash
+# Terminal 1 — Python server (port 8000)
+cd server
+uv sync
+uv run python main.py
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# Terminal 2 — frontend (port 5454)
+npm install
+npm run dev -- --port 5454
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open <http://localhost:5454/>, pick resolution + FPS, hit **Start**.
+The Vite dev server proxies `/stream`, `/config`, and `/health` to the
+Python server, so the browser uses same-origin paths only.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Layout behaviour
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+* All four checkboxes on by default → 2 × 2 grid.
+* Two streams enabled → side-by-side.
+* Exactly one enabled → that stream goes fullscreen (no quadrant).
+* None enabled → empty-state hint.
+
+## Files of interest
+
+* `src/App.tsx` — UI, stream toggles, MJPEG `<img>` wiring.
+* `vite.config.ts` — proxy config.
+* `server/main.py` — librealsense pipeline + MJPEG endpoints.
+* `server/README.md` — server-specific docs and Python 3.14 caveat.
+
+## Hardware notes
+
+Targeted at the D415 specifically. Other RealSense devices that expose
+color + two IR + depth (D435, D435i, D455, …) should also work; if the
+camera exposes only a single IR imager, the right-IR tile simply will
+not receive frames.

@@ -27,19 +27,19 @@ import {
 } from "@/components/ui/command"
 import { cn } from "@/lib/utils"
 
-type StreamId = "color" | "ir1" | "ir2" | "depth"
+type StreamId = "color" | "ir-left" | "ir-right" | "depth"
 
 type StreamDef = {
   id: StreamId
   label: string
-  color: string
+  placeholder: string
 }
 
 const STREAMS: StreamDef[] = [
-  { id: "color", label: "Color Stream", color: "#3b82f6" },
-  { id: "ir1", label: "Infrared 1 Stream", color: "#a855f7" },
-  { id: "ir2", label: "Infrared 2 Stream", color: "#22c55e" },
-  { id: "depth", label: "Depth Stream", color: "#f97316" },
+  { id: "color", label: "Color Stream", placeholder: "#3b82f6" },
+  { id: "ir-left", label: "Left IR Stream", placeholder: "#a855f7" },
+  { id: "ir-right", label: "Right IR Stream", placeholder: "#22c55e" },
+  { id: "depth", label: "Depth Stream", placeholder: "#f97316" },
 ]
 
 const PRESETS = [
@@ -55,10 +55,11 @@ const FPS_OPTIONS = [5, 10, 15, 24, 30, 60, 120]
 function App() {
   const [enabled, setEnabled] = useState<Record<StreamId, boolean>>({
     color: true,
-    ir1: true,
-    ir2: true,
+    "ir-left": true,
+    "ir-right": true,
     depth: true,
   })
+  const [streamSession, setStreamSession] = useState(0)
   const [mode, setMode] = useState("live")
   const [resolution, setResolution] = useState("1280x720")
   const [preset, setPreset] = useState("default")
@@ -210,7 +211,21 @@ function App() {
 
         <div className="ml-auto">
           <Button
-            onClick={() => setStreaming((s) => !s)}
+            onClick={async () => {
+              if (!streaming) {
+                const [width, height] = resolution.split("x")
+                try {
+                  await fetch(
+                    `/config?width=${width}&height=${height}&fps=${fps}`,
+                    { method: "POST" }
+                  )
+                } catch {
+                  // server may not be running yet; the <img> will surface the error
+                }
+                setStreamSession((n) => n + 1)
+              }
+              setStreaming((s) => !s)
+            }}
             variant={streaming ? "secondary" : "default"}
           >
             <Play />
@@ -237,13 +252,25 @@ function App() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="flex-1 min-h-0 p-0">
-                  <div
-                    className={cn(
-                      "h-full w-full",
-                      isFullscreen ? "rounded-none" : ""
-                    )}
-                    style={{ backgroundColor: s.color }}
-                  />
+                  {streaming ? (
+                    <img
+                      key={`${s.id}-${streamSession}`}
+                      src={`/stream/${s.id}?t=${streamSession}`}
+                      alt={s.label}
+                      className={cn(
+                        "h-full w-full object-contain bg-black",
+                        isFullscreen ? "rounded-none" : ""
+                      )}
+                    />
+                  ) : (
+                    <div
+                      className={cn(
+                        "h-full w-full",
+                        isFullscreen ? "rounded-none" : ""
+                      )}
+                      style={{ backgroundColor: s.placeholder }}
+                    />
+                  )}
                 </CardContent>
               </Card>
             ))}
