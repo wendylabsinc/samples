@@ -30,23 +30,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     gstreamer1.0-nice \
+    gstreamer1.0-x \
     v4l-utils \
     ca-certificates \
+    curl \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # CSI/ribbon camera support: libcamera + libcamerasrc with the Raspberry Pi
-# (PiSP) pipeline, from the Raspberry Pi apt repo. Arch-guarded to arm64 and
-# failure-tolerant: a non-arm64 build (e.g. a dev laptop) or an unreachable repo
-# never breaks the image — the CSI slot just falls back to the synthetic source.
+# (PiSP) pipeline, from the Raspberry Pi apt repo. The repo is signed, so its
+# archive key must be trusted first (otherwise `apt-get update` rejects it as
+# unsigned and the install silently falls through to the synthetic path).
+#
+# Arch-guarded to arm64 and failure-tolerant: a non-arm64 build (e.g. a dev
+# laptop) or an unreachable repo never breaks the image — the CSI slot just
+# falls back to the synthetic source.
 RUN set -eux; \
     if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
-      echo "deb http://archive.raspberrypi.com/debian bookworm main" > /etc/apt/sources.list.d/raspi.list; \
-      ( apt-get update \
+      ( install -d /usr/share/keyrings \
+        && curl -fsSL https://archive.raspberrypi.org/debian/raspberrypi.gpg.key \
+             | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive.gpg \
+        && echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive.gpg] http://archive.raspberrypi.com/debian bookworm main" \
+             > /etc/apt/sources.list.d/raspi.list \
+        && apt-get update \
         && apt-get install -y --no-install-recommends \
-             libcamera0.5 libcamera-tools gstreamer1.0-libcamera \
+             libcamera-ipa libcamera-tools gstreamer1.0-libcamera \
         && rm -rf /var/lib/apt/lists/* ) \
-      || echo "WARN: libcamera install failed; CSI will fall back to synthetic"; \
+      || echo "WARN: libcamera setup failed; CSI will fall back to synthetic"; \
     else \
       echo "Non-arm64 build: skipping libcamera (synthetic CSI only)"; \
     fi

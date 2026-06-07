@@ -85,14 +85,17 @@ def list_v4l2_cameras() -> list[dict]:
 
 
 # ----------------------------------------------------------------------- libcamera
-_CAM_LINE = re.compile(r"^\s*\d+\s*:\s*'?([^'(]+?)'?\s*\((.+)\)\s*$")
+# libcamera's ``cam -l`` prints one line per camera. Older builds emit
+#   ``1: 'imx477' (<id>)`` and newer ones ``1: External camera 'imx477' (<id>)``;
+# this matches both — quoted model name, then the id in parentheses.
+_CAM_LINE = re.compile(r"^\s*\d+\s*:\s*.*?'([^']+)'\s*\((.+)\)\s*$")
 
 
 def list_csi_cameras() -> list[dict]:
-    """Parse ``cam --list-cameras`` (libcamera). Empty if the tool/HW is absent."""
+    """Parse ``cam -l`` (libcamera). Empty if the tool/HW is absent."""
     try:
         out = subprocess.run(
-            ["cam", "--list-cameras"],
+            ["cam", "-l"],
             capture_output=True, text=True, timeout=5,
         ).stdout
     except Exception as exc:
@@ -163,12 +166,15 @@ def assign_slots() -> dict[str, dict]:
         csi = {"kind": "csi", "label": "Ribbon Cam (CSI)", "name": "Ribbon Cam",
                "mode": "libcamera", "device": csi_override, "width": 1280, "height": 720,
                "synthetic": False}
-    elif csi_cams:
-        cam = csi_cams[0]
-        csi = {"kind": "csi", "label": "Ribbon Cam (CSI)", "name": cam["name"],
-               "mode": "libcamera", "device": cam["id"], "width": 1280, "height": 720,
-               "synthetic": False}
     else:
-        csi = _synthetic("csi")
+        # libcamera also enumerates UVC/USB cameras; the CSI slot wants the
+        # ribbon sensor, so skip anything whose id is a USB device.
+        cam = next((c for c in csi_cams if "usb" not in c["id"].lower()), None)
+        if cam:
+            csi = {"kind": "csi", "label": "Ribbon Cam (CSI)", "name": cam["name"],
+                   "mode": "libcamera", "device": cam["id"], "width": 1280, "height": 720,
+                   "synthetic": False}
+        else:
+            csi = _synthetic("csi")
 
     return {"usb": usb, "csi": csi}

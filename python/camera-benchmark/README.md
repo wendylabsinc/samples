@@ -25,7 +25,9 @@ browser ──WS──▶ FastAPI (server/app.py) ──▶ CameraManager (serve
 ```
 
 - **USB** cameras are captured with GStreamer `v4l2src`; the **CSI** ribbon camera
-  with `libcamerasrc` (the WendyOS Pi 5 ribbon-camera path).
+  with `libcamerasrc` (the WendyOS Pi 5 ribbon-camera path). USB webcams that emit
+  Motion-JPEG without embedded Huffman tables (common UVC behaviour) get the
+  standard tables spliced back in so browsers can decode the frames.
 - Each camera runs in its **own child process** so CPU/RSS can be attributed to it.
 - Frames are JPEG, streamed to the browser over a WebSocket with a small binary
   header carrying per-frame metadata (sequence, send timestamp).
@@ -75,18 +77,23 @@ docker run --rm -p 3010:3010 -e FORCE_SYNTHETIC=1 camera-benchmark
 | -------------------- | ---------------------------------------------------------------- |
 | `FORCE_SYNTHETIC=1`  | Force both slots to the synthetic `videotestsrc` source.         |
 | `CAMERA_USB_DEVICE`  | Pin the USB slot to a V4L2 device, e.g. `/dev/video0`.           |
-| `CAMERA_CSI_ID`      | Pin the CSI slot to a libcamera camera id (from `cam --list-cameras`). |
+| `CAMERA_CSI_ID`      | Pin the CSI slot to a libcamera camera id (from `cam -l`).        |
 
 ## Known limitations
 
-- **Ribbon/CSI support is new.** It relies on WendyOS agent
+- **Ribbon/CSI support is new and needs a recent WendyOS.** For the CSI slot to
+  work, the `camera` entitlement must expose inside the container **both** the
+  camera device nodes (`/dev/video*`, `/dev/media*`, `/dev/dma_heap/*`) **and**
+  the host's `/run/udev` — libcamera enumerates cameras via udev, so without
+  `/run/udev` `cam -l` finds nothing and the CSI slot falls back to synthetic.
+  This relies on WendyOS agent
   [#781](https://github.com/wendylabsinc/WendyOS/pull/781) (broadens the `camera`
-  entitlement for libcamera; open) and WendyOS-Builder
+  entitlement for libcamera) and WendyOS-Builder
   [#100](https://github.com/wendylabsinc/WendyOS-Builder/pull/100) (PiSP
   `libcamerasrc` on Pi 5; merged). On hardware where the CSI path isn't up yet,
   the CSI panel falls back to synthetic rather than failing.
-- In-container libcamera is installed from the Raspberry Pi apt repo and only on
-  `arm64` builds; if unavailable the CSI slot is synthetic.
+- In-container libcamera is installed from the (signed) Raspberry Pi apt repo and
+  only on `arm64` builds; if unavailable the CSI slot is synthetic.
 - **Power** is whole-board (not per-camera) and Raspberry-Pi-5-only; it needs
   `/dev/vcio` access and shows *unavailable* otherwise.
 - Image-quality metrics are computed in each capture process (sampled ~1 Hz), so

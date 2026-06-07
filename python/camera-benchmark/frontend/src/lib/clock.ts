@@ -29,6 +29,11 @@ export class ClockSync {
 
   /** Convert a server send timestamp to an end-to-end latency in ms. */
   latencyMs(sendTsMs: number): number {
-    return Date.now() - sendTsMs - this.offsetMs
+    // offsetMs is (server − client), so a frame stamped sendTsMs on the server
+    // was sent at client-clock time (sendTsMs − offsetMs); the latency is
+    // now − that, i.e. add the offset back. (Subtracting it — the original
+    // bug — yields latency − 2·offset, which goes negative when the server
+    // clock leads the browser's.)
+    return Date.now() - sendTsMs + this.offsetMs
   }
 }

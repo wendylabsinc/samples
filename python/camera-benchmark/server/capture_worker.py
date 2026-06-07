@@ -21,6 +21,8 @@ import logging
 import signal
 import time
 
+from .mjpeg import ensure_huffman_tables
+
 logger = logging.getLogger(__name__)
 
 JPEG_QUALITY = 70
@@ -52,22 +54,31 @@ def _candidate_pipelines(mode: str, device, width: int, height: int,
         src = f"libcamerasrc {cam}".strip()
         w = width or 1280
         h = height or 720
-        # CSI sensors emit raw Bayer/RGB → libcamera ISP → encode to JPEG.
+        # CSI sensors emit raw Bayer → libcamera ISP → NV12 → encode to JPEG.
+        # libcamerasrc needs an explicit pixel format to negotiate: an
+        # unconstrained `video/x-raw` cap fails with "invalid configuration"
+        # on the Pi 5 (PiSP) pipeline, so pin NV12 (a native ISP output).
         return [
-            f"{src} ! video/x-raw,width={w},height={h} ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}",
-            f"{src} ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}",
+            f"{src} ! video/x-raw,width={w},height={h},format=NV12 ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}",
+            f"{src} ! video/x-raw,format=NV12 ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}",
         ]
     # synthetic — no hardware, no libcamera required.
     w = width or 640
     h = height or 480
+    base = (
+        f"videotestsrc pattern={pattern} is-live=true "
+        f"! video/x-raw,width={w},height={h},framerate=30/1"
+    )
     overlay = (
         f'textoverlay text="{label}" valignment=top halignment=left '
         f'font-desc="Sans, 22" shaded-background=true'
     )
+    tail = f"videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}"
     return [
-        f"videotestsrc pattern={pattern} is-live=true "
-        f"! video/x-raw,width={w},height={h},framerate=30/1 "
-        f"! {overlay} ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}"
+        # Labelled test pattern (needs the pango/textoverlay plugin)…
+        f"{base} ! {overlay} ! {tail}",
+        # …and a plain fallback when textoverlay isn't installed.
+        f"{base} ! {tail}",
     ]
 
 
@@ -140,6 +151,10 @@ class _CaptureWorker:
             return Gst.FlowReturn.OK
         data = bytes(mi.data)
         buf.unmap(mi)
+        # USB webcams often emit MJPEG with no embedded Huffman tables, which
+        # browsers can't decode; splice the standard tables in when missing.
+        # No-op for jpegenc output (CSI/synthetic), which already has them.
+        data = ensure_huffman_tables(data)
 
         cap_mono_ns = time.monotonic_ns()
         self.seq += 1
