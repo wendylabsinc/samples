@@ -1,0 +1,26 @@
+{
+    "appId": "sh.wendy.examples.camera-benchmark",
+    "version": "1.0.0",
+    "language": "python",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "camera"
+        },
+        {
+            "type": "gpu"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 3010 },
+        "timeoutSeconds": 60
+    },
+    "hooks": {
+        "postStart": {
+            "cli": "wendy utils open-browser http://${WENDY_HOSTNAME}:3010"
+        }
+    }
+}
