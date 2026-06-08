@@ -50,7 +50,10 @@ def _candidate_pipelines(mode: str, device, width: int, height: int,
             f"{src} ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! {_APPSINK}",
         ]
     if mode == "libcamera":
-        cam = f"camera-name={device}" if device else ""
+        # libcamera camera ids contain spaces (e.g. "platform/...11-001a imx477"),
+        # so the value MUST be quoted or Gst.parse_launch reads the trailing token
+        # ("imx477") as a second element and fails with: no element "imx477".
+        cam = f'camera-name="{device}"' if device else ""
         src = f"libcamerasrc {cam}".strip()
         w = width or 1280
         h = height or 720
