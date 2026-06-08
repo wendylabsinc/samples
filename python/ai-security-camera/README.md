@@ -32,11 +32,51 @@ Everything runs locally on the device — no cloud, no vendor app.
 
 ## Wiring up the camera
 
-Most PoE IP cameras expect a DHCP server. If you plug the camera **directly** into
-the Jetson, give it an address — either run a DHCP server on the Jetson's wired
-interface, or set the camera to a static IP on the same subnet. The simplest path
-is to put both the Jetson and the camera behind the same PoE switch/router so the
-camera gets a normal DHCP lease, then point this app at its RTSP URL.
+This app reads **standard RTSP**, so it works with any ONVIF/RTSP camera. Two
+things to get right before it can connect: the camera needs **an IP address the
+Jetson can reach**, and its **RTSP server must be enabled**.
+
+### Give the camera an IP
+
+IP cameras expect a DHCP server to hand them an address. How you provide one
+depends on how you cable it:
+
+**Option A — Through a switch/router (easiest).** Put the camera and the Jetson
+on the same LAN (any cheap unmanaged or PoE switch). The camera gets a normal
+DHCP lease from your router; the Jetson reaches it. Done.
+
+**Option B — Camera plugged directly into the Jetson (static IPs).** With a
+direct cable there's no DHCP server, so neither end gets an address
+automatically. Assign static IPs on both ends of the same subnet:
+
+1. In the camera's settings, set a static IP, e.g. `192.168.50.10/24`.
+2. On the Jetson, give the wired interface a matching static IP, e.g.:
+   ```bash
+   sudo ip addr add 192.168.50.1/24 dev eth0   # use the Jetson's wired iface name
+   sudo ip link set eth0 up
+   ```
+3. Verify reachability: `ping 192.168.50.10`.
+
+Then point `cameras.json` at `rtsp://<user>:<pass>@192.168.50.10:554/...`. The app
+runs with `network: host`, so whatever the Jetson's wired interface can reach, the
+container can read.
+
+> A PoE camera still needs power. If you're going direct-cable with no PoE
+> injector, use a camera with a separate DC (e.g. 12V) input, or put a PoE
+> injector inline — the data still passes through to the Jetson.
+
+### Enable RTSP on the camera (one-time)
+
+Many cameras ship with RTSP **disabled** by default (some Reolink models, for
+example, only expose a proprietary port until you turn RTSP on). Enable it once in
+the camera's settings — typically *Network → Advanced → Server Settings → RTSP /
+ONVIF* — then confirm the stream from any machine on the LAN:
+
+```bash
+ffprobe -rtsp_transport tcp rtsp://<user>:<pass>@<camera-ip>:554/stream1
+```
+
+If `ffprobe` reports a video stream, this app will read it.
 
 Find the RTSP URL for your camera (examples in [`cameras.json`](./cameras.json)):
 
