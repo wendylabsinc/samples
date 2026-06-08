@@ -8,6 +8,7 @@ rather than raising — the benchmark must keep running.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -70,17 +71,48 @@ class ProcessSampler:
 # --------------------------------------------------------------------- power
 _CUR_RE = re.compile(r"(\w+?)_A\s+current\(\d+\)=([\d.]+)A")
 _VOLT_RE = re.compile(r"(\w+?)_V\s+volt\(\d+\)=([\d.]+)V")
+_VCIO = "/dev/vcio"
+
+
+def _unavailable(reason: str) -> dict:
+    return {"available": False, "power_w": None, "reason": reason}
+
+
+def _vcio_reason() -> str | None:
+    """``None`` if ``/dev/vcio`` can be opened, else a short reason why not.
+
+    The Pi 5 PMIC is read over the VideoCore mailbox (``/dev/vcio``). Inside a
+    WendyOS container the node is rbind-mounted from the host but the device
+    cgroup only allows the camera majors (81/253/509/195), so opening it as
+    char major 10 fails with EPERM — surface that specifically rather than the
+    misleading "Raspberry Pi 5 only".
+    """
+    if not os.path.exists(_VCIO):
+        return "no /dev/vcio (not a Raspberry Pi 5)"
+    try:
+        os.close(os.open(_VCIO, os.O_RDWR))
+        return None
+    except PermissionError:
+        return "no /dev/vcio access — camera entitlement must allow char major 10"
+    except OSError as exc:
+        return f"/dev/vcio open failed ({exc.strerror})"
 
 
 def read_board_power() -> dict:
     """Best-effort whole-board power (watts) via ``vcgencmd pmic_read_adc`` (Pi 5).
 
-    Sums V×I across matched PMIC rails. Returns ``{"available": False}`` when the
-    tool is missing (off-Pi) or output can't be parsed. This is board-level, not
-    per-camera, and requires ``/dev/vcio`` access inside the container.
+    Sums V×I across matched PMIC rails. Returns ``{"available": False, "reason":
+    ...}`` when unavailable, with ``reason`` naming the actual blocker (no
+    ``/dev/vcio`` access, ``vcgencmd`` missing, or PMIC ADC unsupported) so the
+    UI isn't misleading. Board-level, not per-camera.
     """
+    # Check mailbox access first: if /dev/vcio can't be opened, vcgencmd can only
+    # fail, so skip spawning it every sample and report the real reason.
+    vcio = _vcio_reason()
+    if vcio is not None:
+        return _unavailable(vcio)
     if shutil.which("vcgencmd") is None:
-        return {"available": False, "power_w": None}
+        return _unavailable("vcgencmd not installed")
     try:
         out = subprocess.run(
             ["vcgencmd", "pmic_read_adc"],
@@ -88,12 +120,12 @@ def read_board_power() -> dict:
         ).stdout
     except Exception as exc:
         logger.debug("vcgencmd failed: %s", exc)
-        return {"available": False, "power_w": None}
+        return _unavailable("vcgencmd pmic_read_adc failed")
 
     currents = {m.group(1): float(m.group(2)) for m in _CUR_RE.finditer(out)}
     volts = {m.group(1): float(m.group(2)) for m in _VOLT_RE.finditer(out)}
     rails = currents.keys() & volts.keys()
     if not rails:
-        return {"available": False, "power_w": None}
+        return _unavailable("PMIC ADC unavailable on this OS")
     power = sum(currents[r] * volts[r] for r in rails)
-    return {"available": True, "power_w": round(power, 2)}
+    return {"available": True, "power_w": round(power, 2), "reason": None}

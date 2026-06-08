@@ -83,7 +83,7 @@ class CameraManager:
     def __init__(self):
         self._ctx = mp.get_context("spawn")
         self.slots: dict[str, _Slot] = {}
-        self.board: dict = {"available": False, "power_w": None}
+        self.board: dict = {"available": False, "power_w": None, "reason": "initializing"}
         self._sampler_task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 

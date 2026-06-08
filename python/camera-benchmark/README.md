@@ -94,7 +94,13 @@ docker run --rm -p 3010:3010 -e FORCE_SYNTHETIC=1 camera-benchmark
   the CSI panel falls back to synthetic rather than failing.
 - In-container libcamera is installed from the (signed) Raspberry Pi apt repo and
   only on `arm64` builds; if unavailable the CSI slot is synthetic.
-- **Power** is whole-board (not per-camera) and Raspberry-Pi-5-only; it needs
-  `/dev/vcio` access and shows *unavailable* otherwise.
+- **Power** is whole-board (not per-camera) and Raspberry-Pi-5-only. It's read
+  from the PMIC via `vcgencmd pmic_read_adc`, which talks to the VideoCore
+  mailbox `/dev/vcio` (char major 10). The `camera`/`gpu` entitlement rbinds the
+  node but its device cgroup only allows the camera majors (81/253/509/195), so
+  opening `/dev/vcio` is denied and the panel shows *unavailable* with the
+  specific reason. Until the entitlement allows char major 10, power stays
+  unavailable; the tool (`raspi-utils-core`) is bundled so it lights up
+  automatically once it does.
 - Image-quality metrics are computed in each capture process (sampled ~1 Hz), so
   they add a small, equal amount of CPU to both cameras.

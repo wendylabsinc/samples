@@ -42,6 +42,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # archive key must be trusted first (otherwise `apt-get update` rejects it as
 # unsigned and the install silently falls through to the synthetic path).
 #
+# Also pull raspi-utils-core (~300 KB) for `vcgencmd`, used for best-effort
+# whole-board power. NB: vcgencmd reads the PMIC over /dev/vcio (char major 10),
+# which the camera/gpu entitlement does not currently allow into the container —
+# until it does, power reads as unavailable with a specific reason (see
+# server/metrics.py); installing it here means power lights up automatically
+# once the entitlement exposes /dev/vcio.
+#
 # Arch-guarded to arm64 and failure-tolerant: a non-arm64 build (e.g. a dev
 # laptop) or an unreachable repo never breaks the image — the CSI slot just
 # falls back to the synthetic source.
@@ -54,7 +61,7 @@ RUN set -eux; \
              > /etc/apt/sources.list.d/raspi.list \
         && apt-get update \
         && apt-get install -y --no-install-recommends \
-             libcamera-ipa libcamera-tools gstreamer1.0-libcamera \
+             libcamera-ipa libcamera-tools gstreamer1.0-libcamera raspi-utils-core \
         && rm -rf /var/lib/apt/lists/* ) \
       || echo "WARN: libcamera setup failed; CSI will fall back to synthetic"; \
     else \

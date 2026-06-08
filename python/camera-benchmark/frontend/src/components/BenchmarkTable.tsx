@@ -145,7 +145,9 @@ export function BenchmarkTable({ snapshot, stream }: BenchmarkTableProps) {
               {board.power_w} W
             </span>
           ) : (
-            <span className="italic">unavailable (best-effort, Raspberry Pi 5 only)</span>
+            <span className="italic">
+              unavailable{board?.reason ? ` — ${board.reason}` : ""}
+            </span>
           )}
         </span>
       </CardFooter>

@@ -28,6 +28,7 @@ export interface CameraMetrics {
 export interface BoardPower {
   available: boolean
   power_w: number | null
+  reason?: string | null
 }
 
 export interface MetricsSnapshot {
