@@ -1,0 +1,19 @@
+{
+    "appId": "sh.wendy.examples.ai-security-camera",
+    "version": "1.0.0",
+    "language": "python",
+    "entitlements": [
+        {"type": "gpu"},
+        {"type": "network", "mode": "host"},
+        {"type": "persist", "name": "data", "path": "/data"}
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 8080 },
+        "timeoutSeconds": 120
+    },
+    "hooks": {
+        "postStart": {
+            "cli": "wendy utils open-browser http://${WENDY_HOSTNAME}:8080"
+        }
+    }
+}
