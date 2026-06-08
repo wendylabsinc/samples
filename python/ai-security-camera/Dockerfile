@@ -93,6 +93,7 @@ COPY --from=builder /compiled/yolo11n.onnx /app/yolo11n.onnx
 
 # Application files.
 COPY security_camera.py /app/
+COPY discovery.py /app/
 COPY nvinfer_config.txt /app/
 COPY tracker_config.yml /app/
 COPY labels.txt /app/

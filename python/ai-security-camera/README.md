@@ -23,6 +23,9 @@ Everything runs locally on the device — no cloud, no vendor app.
 - **Prometheus metrics** at `/metrics`, **events API** at `/events`, single-frame
   snapshot at `/snapshot`.
 - **Multi-camera** — point it at several RTSP streams at once (batched inference).
+- **Auto-discovery** — finds ONVIF/RTSP cameras on the network (WS-Discovery +
+  port-554 sweep) and resolves their RTSP URLs, so you usually only supply the
+  login.
 
 ## Hardware
 
@@ -95,24 +98,48 @@ Find the RTSP URL for your camera (examples in [`cameras.json`](./cameras.json))
 
 ## Configure
 
-Edit [`cameras.json`](./cameras.json) with your camera(s):
+### Auto-discovery (default)
+
+Out of the box the app **discovers cameras on the network** at startup — you only
+need to supply the login. It runs an ONVIF WS-Discovery probe and a port-554
+subnet sweep, then auto-detects each camera's RTSP path. Just set the camera
+credentials and deploy:
+
+```bash
+CAMERA_USER=admin CAMERA_PASS=yourpassword wendy run
+```
+
+Discovery finds cameras that already hold an IP (the switch/DHCP case above). A
+camera on a bare direct cable needs a static IP first.
+
+### Pinning specific cameras
+
+To target exact cameras instead of discovering, list them in
+[`cameras.json`](./cameras.json) with `enabled: true` (this takes priority over
+discovery):
 
 ```json
 {
+  "discovery": { "enabled": true, "scan_port_554": true },
   "cameras": [
     { "name": "front-door", "url": "rtsp://admin:pass@192.168.1.108:554/h264Preview_01_main", "enabled": true }
   ]
 }
 ```
 
-…or override at runtime without rebuilding, via environment variables:
+### Runtime overrides
 
 | Variable           | Default                                          | Description |
 |--------------------|--------------------------------------------------|-------------|
-| `CAMERA_URLS`      | _(unset)_                                        | Comma-separated RTSP URLs; overrides `cameras.json` |
+| `CAMERA_URLS`      | _(unset)_                                        | Comma-separated RTSP URLs; highest priority, overrides everything |
+| `CAMERA_USER`      | `admin`                                          | Login used to build discovered RTSP URLs |
+| `CAMERA_PASS`      | _(empty)_                                        | Password used to build discovered RTSP URLs |
+| `DISCOVERY`        | `auto`                                           | `auto` (discover only if nothing is configured), `on` (always discover + merge), `off` |
 | `ALERT_CLASSES`    | `person,bicycle,car,motorcycle,bus,truck`        | Classes that raise events |
 | `ALERT_CONFIDENCE` | `0.5`                                            | Minimum detection confidence to count |
 | `EVENT_COOLDOWN`   | `15`                                             | Seconds between repeat events for the same camera+class |
+
+Resolution order: `CAMERA_URLS` → enabled `cameras.json` entries → auto-discovery.
 
 ## Deploy to the Jetson
 

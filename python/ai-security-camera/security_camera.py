@@ -28,6 +28,7 @@ import os
 import sys
 import gi
 import gc
+import re
 import json
 import time
 import logging
@@ -507,14 +508,54 @@ def bus_call(bus, message, loop):
 
 
 def load_cameras():
-    """Cameras from CAMERA_URLS env, else cameras.json (enabled only)."""
+    """Resolve the camera list, in priority order:
+
+    1. CAMERA_URLS env (comma-separated RTSP URLs) — explicit override.
+    2. Enabled entries in cameras.json — explicit config.
+    3. Auto-discovery (ONVIF WS-Discovery + RTSP probe) when enabled and nothing
+       explicit is configured. Controlled by the `discovery` block in
+       cameras.json or the DISCOVERY env (auto|on|off, default auto).
+    """
     env = os.environ.get('CAMERA_URLS', '').strip()
     if env:
         urls = [u.strip() for u in env.split(',') if u.strip()]
         return [{'name': f'camera-{i+1}', 'url': u, 'enabled': True} for i, u in enumerate(urls)]
-    with open(CAMERAS_FILE) as f:
-        cfg = json.load(f)
-    return [c for c in cfg.get('cameras', []) if c.get('enabled', True)]
+
+    cfg = {}
+    try:
+        with open(CAMERAS_FILE) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning(f"Could not read {CAMERAS_FILE}: {e}")
+
+    configured = [c for c in cfg.get('cameras', []) if c.get('enabled', True)]
+
+    mode = os.environ.get('DISCOVERY', '').strip().lower()
+    disc_cfg = cfg.get('discovery', {})
+    if not mode:
+        mode = 'on' if disc_cfg.get('enabled') else 'auto'
+
+    # 'auto' discovers only when nothing is explicitly configured; 'on' always
+    # discovers and merges; 'off' never discovers.
+    should_discover = mode == 'on' or (mode == 'auto' and not configured)
+    if should_discover:
+        pipeline_status.update(state='discovering', detail='searching the network for cameras')
+        logger.info("Discovering cameras on the network…")
+        try:
+            from discovery import discover_cameras
+            discovered = discover_cameras(scan_554=disc_cfg.get('scan_port_554', True))
+        except Exception as e:
+            logger.warning(f"Discovery failed: {e}")
+            discovered = []
+        # Avoid duplicating cameras already configured by IP.
+        configured_ips = {re.search(r'@([0-9.]+)', c['url']).group(1)
+                          for c in configured if re.search(r'@([0-9.]+)', c['url'])}
+        for cam in discovered:
+            m = re.search(r'@([0-9.]+)', cam['url'])
+            if not m or m.group(1) not in configured_ips:
+                configured.append(cam)
+
+    return configured
 
 
 CAMERAS = []
