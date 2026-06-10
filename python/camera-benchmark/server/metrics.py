@@ -81,11 +81,11 @@ def _unavailable(reason: str) -> dict:
 def _vcio_reason() -> str | None:
     """``None`` if ``/dev/vcio`` can be opened, else a short reason why not.
 
-    The Pi 5 PMIC is read over the VideoCore mailbox (``/dev/vcio``). Inside a
-    WendyOS container the node is rbind-mounted from the host but the device
-    cgroup only allows the camera majors (81/253/509/195), so opening it as
-    char major 10 fails with EPERM — surface that specifically rather than the
-    misleading "Raspberry Pi 5 only".
+    The Pi 5 PMIC is read over the VideoCore mailbox (``/dev/vcio``, char major
+    10). Inside a WendyOS container that node is exposed by the ``gpu``
+    entitlement (WendyOS agent PR #970). Without it — an older agent, or the
+    entitlement not declared in ``wendy.json`` — opening it fails with EPERM;
+    surface that specifically rather than the misleading "Raspberry Pi 5 only".
     """
     if not os.path.exists(_VCIO):
         return "no /dev/vcio (not a Raspberry Pi 5)"
@@ -93,7 +93,7 @@ def _vcio_reason() -> str | None:
         os.close(os.open(_VCIO, os.O_RDWR))
         return None
     except PermissionError:
-        return "no /dev/vcio access — camera entitlement must allow char major 10"
+        return "no /dev/vcio access — needs the 'gpu' entitlement on a current WendyOS"
     except OSError as exc:
         return f"/dev/vcio open failed ({exc.strerror})"
 

@@ -43,11 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # unsigned and the install silently falls through to the synthetic path).
 #
 # Also pull raspi-utils-core (~300 KB) for `vcgencmd`, used for best-effort
-# whole-board power. NB: vcgencmd reads the PMIC over /dev/vcio (char major 10),
-# which the camera/gpu entitlement does not currently allow into the container —
-# until it does, power reads as unavailable with a specific reason (see
-# server/metrics.py); installing it here means power lights up automatically
-# once the entitlement exposes /dev/vcio.
+# whole-board power. vcgencmd reads the PMIC over /dev/vcio (char major 10); the
+# `gpu` entitlement (declared in wendy.json) exposes that node into the container
+# as of WendyOS agent PR #970, so power reads correctly on a current WendyOS. On
+# an older agent the node is denied and the UI shows unavailable with a specific
+# reason (see server/metrics.py).
 #
 # Arch-guarded to arm64 and failure-tolerant: a non-arm64 build (e.g. a dev
 # laptop) or an unreachable repo never breaks the image — the CSI slot just
