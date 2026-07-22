@@ -133,3 +133,4 @@ import Glibc
 @inline(__always) func Foundation_cos(_ v: Double) -> Double { cos(v) }
 @inline(__always) func Foundation_sin(_ v: Double) -> Double { sin(v) }
 @inline(__always) func Foundation_acos(_ v: Double) -> Double { acos(v) }
+@inline(__always) func Foundation_atan2(_ y: Double, _ x: Double) -> Double { atan2(y, x) }
