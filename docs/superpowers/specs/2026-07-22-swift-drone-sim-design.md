@@ -45,8 +45,9 @@ build/run Swift.
 
 - `swift-mujoco` (separate repo) — `CMuJoCo` SwiftPM `systemLibrary` over the full `mujoco.h`
   (full module map, approved approach) + a generic ergonomic `MuJoCo` Swift wrapper.
-- `WendyMuJoCo` (in `wendy-sandbox`, depends on `swift-mujoco`) — Swift library matching
-  `wendymujoco.py`'s surface:
+- `WendyMuJoCo` (a **second library target in the `swift-mujoco` package**, depends on the
+  generic `MuJoCo` target; the `MuJoCo` module itself stays free of Wendy specifics) — Swift
+  library matching `wendymujoco.py`'s surface:
   `load()`/Menagerie resolve+fetch, `Handle`/`launchPassive` with `sync()`/`hud()`/`isRunning()`,
   `buildScene`→`scene.json`, `buildState`→`state.json`, `control.json` polling
   (pause/step/reset/poke/ctrl), the `ctl.sock` endpoint (act/observe/describe/get_state/set_state/reset),
@@ -80,8 +81,9 @@ build/run Swift.
      contacts, name↔id lookups. Contains **nothing Wendy-specific** — no Sim-tab protocol,
      no JSON, no sockets. `WendyMuJoCo` (below) depends on this.
 
-2. **`WendyMuJoCo` (library in `wendy-sandbox`, depends on `swift-mujoco`)** — the Wendy
-   Sim-tab authoring glue. Sub-areas:
+2. **`WendyMuJoCo` (a second library target inside the `swift-mujoco` package, depends on the
+   generic `MuJoCo` target — and on `CMuJoCo` for raw `ptr` writes like `qpos`/`qvel`/`xfrc`)**
+   — the Wendy Sim-tab authoring glue. Sub-areas:
    - **Model loading**: `load(name)` and Menagerie name-map + `_resolve_model_path` +
      sparse-clone fetch (`git clone --filter=blob:none --sparse`), mirroring `wendymujoco.py`.
      Vendored dir `/opt/sandbox/mujoco-menagerie`.
@@ -167,18 +169,20 @@ DroneRace (Swift) ──uses──> WendyMuJoCo ──C calls──> CMuJoCo ─
 
 ### Repo layout
 
-Work spans three repos, with a clear dependency direction
-(`DroneRace` → `WendyMuJoCo` → `swift-mujoco`):
+Work spans two repos, with a clear dependency direction
+(`DroneRace` → `WendyMuJoCo` → `MuJoCo`):
 
-- **`swift-mujoco`** (new, standalone) — the generic MuJoCo Swift binding: `CMuJoCo`
-  (systemLibrary) + `MuJoCo` (ergonomic wrapper). Reusable outside Wendy; consumed as a
-  SwiftPM dependency.
-- **`wendy/wendy-sandbox`** — where the sim actually runs: the `WendyMuJoCo` library
-  (Sim-tab glue, depends on `swift-mujoco`), `wendy-simrun` changes, `Dockerfile` toolchain +
-  MuJoCo SDK, `Catalog.swift`, and a `sim-templates/` Swift drone entry.
+- **`swift-mujoco`** (standalone package) — holds three library targets:
+  `CMuJoCo` (systemLibrary), `MuJoCo` (generic ergonomic wrapper, reusable outside Wendy),
+  and **`WendyMuJoCo`** (the Sim-tab glue, depends on `MuJoCo` + `CMuJoCo`). Consumed as one
+  SwiftPM dependency. The `MuJoCo` module stays free of Wendy specifics; `WendyMuJoCo` is
+  where JSON/socket/Menagerie live.
+- **`wendy/wendy-sandbox`** — where the sim runs: depends on the `swift-mujoco` package's
+  `WendyMuJoCo` product; adds `wendy-simrun` changes, `Dockerfile` toolchain + MuJoCo SDK,
+  `Catalog.swift`, and a `sim-templates/` Swift drone entry.
 - **`wendy/samples`** — `samples/swift/drone/`: the `DroneRace` SwiftPM executable
-  (depends on `WendyMuJoCo`, transitively `swift-mujoco`), plus the existing
-  `starters/drone-slalom/`. The developer-facing sample.
+  (depends on `WendyMuJoCo`), plus the existing `starters/drone-slalom/`. The
+  developer-facing sample.
 
 ## Error handling
 
@@ -213,9 +217,10 @@ Work spans three repos, with a clear dependency direction
    importer should map fixed-size array fields fine, but a few (e.g. anonymous unions,
    `mjtNum` typedef) need verification early. First implementation task is a spike:
    `mj_loadXML` → `mj_step` → read `geom_xpos` from Swift.
-3. **~~`WendyMuJoCo` single-source vs mirror~~ (resolved)** — the generic binding lives in a
-   standalone `swift-mujoco` repo; `WendyMuJoCo` lives once in `wendy-sandbox` and depends on
-   it; `samples/drone` depends on `WendyMuJoCo`. No mirroring.
+3. **~~`WendyMuJoCo` single-source vs mirror~~ (resolved)** — the `swift-mujoco` package holds
+   all three targets (`CMuJoCo`, `MuJoCo`, `WendyMuJoCo`); the generic `MuJoCo` module stays
+   Wendy-free while `WendyMuJoCo` sits beside it. `wendy-sandbox` and `samples/drone` both
+   depend on the one package. No mirroring, no separate WendyMuJoCo repo.
 4. **Rebuild-on-save latency** — a few seconds per reload for Swift; ensure `wendy-simrun`
    shows a clear "building…" state so the Sim tab doesn't look hung.
 5. **libmujoco version/ABI** — the C SDK version in the image must match what the module map
