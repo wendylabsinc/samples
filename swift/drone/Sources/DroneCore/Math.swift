@@ -117,6 +117,13 @@ public struct Quat: Sendable, Equatable {
              z: 1 - 2 * (x * x + y * y))
     }
 
+    /// Body-x axis expressed in the world frame (first column of the rotation matrix).
+    public var bodyX: Vec3 {
+        Vec3(x: 1 - 2 * (y * y + z * z),
+             y: 2 * (x * y + w * z),
+             z: 2 * (x * z - w * y))
+    }
+
     /// Angle in radians between this orientation's body-z axis and `axis`.
     public func angle(to axis: Vec3) -> Double {
         let d = bodyZ.normalized().dot(axis.normalized())

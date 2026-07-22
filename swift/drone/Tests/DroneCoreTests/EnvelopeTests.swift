@@ -37,3 +37,16 @@ private let env = Envelope(
     #expect(env.breaches(position: Vec3(x: 11, y: 0, z: 5)) == true)   // x past max
     #expect(env.breaches(position: Vec3(x: 0, y: 0, z: -1)) == true)   // below floor
 }
+
+@Test func clampPreservesYawWhenLimitingTilt() {
+    // Steep tilt (~60°) toward +x, commanded heading = +90° (yaw = π/2).
+    let steep = Quat(desiredZ: Vec3(x: 1, y: 0, z: 0.577), yaw: Double.pi / 2)
+    let sp = AttitudeThrust(attitude: steep, thrust: 0.5)
+    let clamped = env.clamp(sp)
+    // Tilt clamped to the limit…
+    #expect(clamped.attitude.angle(to: .up) <= 0.5 + 1e-6)
+    // …and the commanded heading (~π/2) is preserved, not replaced by the tilt azimuth (0).
+    let bx = clamped.attitude.bodyX
+    let heading = Foundation_atan2(bx.y, bx.x)
+    #expect(abs(heading - Double.pi / 2) < 0.05)
+}

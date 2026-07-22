@@ -29,7 +29,9 @@ public struct Envelope: Sendable {
         horiz = horiz.normalized()
         let limited = (horiz * Foundation_sin(maxTiltRadians))
             + (Vec3.up * Foundation_cos(maxTiltRadians))
-        let yaw = Foundation_atan2(z.y, z.x)  // keep heading of tilt as yaw proxy
+        // Preserve the commanded heading (yaw), not the tilt azimuth.
+        let heading = sp.attitude.bodyX
+        let yaw = Foundation_atan2(heading.y, heading.x)
         let q = Quat(desiredZ: limited, yaw: yaw)
         return AttitudeThrust(attitude: q, thrust: thrust)
     }
