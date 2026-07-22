@@ -1,0 +1,2 @@
+public struct DroneApp: Sendable {
+}
