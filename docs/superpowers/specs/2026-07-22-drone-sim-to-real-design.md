@@ -29,6 +29,10 @@ real aircraft.
   geofence + envelope limits, software kill switch.
 - **Structure:** Approach A — one binary, one `FlightIO` protocol, runtime-selected HAL.
   A `ReplayIO` adapter (Approach C) is designed-for but deferred to a testing follow-up.
+- **MAVLink transport:** a **thin pure-Swift MAVLink codec over SwiftNIO** talking directly to
+  the FC (serial/UDP) — no `mavsdk_server` sidecar, no gRPC. MAVLink is a compact binary
+  protocol over serial/UDP/TCP, *not* gRPC; gRPC only appears in MAVSDK's sidecar architecture,
+  which this design avoids.
 
 ## Architecture
 
@@ -174,14 +178,23 @@ says.
 Replays recorded sim/MAVLink traces deterministically for regression tests and offline
 debugging of real flights. `FlightIO` is designed so it slots in without change. Not v1 scope.
 
+## MAVLink transport (decided)
+
+A **thin pure-Swift MAVLink codec over SwiftNIO**, talking MAVLink directly to the FC over
+serial/UDP — no `mavsdk_server` sidecar and no gRPC. Scoped to the message subset in the
+`MavlinkIO` table (`HEARTBEAT`, `COMMAND_ACK`, `SET_MODE`, `MAV_CMD_COMPONENT_ARM_DISARM`,
+`ATTITUDE_QUATERNION`, `LOCAL_POSITION_NED`, `SET_ATTITUDE_TARGET`), plus MAVLink v2 framing
++ CRC and the ground-station kill message.
+
+Rejected alternatives: **MAVSDK-Swift** and a **grpc-swift-2 client against `mavsdk_server`**
+both require shipping and running the `mavsdk_server` binary on the WendyOS device (gRPC is
+only MAVSDK's app↔sidecar transport, never the FC wire protocol). The sidecar cost isn't worth
+it for the small, well-specified message subset above. A `ByteToMessageDecoder` for MAVLink v2
+fits the repo's NIO idioms — see the `swift-nio` skill for the codec pattern.
+
 ## Open decisions (resolve during implementation)
 
-1. **MAVLink transport library.** (a) **MAVSDK-Swift** — official, high-level Offboard/Telemetry
-   plugins, fastest to flight, but pulls in a `mavsdk_server` sidecar + gRPC (heavy ARM64 dep);
-   (b) **thin pure-Swift MAVLink codec over SwiftNIO** (serial/UDP) — no sidecar, fits the edge
-   device and the repo's NIO idioms, but we implement the message subset ourselves.
-   **Recommendation: (b)**, scoped to the handful of messages in the `MavlinkIO` table.
-2. **`wendy.json` entitlements for the real path.** Serial-device access to the FC, or host
+1. **`wendy.json` entitlements for the real path.** Serial-device access to the FC, or host
    networking if the FC link is UDP. Confirm exact entitlement names against the `wendy` skill.
 
 ## Deploy workflow
@@ -233,8 +246,9 @@ with zero MuJoCo and zero hardware before a motor spins.
 
 ## Risks / open questions
 
-1. **MAVLink library choice** (open decision #1) — affects image size and edge footprint;
-   pure-Swift/NIO recommended but requires implementing a message subset correctly.
+1. **Hand-rolled MAVLink codec correctness** — the pure-Swift codec must get v2 framing, CRC
+   (incl. `CRC_EXTRA` per message), and byte layout exactly right; unit-test against captured
+   PX4 frames and validate the full round-trip in SITL before hardware.
 2. **PX4 SITL in CI** — needs the SITL binary available to CI; containerize it for the
    `MavlinkIO` integration test.
 3. **Attitude-setpoint semantics across firmwares** — PX4 vs ArduPilot differ in
@@ -252,7 +266,7 @@ with zero MuJoCo and zero hardware before a motor spins.
    refactor the drone-sim `DroneRace` to route I/O through `FlightIO`.
 2. `SafetyKernel` + `Envelope` with full unit tests against a fake `FlightIO`.
 3. `SimIO`: FC-inner-loop mixer, corruption pipeline, `Randomizer` — fly in the Sim tab.
-4. `MavlinkIO` (transport per open decision #1) against PX4 SITL; arm/offboard/failsafe.
+4. `MavlinkIO`: pure-Swift MAVLink v2 codec (NIO) + adapter against PX4 SITL; arm/offboard/failsafe.
 5. Cross-end parity tests; deploy via `wendy run` to a WendyOS companion computer.
 6. `ReplayIO` + protocol regression (follow-up).
 ```
