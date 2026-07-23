@@ -1,12 +1,14 @@
-# DroneRace Sample Implementation Plan
+# DroneRace (MuJoCo slalom) Sample Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Port `samples/swift/drone/starters/drone-slalom/mujoco_drone_race.py` to Swift — a Skydio X2 quadrotor flying a 5-gate slalom under a geometric controller, streaming live to the 🕹 Sim tab via `WendyMuJoCo` — as a buildable, runnable sample in `samples/swift/drone/`.
+**Goal:** Port the MuJoCo drone-slalom sim (reference: `samples/swift/drone/starters/drone-slalom/mujoco_drone_race.py`) to Swift — a Skydio X2 quadrotor flying a 5-gate slalom under a geometric controller, streaming live to the 🕹 Sim tab via `WendyMuJoCo` — as a standalone sample at **`samples/swift/drone-slalom/`**.
 
-**Architecture:** A SwiftPM package in `samples/swift/drone/` with a pure, unit-tested `DroneCore` library (controller math, rotor mixer, course-XML builder, gate progression) and a thin `DroneRace` executable that resolves/loads the Skydio X2, builds the gate course, and runs the control loop against `WendyMuJoCo.launchPassive`. It depends on the sibling `swift-mujoco` package (products `WendyMuJoCo` + `MuJoCo`) via a local path dependency.
+**IMPORTANT — placement:** `samples/swift/drone/` is already occupied by an unrelated, committed package (the "sim-to-real shared flight core", which also has a `DroneCore` target). This sample is completely separate: it lives in `samples/swift/drone-slalom/`, its library target is named **`SlalomCore`** (NOT `DroneCore`), and it must not touch anything under `samples/swift/drone/`.
 
-**Tech Stack:** Swift 6.1, Swift Testing, Foundation; the `swift-mujoco` package (`MuJoCo`: `Vec3`/`Mat3`/`Quat`/`quat2Mat`/`MjModel`/`MjData`/`mjStep`/`mjResetDataKeyframe`; `WendyMuJoCo`: `launchPassive`/`Handle`/`HUDValue`/`Menagerie`). MuJoCo 3.10.0 at `$HOME/.local`.
+**Architecture:** A SwiftPM package in `samples/swift/drone-slalom/` with a pure, unit-tested `SlalomCore` library (controller math, rotor mixer, course-XML builder, gate progression) and a thin `DroneRace` executable that resolves/loads the Skydio X2, builds the gate course, and runs the control loop against `WendyMuJoCo.launchPassive`. Depends on the sibling `swift-mujoco` package (products `WendyMuJoCo` + `MuJoCo`) via a local path dependency.
+
+**Tech Stack:** Swift 6.1, Swift Testing, Foundation; the `swift-mujoco` package (`MuJoCo`: `Vec3`/`Mat3`/`Quat`/`quat2Mat`/`MjModel`/`MjData`/`mjStep`/`mjResetDataKeyframe`; `WendyMuJoCo`: `launchPassive`/`Handle`/`HUDValue`/`Menagerie`/`WorldSim`). MuJoCo 3.10.0 at `$HOME/.local`.
 
 ## Global Constraints
 
@@ -14,51 +16,53 @@
 - No `.unsafeFlags` in `Package.swift`.
 - Every `swift build`/`swift test`/`swift run` runs with `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig` exported (transitively needed by `CMuJoCo`).
 - Pristine build — zero warnings.
-- Pure logic (controller, rotor mix, course XML, gate progression) lives in `DroneCore` and is unit-tested; the executable `DroneRace` is the thin I/O/loop wiring.
-- Controller behavior must match the Python reference (`mujoco_drone_race.py`): same gains, rotor-mixer geometry (`AX=0.14, AY=0.18, CZ=0.0201`), thrust clip `[0, 13]`, gate list, `GATE_OPENING=1.6`, `REACH=1.1`, `G=9.81`, yaw-hold.
-- The Skydio X2 free-joint layout: `qpos[0..2]` = world position, `qpos[3..6]` = orientation quaternion (wxyz); `qvel[3..5]` = body-frame angular velocity. World linear velocity is finite-differenced from position (matching the Python), not read from `qvel`.
+- The sample lives ONLY under `samples/swift/drone-slalom/`. Do not create, modify, or delete anything under `samples/swift/drone/`.
+- Pure logic (controller, rotor mix, course XML, gate progression) lives in `SlalomCore` and is unit-tested; the executable `DroneRace` is the thin I/O/loop wiring.
+- Controller behavior must match the Python reference: same gains, rotor-mixer geometry (`AX=0.14, AY=0.18, CZ=0.0201`), thrust clip `[0, 13]`, gate list, `GATE_OPENING=1.6`, `REACH=1.1`, `G=9.81`, yaw-hold.
+- Skydio X2 free-joint layout: `qpos[0..2]` = world position, `qpos[3..6]` = orientation quaternion (wxyz); `qvel[3..5]` = body-frame angular velocity. World linear velocity is finite-differenced from position (matching the Python), not read from `qvel`.
 - The X2 has 4 thrust actuators (`nu == 4`); `MjData.setCtrl([Double])` requires exactly `nu` values.
 
 ## Dependency wiring
 
-`samples/swift/drone` is inside the `wendy/samples` git repo; `swift-mujoco` is a sibling repo at `wendy/swift-mujoco`. From `samples/swift/drone`, that is `../../../swift-mujoco`. Use a local path dependency:
+From `samples/swift/drone-slalom`, the sibling `swift-mujoco` repo (`wendy/swift-mujoco`) is `../../../swift-mujoco` (drone-slalom→swift→samples→wendy, then /swift-mujoco). Use:
 ```swift
 dependencies: [ .package(path: "../../../swift-mujoco") ],
 ```
-(Follow-up, out of scope: once `swift-mujoco` is published, switch to a versioned git URL so external users can build the sample without the sibling checkout. Note this in the sample README.)
+(Follow-up, out of scope: once `swift-mujoco` is published, switch to a versioned git URL. Note in the README.)
 
 ## File Structure
 
 ```
-samples/swift/drone/
+samples/swift/drone-slalom/
   Package.swift
   README.md
+  .gitignore
   Sources/
-    DroneCore/
+    SlalomCore/
       DroneController.swift   # gains, rotorMix, control(...)
       Course.swift            # gateFrame, buildCourseXML, advanceGate
     DroneRace/
       main.swift              # resolve X2, build course, load, control loop, launchPassive
   Tests/
-    DroneCoreTests/
+    SlalomCoreTests/
       ControllerTests.swift
       CourseTests.swift
-  starters/drone-slalom/mujoco_drone_race.py   # existing Python reference (unchanged)
 ```
+(The Python reference stays where it is committed, in the sibling `samples/swift/drone/starters/drone-slalom/mujoco_drone_race.py` — this sample does not move or copy it.)
 
 ---
 
 ## Task 1: Package + skeleton (builds against swift-mujoco)
 
 **Files:**
-- Create: `samples/swift/drone/Package.swift`
-- Create: `samples/swift/drone/Sources/DroneCore/DroneController.swift` (stub type so the target compiles)
-- Create: `samples/swift/drone/Sources/DroneRace/main.swift` (stub)
-- Create: `samples/swift/drone/.gitignore`
-- Test: `samples/swift/drone/Tests/DroneCoreTests/ControllerTests.swift` (trivial build-proof test)
+- Create: `samples/swift/drone-slalom/Package.swift`
+- Create: `samples/swift/drone-slalom/Sources/SlalomCore/DroneController.swift` (stub so the target compiles)
+- Create: `samples/swift/drone-slalom/Sources/DroneRace/main.swift` (stub)
+- Create: `samples/swift/drone-slalom/.gitignore`
+- Test: `samples/swift/drone-slalom/Tests/SlalomCoreTests/ControllerTests.swift` (trivial build-proof test)
 
 **Interfaces:**
-- Produces: a `DroneCore` library target, a `DroneRace` executable target (deps `DroneCore` + `WendyMuJoCo` + `MuJoCo`), a `DroneCoreTests` test target; all building against the `swift-mujoco` path dependency.
+- Produces: a `SlalomCore` library target, a `DroneRace` executable target (deps `SlalomCore` + `WendyMuJoCo` + `MuJoCo`), a `SlalomCoreTests` test target; all building against the `swift-mujoco` path dependency.
 
 - [ ] **Step 1: Create `.gitignore`**
 ```
@@ -78,16 +82,16 @@ let package = Package(
         .package(path: "../../../swift-mujoco"),
     ],
     targets: [
-        .target(name: "DroneCore", dependencies: [
+        .target(name: "SlalomCore", dependencies: [
             .product(name: "MuJoCo", package: "swift-mujoco"),
         ]),
         .executableTarget(name: "DroneRace", dependencies: [
-            "DroneCore",
+            "SlalomCore",
             .product(name: "WendyMuJoCo", package: "swift-mujoco"),
             .product(name: "MuJoCo", package: "swift-mujoco"),
         ]),
-        .testTarget(name: "DroneCoreTests", dependencies: [
-            "DroneCore",
+        .testTarget(name: "SlalomCoreTests", dependencies: [
+            "SlalomCore",
             .product(name: "MuJoCo", package: "swift-mujoco"),
         ]),
     ]
@@ -96,7 +100,7 @@ let package = Package(
 
 - [ ] **Step 3: Create stub sources**
 
-`Sources/DroneCore/DroneController.swift`:
+`Sources/SlalomCore/DroneController.swift`:
 ```swift
 import MuJoCo
 
@@ -108,7 +112,7 @@ public struct DroneController {
 
 `Sources/DroneRace/main.swift`:
 ```swift
-import DroneCore
+import SlalomCore
 import MuJoCo
 import WendyMuJoCo
 
@@ -117,10 +121,10 @@ print("DroneRace: MuJoCo \(mujocoVersion())")
 
 - [ ] **Step 4: Write a trivial build-proof test**
 
-`Tests/DroneCoreTests/ControllerTests.swift`:
+`Tests/SlalomCoreTests/ControllerTests.swift`:
 ```swift
 import Testing
-@testable import DroneCore
+@testable import SlalomCore
 
 @Test func controllerConstructs() {
     _ = DroneController()
@@ -132,15 +136,15 @@ import Testing
 
 Run:
 ```bash
-cd samples/swift/drone
+cd samples/swift/drone-slalom
 PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig swift test
 ```
-Expected: resolves the `swift-mujoco` path dependency, builds `DroneCore`/`DroneRace`/tests, 1 test passes, zero warnings. (If dependency resolution fails, confirm the relative path `../../../swift-mujoco` reaches `/Users/joannisorlandos/git/wendy/swift-mujoco`.)
+Expected: resolves the `swift-mujoco` path dependency, builds `SlalomCore`/`DroneRace`/tests, 1 test passes, zero warnings. (If dependency resolution fails, confirm `../../../swift-mujoco` reaches `/Users/joannisorlandos/git/wendy/swift-mujoco` and adjust only the relative depth if needed; report if you did.)
 
 - [ ] **Step 6: Commit**
 ```bash
-git add samples/swift/drone/Package.swift samples/swift/drone/.gitignore samples/swift/drone/Sources samples/swift/drone/Tests
-git commit -m "feat(drone): SwiftPM package skeleton building against swift-mujoco"
+git add samples/swift/drone-slalom
+git commit -m "feat(drone-slalom): SwiftPM package skeleton building against swift-mujoco"
 ```
 
 ---
@@ -148,8 +152,8 @@ git commit -m "feat(drone): SwiftPM package skeleton building against swift-mujo
 ## Task 2: DroneController (rotor mix + geometric control)
 
 **Files:**
-- Modify: `Sources/DroneCore/DroneController.swift`
-- Test: `Tests/DroneCoreTests/ControllerTests.swift`
+- Modify: `samples/swift/drone-slalom/Sources/SlalomCore/DroneController.swift`
+- Test: `samples/swift/drone-slalom/Tests/SlalomCoreTests/ControllerTests.swift`
 
 **Interfaces:**
 - Consumes: `Vec3`, `Mat3` (from `MuJoCo`).
@@ -160,11 +164,11 @@ git commit -m "feat(drone): SwiftPM package skeleton building against swift-mujo
 
 - [ ] **Step 1: Write the failing tests**
 
-`Tests/DroneCoreTests/ControllerTests.swift` (replace the stub test):
+`Tests/SlalomCoreTests/ControllerTests.swift` (replace the stub test):
 ```swift
 import Testing
 import MuJoCo
-@testable import DroneCore
+@testable import SlalomCore
 
 private let I = Mat3([1,0,0, 0,1,0, 0,0,1])   // level attitude
 
@@ -206,7 +210,7 @@ Expected: FAIL — `control`/`rotorMix` not defined.
 
 - [ ] **Step 3: Implement the controller**
 
-`Sources/DroneCore/DroneController.swift`:
+`Sources/SlalomCore/DroneController.swift`:
 ```swift
 import Foundation
 import MuJoCo
@@ -266,8 +270,8 @@ Expected: PASS (3 tests). Hover: with level attitude, zero velocity, target==pos
 
 - [ ] **Step 5: Commit**
 ```bash
-git add samples/swift/drone/Sources/DroneCore/DroneController.swift samples/swift/drone/Tests/DroneCoreTests/ControllerTests.swift
-git commit -m "feat(drone): geometric controller + rotor mixer (ported from Python)"
+git add samples/swift/drone-slalom/Sources/SlalomCore/DroneController.swift samples/swift/drone-slalom/Tests/SlalomCoreTests/ControllerTests.swift
+git commit -m "feat(drone-slalom): geometric controller + rotor mixer (ported from Python)"
 ```
 
 ---
@@ -275,33 +279,32 @@ git commit -m "feat(drone): geometric controller + rotor mixer (ported from Pyth
 ## Task 3: Course XML + gate progression
 
 **Files:**
-- Create: `Sources/DroneCore/Course.swift`
-- Test: `Tests/DroneCoreTests/CourseTests.swift`
+- Create: `samples/swift/drone-slalom/Sources/SlalomCore/Course.swift`
+- Test: `samples/swift/drone-slalom/Tests/SlalomCoreTests/CourseTests.swift`
 
 **Interfaces:**
 - Consumes: `Vec3`.
-- Produces (free functions in `DroneCore`):
+- Produces (free functions in `SlalomCore`):
   - `func gateFrame(index: Int, x: Double, y: Double, z: Double, opening: Double) -> String` (4 box `<geom>`s).
   - `func buildCourseXML(gates: [(Double, Double, Double)], opening: Double) -> String` (includes `x2.xml`, a floor, and all gate frames).
   - `func advanceGate(position: Vec3, gates: [Vec3], current: Int, reach: Double) -> Int`.
-  - `let defaultGates: [(Double, Double, Double)]` and `let gateOpening`, `let reach` constants matching the Python.
+  - `let defaultGates: [(Double, Double, Double)]`, `let gateOpening`, `let reach` matching the Python.
 
 - [ ] **Step 1: Write the failing tests**
 
-`Tests/DroneCoreTests/CourseTests.swift`:
+`Tests/SlalomCoreTests/CourseTests.swift`:
 ```swift
 import Testing
 import MuJoCo
-@testable import DroneCore
+@testable import SlalomCore
 
 @Test func courseHasFloorIncludeAndFourBoxesPerGate() {
     let gates = [(4.0, 0.0, 1.5), (8.0, 1.0, 1.6)]
     let xml = buildCourseXML(gates: gates, opening: 1.6)
     #expect(xml.contains("<include file=\"x2.xml\"/>"))
     #expect(xml.contains("type=\"plane\""))                       // floor
-    // 4 box geoms per gate
     let boxes = xml.components(separatedBy: "type=\"box\"").count - 1
-    #expect(boxes == gates.count * 4)
+    #expect(boxes == gates.count * 4)                             // 4 box geoms per gate
 }
 
 @Test func defaultCourseHasFiveGates() {
@@ -312,11 +315,8 @@ import MuJoCo
 
 @Test func gateAdvancesWithinReachAndClampsAtEnd() {
     let gates = [Vec3(4,0,1.5), Vec3(8,1,1.6)]
-    // far from gate 0 -> stays
     #expect(advanceGate(position: Vec3(0,0,1), gates: gates, current: 0, reach: 1.1) == 0)
-    // within reach of gate 0 -> advances to 1
     #expect(advanceGate(position: Vec3(4,0,1.5), gates: gates, current: 0, reach: 1.1) == 1)
-    // within reach of last gate -> clamps at last index
     #expect(advanceGate(position: Vec3(8,1,1.6), gates: gates, current: 1, reach: 1.1) == 1)
 }
 ```
@@ -342,7 +342,6 @@ public func gateFrame(index i: Int, x gx: Double, y gy: Double, z gz: Double,
                       opening w: Double) -> String {
     let h = w / 2 + 0.08
     let col = String(format: "%.2f 0.8 %.2f 1", 0.15 + 0.15 * Double(i), 0.9 - 0.12 * Double(i))
-    // top, bottom, left, right bars (x is the depth axis the drone flies along)
     let posts: [(Double, Double, Double, Double, Double, Double)] = [
         (gx, gy, gz + h, 0.06, w/2 + 0.12, 0.06),   // top bar (spans y)
         (gx, gy, gz - h, 0.06, w/2 + 0.12, 0.06),   // bottom bar
@@ -388,8 +387,8 @@ Expected: PASS (3 tests).
 
 - [ ] **Step 5: Commit**
 ```bash
-git add samples/swift/drone/Sources/DroneCore/Course.swift samples/swift/drone/Tests/DroneCoreTests/CourseTests.swift
-git commit -m "feat(drone): gate-course XML builder + gate progression"
+git add samples/swift/drone-slalom/Sources/SlalomCore/Course.swift samples/swift/drone-slalom/Tests/SlalomCoreTests/CourseTests.swift
+git commit -m "feat(drone-slalom): gate-course XML builder + gate progression"
 ```
 
 ---
@@ -397,34 +396,31 @@ git commit -m "feat(drone): gate-course XML builder + gate progression"
 ## Task 4: DroneRace executable (resolve X2, load course, fly, stream)
 
 **Files:**
-- Modify: `Sources/DroneRace/main.swift`
-- Create: `samples/swift/drone/README.md`
+- Modify: `samples/swift/drone-slalom/Sources/DroneRace/main.swift`
+- Create: `samples/swift/drone-slalom/README.md`
 
 **Interfaces:**
-- Consumes: `DroneCore` (`DroneController`, `buildCourseXML`, `advanceGate`, `defaultGates`, `gateOpening`, `reach`), `MuJoCo` (`MjModel`, `MjData`, `Vec3`, `Quat`, `quat2Mat`, `mjStep`, `mjResetDataKeyframe`, `mjForward`), `WendyMuJoCo` (`launchPassive`, `HUDValue`, `Menagerie`, `WorldSim`).
-- Produces: a `DroneRace` executable that resolves/fetches the Skydio X2, composes the course, loads it, and runs the control loop streaming to the Sim tab. Honors `DRONE_MAX_STEPS` (bounded headless run for demos/CI) — unset means run until the process is stopped.
+- Consumes: `SlalomCore` (`DroneController`, `buildCourseXML`, `advanceGate`, `defaultGates`, `gateOpening`, `reach`), `MuJoCo` (`MjModel`, `MjData`, `Vec3`, `Quat`, `quat2Mat`, `mjStep`, `mjResetDataKeyframe`, `mjForward`), `WendyMuJoCo` (`launchPassive`, `HUDValue`, `Menagerie`, `WorldSim`).
+- Produces: a `DroneRace` executable that resolves/fetches the Skydio X2, composes the course, loads it, and runs the control loop streaming to the Sim tab. Honors `DRONE_MAX_STEPS` (bounded headless run for demos/CI); unset means run until the process is stopped.
 
 - [ ] **Step 1: Implement `main.swift`**
 
 ```swift
 import Foundation
-import DroneCore
+import SlalomCore
 import MuJoCo
 import WendyMuJoCo
 
-// --- Resolve the Skydio X2 model dir (vendored or fetched), copy it to a writable work
-// dir, and drop a course.xml beside it so <include file="x2.xml"/> + its assets/ resolve. ---
+// Resolve the Skydio X2 model dir (vendored or fetched), copy it to a writable work dir,
+// and drop a course.xml beside it so <include file="x2.xml"/> + its assets/ resolve.
 func prepareCourse() throws -> String {
-    // The bare robot XML (x2.xml), not scene.xml, so we control the world.
     var x2Path = Menagerie.resolveModelPath("skydio_x2", searchDirs: Menagerie.vendorDirs, robot: true)
     if x2Path == nil {
         let cache = WorldSim.directory().appendingPathComponent("menagerie-cache")
         let repo = try Menagerie.fetch("skydio_x2", cacheDir: cache)
         x2Path = Menagerie.resolveModelPath("skydio_x2", searchDirs: [repo.path], robot: true)
     }
-    guard let x2 = x2Path else {
-        throw MjError("could not resolve or fetch the skydio_x2 model")
-    }
+    guard let x2 = x2Path else { throw MjError("could not resolve or fetch the skydio_x2 model") }
     let modelDir = URL(fileURLWithPath: x2).deletingLastPathComponent()
     let work = WorldSim.directory().appendingPathComponent("drone_work")
     let fm = FileManager.default
@@ -452,8 +448,6 @@ let gateVecs = defaultGates.map { Vec3($0.0, $0.1, $0.2) }
 var prevP = Vec3(data.qpos[0], data.qpos[1], data.qpos[2])
 var targetI = 0
 let t0 = data.time
-var gateTimes: [Double] = []
-
 let maxSteps = ProcessInfo.processInfo.environment["DRONE_MAX_STEPS"].flatMap { Int($0) }
 let handle = launchPassive(model, data, title: "drone race")
 
@@ -473,64 +467,55 @@ while handle.isRunning() {
     mjStep(model, data)
     step += 1
 
-    // Gate progression.
-    let newTarget = advanceGate(position: p, gates: gateVecs, current: targetI, reach: reach)
-    if newTarget != targetI {
-        gateTimes.append((data.time - t0 * 1).rounded() )   // placeholder; replaced below
-    }
-    if (p - gateVecs[targetI]).norm < reach && targetI < gateVecs.count {
-        gateTimes.append(((data.time - t0) * 100).rounded() / 100)
-    }
-    targetI = newTarget
+    targetI = advanceGate(position: p, gates: gateVecs, current: targetI, reach: reach)
 
     if step % 5 == 0 {
-        let speed = v.norm
         handle.hud([
             "gate": .text("\(Swift.min(targetI + 1, gateVecs.count))/\(gateVecs.count)"),
-            "t": .number(((data.time - t0) * 100).rounded() / 100),
-            "speed": .number((speed * 100).rounded() / 100),
-            "x": .number((p.x * 10).rounded() / 10),
-            "alt": .number((p.z * 100).rounded() / 100),
+            "t": .number((data.time - t0)),
+            "speed": .number(v.norm),
+            "x": .number(p.x),
+            "alt": .number(p.z),
         ])
     }
     handle.sync()
 
     if let maxSteps, step >= maxSteps {
-        print("DroneRace: ran \(step) steps; gates reached: \(Swift.min(targetI + 1, gateVecs.count))/\(gateVecs.count); "
-              + "final alt=\(((p.z)*100).rounded()/100)m, x=\((p.x*10).rounded()/10)m")
+        let alt = (p.z * 100).rounded() / 100, x = (p.x * 10).rounded() / 10
+        print("DroneRace: ran \(step) steps; gate \(Swift.min(targetI + 1, gateVecs.count))/\(gateVecs.count); alt=\(alt)m x=\(x)m")
         break
     }
     if maxSteps == nil { Thread.sleep(forTimeInterval: dt) }   // real-time when streaming live
 }
 ```
-
-Note: simplify the gate-time bookkeeping while implementing — the intent is only to log split times when the drone reaches a gate; keep exactly one append per gate-reach and drop the placeholder line. The controller/course/progression logic is what's tested; this loop is the wiring.
+(HUD numbers are rounded by `HUDValue` encoding to 2 decimals already — no need to pre-round here.)
 
 - [ ] **Step 2: Build**
 
 Run:
 ```bash
-cd samples/swift/drone
+cd samples/swift/drone-slalom
 PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig swift build
 ```
-Expected: builds `DroneRace`, zero warnings. Fix any compile error against the real `MuJoCo`/`WendyMuJoCo` API (e.g. confirm `data.qpos`/`data.qvel` return `[Double]`, `model.ptr.pointee.body_mass` is accessible, `setCtrl([Double])` takes exactly `nu==4` values).
+Expected: builds `DroneRace`, zero warnings. Fix any compile error against the real `MuJoCo`/`WendyMuJoCo` API (confirm `data.qpos`/`data.qvel` return `[Double]`, `model.ptr.pointee.body_mass` is accessible, `setCtrl([Double])` takes exactly `nu==4` values).
 
 - [ ] **Step 3: Bounded smoke run**
 
-Run (fetches the X2 on first run — needs network; writes to a temp slot dir so it doesn't clobber a live sim):
+Run (fetches the X2 on first run — needs network; writes to a temp slot dir so it never clobbers a live sim):
 ```bash
-cd samples/swift/drone
+cd samples/swift/drone-slalom
 WENDY_WORLDSIM_DIR=$(mktemp -d) DRONE_MAX_STEPS=1500 \
   PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig swift run DroneRace
 ```
-Expected: prints a summary line after 1500 steps (≈3s of sim at dt≈0.002) showing gates reached and a plausible altitude (~1.5m, near gate height) — proving the drone loads, is controlled, and climbs/flies rather than falling to the floor. If it immediately drops to alt≈0, the controller wiring (quat order, mass, ctrl mapping) is wrong — debug before declaring done.
+Expected: after 1500 steps (~3s of sim), prints a summary showing a plausible altitude (~1.5m, near gate height) and forward progress in x — proving the drone loads, is controlled, and flies rather than dropping to alt≈0. If it immediately falls to alt≈0, the controller wiring (quat order, mass, ctrl mapping) is wrong — debug before declaring done.
 
 - [ ] **Step 4: Write `README.md`**
 ```markdown
-# Drone slalom (Swift)
+# Drone slalom (Swift · MuJoCo Sim tab)
 
 A Skydio X2 quadrotor flying a 5-gate slalom under a geometric controller, streamed live to
-the Wendy Sandbox 🕹 Sim tab via `WendyMuJoCo`. Swift port of `starters/drone-slalom/mujoco_drone_race.py`.
+the Wendy Sandbox 🕹 Sim tab via `WendyMuJoCo`. Swift port of the MuJoCo reference
+`../drone/starters/drone-slalom/mujoco_drone_race.py`.
 
 ## Build & run
 Requires the sibling `swift-mujoco` package and MuJoCo installed (see that repo's README):
@@ -539,7 +524,7 @@ Requires the sibling `swift-mujoco` package and MuJoCo installed (see that repo'
     swift run DroneRace                       # streams to the Sim tab until stopped
     DRONE_MAX_STEPS=1500 swift run DroneRace  # bounded headless run (prints a summary)
 
-Edit `defaultGates` / controller gains in `Sources/DroneCore/` and rebuild.
+Edit `defaultGates` / controller gains in `Sources/SlalomCore/` and rebuild.
 
 > Dependency note: this sample uses a local path dependency on `../../../swift-mujoco`.
 > Once `swift-mujoco` is published, switch to a versioned git-URL dependency.
@@ -547,26 +532,18 @@ Edit `defaultGates` / controller gains in `Sources/DroneCore/` and rebuild.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add samples/swift/drone/Sources/DroneRace/main.swift samples/swift/drone/README.md
-git commit -m "feat(drone): DroneRace executable — X2 slalom streamed to the Sim tab"
+git add samples/swift/drone-slalom/Sources/DroneRace/main.swift samples/swift/drone-slalom/README.md
+git commit -m "feat(drone-slalom): DroneRace executable — X2 slalom streamed to the Sim tab"
 ```
 
 ---
 
 ## Self-Review
 
-**Spec coverage** (vs the design's DroneRace component: "Swift port of mujoco_drone_race.py; controller reuses MuJoCo math; course via MJCF include + gate boxes; streams via WendyMuJoCo"):
-- Controller (PD position, reduced-attitude, yaw hold, rotor mix) → Task 2 ✓
-- Course (gate frames + include x2.xml + floor) + gate progression → Task 3 ✓
-- X2 resolve/fetch + copy + course compose + control loop + HUD + launchPassive → Task 4 ✓
-- Depends on WendyMuJoCo/MuJoCo via path dependency → Task 1 ✓
-- No linear-algebra dependency (uses MuJoCo's `Vec3`/`Mat3`/`quat2Mat`) ✓
+**Spec coverage:** controller (Task 2), course + progression (Task 3), X2 resolve/load + loop + HUD + launchPassive (Task 4), path-dependency build (Task 1). No linear-algebra dependency (uses MuJoCo's `Vec3`/`Mat3`/`quat2Mat`). Lives solely under `drone-slalom/`; never touches `drone/`.
 
-**Placeholder scan:** Task 4's loop has a deliberately-flagged simplification note for gate-time logging (the tested logic is in DroneCore); every other step has complete code. The gate-time bookkeeping is cosmetic (HUD/print only) and explicitly called out to tidy during implementation — not a hidden TODO in the load-bearing logic.
+**Placeholder scan:** none — every code step is complete. Gate-time split logging was intentionally dropped (HUD shows the running gate/time; splits weren't load-bearing).
 
-**Type consistency:** `DroneController.control(position:rotation:velocity:angularVelocity:target:mass:)` and `rotorMix` (Task 2) are called with exactly those labels in Task 4. `buildCourseXML(gates:opening:)`, `advanceGate(position:gates:current:reach:)`, `defaultGates`, `gateOpening`, `reach` (Task 3) are used verbatim in Task 4. `Vec3`/`Mat3`/`Quat`/`quat2Mat` are the real `MuJoCo` types. `launchPassive(_:_:title:)`, `Handle.hud([String:HUDValue])`, `Handle.sync()`, `Handle.isRunning()`, `Menagerie.resolveModelPath`/`.fetch`/`.vendorDirs`, `WorldSim.directory()` are the real `WendyMuJoCo` API.
+**Type consistency:** `DroneController.control(position:rotation:velocity:angularVelocity:target:mass:)`/`rotorMix` (T2) called with those labels in T4; `buildCourseXML(gates:opening:)`, `advanceGate(position:gates:current:reach:)`, `defaultGates`/`gateOpening`/`reach` (T3) used verbatim in T4; `Vec3`/`Mat3`/`Quat`/`quat2Mat`, `launchPassive(_:_:title:)`, `Handle.hud([String:HUDValue])`/`.sync()`/`.isRunning()`, `Menagerie.resolveModelPath`/`.fetch`/`.vendorDirs`, `WorldSim.directory()` are the real APIs. Library target is `SlalomCore` everywhere (no `DroneCore`, avoiding the sibling package's target name).
 
-**Known risks:**
-- Task 4's smoke run needs network (first-run X2 fetch) and is not a `swift test` unit test — the unit-tested surface is DroneCore; the executable is validated by the bounded run. Stated in the task.
-- `setCtrl([Double])` requires exactly `nu` values; the X2 has 4 actuators and `rotorMix` returns 4. If a future model differs, the precondition traps — acceptable for this drone-specific sample.
-- The controller finite-differences world velocity from position (matching the Python), so the first frame's `v` is ~0 (prevP initialized to the start position) — correct.
+**Known risks:** Task 4's smoke run needs network (first-run X2 fetch) and isn't a `swift test` unit test — the unit-tested surface is `SlalomCore`; the executable is validated by the bounded run. `setCtrl([Double])` requires exactly `nu==4` values; `rotorMix` returns 4 and the X2 has 4 actuators.
