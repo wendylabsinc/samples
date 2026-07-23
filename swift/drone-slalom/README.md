@@ -15,5 +15,5 @@ automatically) and MuJoCo installed locally (see that repo's README for the one-
 
 Edit `defaultGates` / controller gains in `Sources/SlalomCore/` and rebuild.
 
-> Dependency note: this sample depends on `swift-mujoco` via git URL (branch `main`).
-> Pin to a tagged release once one is cut for reproducible builds.
+> Dependency note: this sample depends on the published
+> [`swift-mujoco`](https://github.com/wendylabsinc/swift-mujoco) `0.1.0` (up to next minor).

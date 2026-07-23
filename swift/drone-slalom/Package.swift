@@ -5,7 +5,7 @@ let package = Package(
     name: "DroneRace",
     platforms: [.macOS(.v13)],
     dependencies: [
-        .package(url: "https://github.com/wendylabsinc/swift-mujoco.git", branch: "main"),
+        .package(url: "https://github.com/wendylabsinc/swift-mujoco.git", .upToNextMinor(from: "0.1.0")),
     ],
     targets: [
         .target(name: "SlalomCore", dependencies: [
