@@ -1,3 +1,8 @@
+# Runtime base is selected by JetPack major: 6 = Orin (CUDA 12 / Ampere),
+# 7 = Thor (CUDA 13 / Blackwell). wendy injects WENDY_JETPACK_MAJOR from the
+# device; default 6 keeps Orin and local builds working.
+ARG WENDY_JETPACK_MAJOR=6
+
 # Build frontend
 FROM node:22-slim AS frontend-builder
 
@@ -8,7 +13,10 @@ COPY frontend/ ./
 RUN npm run build
 
 # Runtime stage - Ultralytics official Jetson image (has YOLOv8, OpenCV, PyTorch pre-installed)
-FROM ultralytics/ultralytics:latest-jetson-jetpack6
+FROM ultralytics/ultralytics:latest-jetson-jetpack6 AS base-6
+FROM ultralytics/ultralytics:latest-nvidia-arm64    AS base-7
+
+FROM base-${WENDY_JETPACK_MAJOR}
 
 WORKDIR /app
 

@@ -1,6 +1,6 @@
 {
-    "appId": "sh.wendy.examples.qwen3-chat",
-    "version": "0.1.0",
+    "appId": "com.example.swift-mlx-llm-example",
+    "version": "0.0.1",
     "entitlements": [
         {
             "type": "network",
@@ -12,7 +12,7 @@
     ],
     "readiness": {
         "tcpSocket": { "port": 6002 },
-        "timeoutSeconds": 30
+        "timeoutSeconds": 60
     },
     "hooks": {
         "postStart": {
