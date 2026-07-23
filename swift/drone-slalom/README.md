@@ -5,7 +5,9 @@ the Wendy Sandbox 🕹 Sim tab via `WendyMuJoCo`. Swift port of the MuJoCo refer
 `../drone/starters/drone-slalom/mujoco_drone_race.py`.
 
 ## Build & run
-Requires the sibling `swift-mujoco` package and MuJoCo installed (see that repo's README):
+Depends on [`swift-mujoco`](https://github.com/wendylabsinc/swift-mujoco) (fetched
+automatically) and MuJoCo installed locally (see that repo's README for the one-time
+`install-mujoco.sh` step):
 
     export PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig
     swift run DroneRace                       # streams to the Sim tab until stopped
@@ -13,5 +15,5 @@ Requires the sibling `swift-mujoco` package and MuJoCo installed (see that repo'
 
 Edit `defaultGates` / controller gains in `Sources/SlalomCore/` and rebuild.
 
-> Dependency note: this sample uses a local path dependency on `../../../swift-mujoco`.
-> Once `swift-mujoco` is published, switch to a versioned git-URL dependency.
+> Dependency note: this sample depends on `swift-mujoco` via git URL (branch `main`).
+> Pin to a tagged release once one is cut for reproducible builds.
