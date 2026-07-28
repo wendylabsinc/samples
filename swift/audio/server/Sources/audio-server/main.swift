@@ -258,7 +258,7 @@ func handleMicrophoneWebSocket(
         }
 
         var pipeline: Pipeline?
-        var sink: AudioSink?
+        var sink: AudioBufferSink?
 
         for backend in backends {
             let pipelineDesc = """
@@ -271,7 +271,7 @@ func handleMicrophoneWebSocket(
 
             do {
                 pipeline = try Pipeline(pipelineDesc)
-                sink = try pipeline!.audioSink(named: "sink")
+                sink = try pipeline!.audioBufferSink(named: "sink")
                 try pipeline!.play()
                 logger.info("Using audio backend: \(backend)")
                 break
