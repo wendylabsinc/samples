@@ -159,8 +159,10 @@ struct AudioServer {
         let app = Application(
             router: router,
             server: .http1WebSocketUpgrade { request, _, logger in
-                // Only upgrade /ws/microphone
-                guard request.path == "/ws/microphone" else {
+                // Only upgrade /ws/microphone, including any attached query string.
+                let target = request.path ?? ""
+                guard target.prefix(while: { $0 != "?" }) == "/ws/microphone" else {
+                    logger.debug("Not a microphone WebSocket path, not upgrading: \(target)")
                     return .dontUpgrade
                 }
 
