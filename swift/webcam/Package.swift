@@ -11,7 +11,8 @@ let package = Package(
     .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     .package(
       url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
-    .package(url: "https://github.com/wendylabsinc/gstreamer-swift.git", from: "0.0.3"),
+    .package(
+      url: "https://github.com/wendylabsinc/gstreamer-swift.git", .upToNextMinor(from: "0.1.0")),
     .package(url: "https://github.com/apple/swift-container-plugin", from: "1.0.0"),
   ],
   targets: [

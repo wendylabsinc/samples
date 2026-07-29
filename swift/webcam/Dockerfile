@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY server/Package.swift server/Package.resolved* ./
-COPY server/Sources ./Sources
+COPY Package.swift Package.resolved* ./
+COPY Server ./Server
 
 RUN swift build
 
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy the built Swift binary
-COPY --from=swift-builder /app/.build/debug/webcam-server /usr/local/bin/webcam-server
+COPY --from=swift-builder /app/.build/debug/WebcamServer /usr/local/bin/webcam-server
 
 # Copy static files
 COPY index.html .
