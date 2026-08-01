@@ -1,0 +1,27 @@
+{
+    "appId": "sh.wendy.examples.parakeet-voice-mcp",
+    "version": "0.0.1",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "audio"
+        },
+        {
+            "type": "persist",
+            "name": "parakeet-voice-mcp-models",
+            "path": "/models"
+        }
+    ],
+    "readiness": {
+        "tcpSocket": { "port": 8080 },
+        "timeoutSeconds": 600
+    },
+    "hooks": {
+        "postStart": {
+            "cli": "open http://${WENDY_HOSTNAME}:8080"
+        }
+    }
+}
