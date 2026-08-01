@@ -32,7 +32,7 @@ cd python/parakeet-voice-mcp
 wendy run
 ```
 
-Open `http://<device>:8080`, say the wake word, then a command such as
+Open `http://<device>:8080`, say **"Hey Wendy"**, then a command such as
 "turn the light red". The page shows what you said and, underneath it, the tool
 call that ran and what it returned.
 
@@ -45,7 +45,7 @@ call that ran and what it returned.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WAKE_WORD` | `hey_jarvis` | A pretrained openWakeWord name, or a path to a custom `.onnx` |
+| `WAKE_WORD` | `/app/hey_wendy.onnx` | Path to a wake-word model, or a pretrained openWakeWord name (`hey_jarvis`, `alexa`, …) |
 | `WAKE_THRESHOLD` | `0.5` | Detection threshold, 0-1. Raise it if the room triggers it |
 | `COMMAND_WINDOW_S` | `8` | How long after the wake word a command is accepted |
 | `MCP_URLS` | `http://127.0.0.1:3000` | Comma-separated MCP servers; tools from all are merged |
@@ -56,9 +56,13 @@ call that ran and what it returned.
 
 ### Your own wake word
 
-`WAKE_WORD` accepts the pretrained models openWakeWord ships (`hey_jarvis`,
-`alexa`, `hey_mycroft`, …) or a path to a custom model baked into the image.
-Train one for your own phrase with
+This sample ships a custom **"Hey Wendy"** model (`hey_wendy.onnx`, 214 KB),
+trained on 10,000 synthesised positives for 50,000 steps. Measured before it was
+committed: it fires on 15/15 held-out clips (scores 0.757-0.989) and scores
+≤ 0.010 on ordinary speech.
+
+`WAKE_WORD` also accepts the pretrained models openWakeWord ships (`hey_jarvis`,
+`alexa`, `hey_mycroft`, …). Train a model for your own phrase with
 [wakeword-forge](https://github.com/wendylabsinc/wakeword-forge):
 
 ```bash
@@ -67,7 +71,9 @@ docker run --gpus all -e WAKEWORD_PHRASE="hey wendy" \
 ```
 
 Pick a phrase that is not a near-homophone of a common word or a colleague's
-name: an 80 ms-frame model treats "hey Wendell" and "hey Wendy" as the same thing.
+name. This is not hypothetical: the bundled model scores 0.968 on "hey Wendell",
+essentially as high as on the real phrase, because at 80 ms frames they are the
+same sound.
 
 ## What to notice
 
@@ -87,7 +93,8 @@ name: an 80 ms-frame model treats "hey Wendell" and "hey Wendy" as the same thin
 | File | Purpose |
 |---|---|
 | `app.py` | Wiring: wake word, capture loop, LLM + MCP worker, web UI |
-| `wakeword.py` | openWakeWord spotter (pretrained name or custom model) |
+| `wakeword.py` | openWakeWord spotter (bundled model, custom path, or pretrained name) |
+| `hey_wendy.onnx` | The bundled "Hey Wendy" wake-word model |
 | `mcpclient.py` | Streamable HTTP MCP client and multi-server tool registry |
 | `devices.py`, `capture.py`, `frontend.py`, `utterance.py` | Audio pipeline |
 | `asr.py` | Parakeet inference via sherpa-onnx |

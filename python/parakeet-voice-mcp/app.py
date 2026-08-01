@@ -45,9 +45,10 @@ MODEL_DIR = os.environ.get("MODEL_DIR", "/models")
 PORT = int(os.environ.get("PORT", "8080"))
 AUDIO_DEVICE = os.environ.get("AUDIO_DEVICE", "auto")
 
-# A pretrained openWakeWord name ("hey_jarvis", "alexa", ...) or a path to a
-# custom model. Train your own with wendylabsinc/wakeword-forge.
-WAKE_WORD = os.environ.get("WAKE_WORD", "hey_jarvis")
+# A path to a custom wake-word model, or a pretrained openWakeWord name
+# ("hey_jarvis", "alexa", ...). The bundled "Hey Wendy" model was trained with
+# wendylabsinc/wakeword-forge; train your own the same way.
+WAKE_WORD = os.environ.get("WAKE_WORD", "/app/hey_wendy.onnx")
 WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.5"))
 # How long after the wake word a command is still accepted.
 COMMAND_WINDOW_S = float(os.environ.get("COMMAND_WINDOW_S", "8"))

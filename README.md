@@ -47,7 +47,7 @@ wendy run
 ```
 
 ### `python/parakeet-voice-mcp`
-Voice commands that do something: a wake word gates local Parakeet recognition,
+Voice commands that do something: a bundled "Hey Wendy" wake word gates local Parakeet recognition,
 a local LLM turns what you said into a tool call, and the call is dispatched to
 a real MCP server. Tools are discovered from the server, so the model can only
 call what genuinely exists.

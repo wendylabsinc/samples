@@ -31,6 +31,9 @@ print("wake-word feature models OK")
 PYCHECK
 
 COPY *.py ./
+# The bundled "Hey Wendy" wake word (trained with wendylabsinc/wakeword-forge).
+# Point WAKE_WORD at another file, or at a pretrained openWakeWord name, to change it.
+COPY hey_wendy.onnx /app/hey_wendy.onnx
 
 ENV PYTHONUNBUFFERED=1
 ENV MODEL_DIR=/models
