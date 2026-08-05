@@ -1,0 +1,29 @@
+{
+  "appId": "rosmaster-a1-web-remote",
+  "version": "0.8.2",
+  "platform": "linux",
+  "services": {
+    "web": {
+      "context": ".",
+      "entitlements": [
+        {
+          "type": "network",
+          "mode": "host"
+        }
+      ],
+      "readiness": {
+        "tcpSocket": {
+          "port": 8091
+        },
+        "timeoutSeconds": 30
+      },
+      "frameworks": {
+        "ros2": {
+          "domainId": 0,
+          "rmw": "rmw_cyclonedds_cpp",
+          "distro": "humble"
+        }
+      }
+    }
+  }
+}

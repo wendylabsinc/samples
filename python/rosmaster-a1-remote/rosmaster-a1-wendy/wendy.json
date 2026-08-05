@@ -1,0 +1,43 @@
+{
+  "appId": "rosmaster-a1-base",
+  "version": "0.1.56",
+  "platform": "linux",
+  "services": {
+    "base": {
+      "context": ".",
+      "entitlements": [
+        {
+          "type": "network",
+          "mode": "host"
+        },
+        {
+          "type": "usb"
+        },
+        {
+          "type": "serial",
+          "device": "ttyUSB1"
+        },
+        {
+          "type": "serial",
+          "device": "ttyUSB2"
+        },
+        {
+          "type": "camera"
+        },
+        {
+          "type": "input"
+        },
+        {
+          "type": "audio"
+        }
+      ],
+      "frameworks": {
+        "ros2": {
+          "domainId": 0,
+          "rmw": "rmw_cyclonedds_cpp",
+          "distro": "humble"
+        }
+      }
+    }
+  }
+}
