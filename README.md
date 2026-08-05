@@ -38,17 +38,20 @@ docker run --rm python-hello-world
 
 ### `python/rosmaster-a1-remote`
 Drive a Yahboom Rosmaster A1 from the browser with an Xbox controller, watching
-four live RealSense camera feeds. Four apps: motor bridge, LiDAR driver,
-RealSense driver, and the web remote with autonomous mode.
+four live RealSense camera feeds. One multi-container app with four services:
+motor bridge, LiDAR driver, RealSense driver, and the web remote with
+autonomous mode.
 
 ```bash
-cd python/rosmaster-a1-remote/rosmaster-a1-web-remote-wendy
+cd python/rosmaster-a1-remote
 wendy run
 ```
 
-Deploy all four apps in order, or use `scripts/deploy_car.sh`. Note the remote
+Deploys all four services in one go; add `--service web` to redeploy just the
+UI. Or use `scripts/deploy_car.sh`, which prunes serial entitlements for
+adapters that are not currently present before deploying. Note the remote
 must be opened over HTTPS, because browsers only expose the Gamepad API to a
-secure context. See the sample README for the full deploy order and controls.
+secure context. See the sample README for the full service list and controls.
 
 ### `python/parakeet-live-transcribe`
 Live speech-to-text on the device: a USB microphone is transcribed locally with

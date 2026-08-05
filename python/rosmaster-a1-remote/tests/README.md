@@ -51,5 +51,5 @@ behaviors with the whole suite still green. Do not add source scraping
 assertions back; add a test that runs the code.
 
 ```
-node --test tests/web/
+node --test tests/web/*.test.mjs
 ```

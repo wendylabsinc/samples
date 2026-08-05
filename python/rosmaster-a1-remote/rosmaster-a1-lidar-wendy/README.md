@@ -1,29 +1,21 @@
-# Rosmaster A1 Wendy App
+# `lidar` service
 
-Minimal WendyOS base-driver app for the Yahboom Rosmaster A1.
+Build context for the `lidar` service of the `rosmaster-a1` app. Runs the
+YDLIDAR T-mini driver, publishing `/scan` plus a `/lidar_sensor_probe/status`
+heartbeat. Camera and audio probing are disabled here — the `base` service
+already owns those.
 
-This first stage runs the preserved Yahboom ROS 2 Humble driver and exposes:
+The car has two CH340-style adapters that renumber between boots, and the
+motor board owns the one stable identifier (its `by-id` symlink), so the
+LiDAR's port is chosen by elimination: whichever adapter that symlink does
+not resolve to. A supervisor loop retries forever with backoff so a flaky
+adapter dropping off the bus stops the driver, not the container.
 
-- `/cmd_vel`
-- `/vel_raw`
-- `/imu/data_raw`
-- `/imu/mag`
-- `/voltage`
-- `/joint_states`
-- `/edition`
-
-It does not send movement commands by itself.
-
-Deploy:
+Deploy from the parent directory, alongside the other three services:
 
 ```bash
-wendy run --yes --detach --device <car-hostname>.local
+cd .. && wendy run --yes --detach --service lidar --device <car-hostname>.local:50052
 ```
 
-After deploy:
-
-```bash
-wendy --json device apps list --device <car-hostname>.local
-wendy --json device ros2 topics --device <car-hostname>.local
-wendy --json device ros2 nodes --device <car-hostname>.local
-```
+See `../README.md` for the full app, the other services, and deploy commands
+that cover all four at once.

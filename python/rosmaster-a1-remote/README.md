@@ -1,8 +1,8 @@
 # Rosmaster A1 Remote
 
 Drive a Yahboom Rosmaster A1 from a browser, with an Xbox controller, watching
-four live camera feeds from an Intel RealSense D435i. Runs as four WendyOS apps
-on the car's Jetson Orin Nano.
+four live camera feeds from an Intel RealSense D435i. Runs as one multi-container
+WendyOS app, `rosmaster-a1`, with four services, on the car's Jetson Orin Nano.
 
 <!-- markdownlint-disable-next-line -->
 | | |
@@ -24,32 +24,59 @@ on the car's Jetson Orin Nano.
 - **A diagnostics panel** that says why the controller is not working, which is
   usually the browser rather than the pad.
 
-## The apps
+## The services
 
-Deploy in this order. Each is a directory; run `wendy run` from inside it.
+One app, `rosmaster-a1`, with four services declared in a single root
+`wendy.json`. Each service still lives in its own directory and builds from
+its own Dockerfile; the manifest is what ties them together.
 
-| App | What it does |
-|---|---|
-| `rosmaster-a1-wendy` | Motor bridge and telemetry. Owns the serial link to the motor board, subscribes to `/cmd_vel`, publishes encoders, IMU and voltage. |
-| `rosmaster-a1-lidar-wendy` | YDLIDAR driver, publishes `/scan`. |
-| `rosmaster-a1-realsense-wendy` | RealSense driver, publishes depth, colour and both infrared streams. |
-| `rosmaster-a1-web-remote-wendy` | The remote itself: HTTP and HTTPS server, MJPEG streams, controller handling, autonomy. |
+| Service | Directory | What it does |
+|---|---|---|
+| `base` | `rosmaster-a1-wendy/` | Motor bridge and telemetry, plus the sensor probe that captures camera and audio. Owns the serial link to the motor board, subscribes to `/cmd_vel`, publishes encoders, IMU and voltage. |
+| `lidar` | `rosmaster-a1-lidar-wendy/` | YDLIDAR driver, publishes `/scan` and a `/lidar_sensor_probe/status` heartbeat. Its probe skips camera and audio capture — `base` already owns those. |
+| `realsense` | `rosmaster-a1-realsense-wendy/` | RealSense driver, publishes depth, colour and both infrared streams. |
+| `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, MJPEG streams, controller handling, autonomy. |
 
 ```bash
-cd rosmaster-a1-wendy            && wendy run --yes --detach --device <car>:50052
-cd ../rosmaster-a1-lidar-wendy   && wendy run --yes --detach --device <car>:50052
-cd ../rosmaster-a1-realsense-wendy && wendy run --yes --detach --device <car>:50052
-cd ../rosmaster-a1-web-remote-wendy && wendy run --yes --detach --device <car>:50052
+wendy run --yes --detach --device <car-hostname>.local:50052
 ```
 
-`scripts/deploy_car.sh` does all four and, importantly, drops `serial`
-entitlements for devices that are not currently present. A serial entitlement
-naming an absent device does not degrade, it hard fails container creation, and
-USB serial adapters renumber between boots.
+builds all four services in parallel and deploys them, run from this
+directory. None of the services declare `dependsOn`, so a single service can
+also be deployed on its own, which is useful when only the remote changed:
+
+```bash
+wendy run --yes --detach --service web --device <car-hostname>.local:50052
+```
+
+On the device, container IDs are `rosmaster-a1_<service>`; read one service's
+logs with `wendy device logs --app rosmaster-a1 --service <name>`.
+
+`scripts/deploy_car.sh <car-hostname>.local:50052 [service ...]` is the
+preferred way to deploy. It prunes `serial` entitlements for tty nodes that
+are not currently present, then runs `wendy run` for you. A serial
+entitlement naming an absent device does not degrade, it hard fails container
+creation, and USB serial adapters renumber between boots — and now that all
+four services share one app, one absent adapter can block the whole deploy
+rather than just the app that owned it (see "Notes and gotchas").
+
+## Diagnosing serial devices
+
+`rosmaster-a1-devscan-wendy/` is a standalone sibling app, not one of the four
+services above. It declares zero serial entitlements, so it always deploys
+even when named tty nodes are missing, and prints a census of `/dev/serial/by-id`
+symlinks and every ttyUSB/ttyACM node it finds — which is exactly what you want
+to know before deciding which entitlements to prune. Run it on demand:
+
+```bash
+cd rosmaster-a1-devscan-wendy && wendy run --yes --device <car-hostname>.local:50052
+```
 
 ## Driving it
 
-Open the remote over **HTTPS**:
+The web service opens the remote for you: once it passes its readiness check,
+a postStart hook launches your browser at `https://<car-hostname>.local:8443`
+automatically on deploy. To open it by hand instead:
 
 ```text
 https://<car-hostname>.local:8443
@@ -121,7 +148,7 @@ against a fake DOM, the server with `unittest` against stub ROS modules, so
 neither needs the car or a ROS install.
 
 ```bash
-node --test tests/web/
+node --test tests/web/*.test.mjs
 python3 -m venv .venv && .venv/bin/pip install numpy Pillow
 .venv/bin/python -m unittest discover -s tests/python -t .
 ```
@@ -135,7 +162,12 @@ again.
   asking it for its firmware version rather than by device name; the LiDAR is
   whichever adapter the motor board's `by-id` symlink does not resolve to.
 - **A serial entitlement for an absent device hard fails deployment.** It does
-  not warn and continue, so a loose cable can make an app undeployable.
+  not warn and continue, so a loose cable can make an app undeployable. With
+  all four services now sharing one `rosmaster-a1` app instead of four
+  separate ones, an absent entitled device blocks that service's container
+  for the whole-app deploy — a bigger blast radius than when each service
+  deployed on its own. `scripts/deploy_car.sh` is the fix: it prunes serial
+  entitlements for devices that are not currently present before deploying.
 - **RealSense infrared needs its own profile.** `enable_infra1` and
   `enable_infra2` alone advertise the topics and publish nothing;
   `depth_module.infra_profile` is also required.
