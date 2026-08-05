@@ -13,13 +13,9 @@ is dispatched to that server. Nothing leaves the device.
 from __future__ import annotations
 
 import asyncio
-import glob
 import os
 import re
-import tarfile
-import tempfile
 import threading
-import urllib.request
 import uuid
 
 import httpx
@@ -29,9 +25,11 @@ from fastapi.responses import HTMLResponse
 
 from asr import SherpaTranscriber
 from capture import Capture
+from collie_adapter import BorderCollieAdapter
 from devices import list_input_devices, select_input_device
 from frontend import AudioFrontEnd
 from mcpclient import MultiMCP
+from model_cache import ensure_model
 from page import INDEX_HTML
 from utterance import UtteranceChunker
 from wakeword import OpenWakeWordSpotter
@@ -42,8 +40,15 @@ MODEL_URL = os.environ.get(
     "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
 )
 MODEL_DIR = os.environ.get("MODEL_DIR", "/models")
+MODEL_NAME = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+MODEL_SHA256 = os.environ.get(
+    "MODEL_SHA256",
+    "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf",
+)
 PORT = int(os.environ.get("PORT", "8080"))
 AUDIO_DEVICE = os.environ.get("AUDIO_DEVICE", "auto")
+ACTION_MODE = os.environ.get("ACTION_MODE", "mcp")
+BORDER_COLLIE_URL = os.environ.get("BORDER_COLLIE_URL", "http://127.0.0.1:8110")
 
 # A path to a custom wake-word model, or a pretrained openWakeWord name
 # ("hey_jarvis", "alexa", ...). The bundled "Hey Wendy" model was trained with
@@ -67,25 +72,13 @@ SYSTEM_PROMPT = (
 )
 
 
-def ensure_model() -> None:
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    if glob.glob(os.path.join(MODEL_DIR, "**", "*encoder*.onnx"), recursive=True):
-        print(f"[asr] model already present in {MODEL_DIR}", flush=True)
-        return
-    print(f"[asr] downloading model (~460 MB): {MODEL_URL}", flush=True)
-    with tempfile.NamedTemporaryFile(suffix=".tar.bz2", delete=False) as tmp:
-        path = tmp.name
-    try:
-        urllib.request.urlretrieve(MODEL_URL, path)
-        with tarfile.open(path, "r:bz2") as tar:
-            tar.extractall(MODEL_DIR)
-    finally:
-        os.remove(path)
-    print("[asr] model ready", flush=True)
-
-
 def build_app() -> FastAPI:
-    ensure_model()
+    ensure_model(
+        model_dir=MODEL_DIR,
+        model_url=MODEL_URL,
+        expected_sha256=MODEL_SHA256,
+        model_name=MODEL_NAME,
+    )
     print("[asr] loading Parakeet...", flush=True)
     transcriber = SherpaTranscriber(MODEL_DIR, model_name="parakeet-tdt-0.6b")
     print("[asr] ready", flush=True)
@@ -99,6 +92,9 @@ def build_app() -> FastAPI:
     commands: asyncio.Queue = asyncio.Queue()
     ready = {"ready": False}
     state: dict = {"loop": None}
+    collie = BorderCollieAdapter(BORDER_COLLIE_URL) if ACTION_MODE == "border_collie" else None
+    if collie is not None:
+        ready["ready"] = True
 
     async def broadcast(message: dict) -> None:
         for ws in list(clients):
@@ -219,17 +215,53 @@ def build_app() -> FastAPI:
         finally:
             await client.aclose()
 
+    async def collie_bridge() -> None:
+        """Dispatch a tiny phrase allowlist without an LLM or general robot tools."""
+        assert collie is not None
+        print("[collie] ready; voice actions start disarmed", flush=True)
+        while True:
+            cid, command_text = await commands.get()
+            try:
+                result = await asyncio.to_thread(collie.dispatch, command_text)
+                await broadcast({"kind": "action", "id": cid, **result})
+            except Exception as exc:
+                print(f"[collie] '{command_text}' failed: {exc}", flush=True)
+                await broadcast({"kind": "action", "id": cid, "calls": [],
+                                 "error": str(exc)})
+
     @app.on_event("startup")
     async def _startup() -> None:
         state["loop"] = asyncio.get_running_loop()
         threading.Thread(target=listen, name="listen", daemon=True).start()
         # A background task, so a missing MCP server or LLM never blocks the page.
-        asyncio.create_task(bridge())
+        asyncio.create_task(collie_bridge() if collie is not None else bridge())
 
     @app.get("/healthz")
     async def _healthz() -> dict:
         return {"ok": True, "wake_word": spotter.key, "tools_ready": ready["ready"],
-                "clients": len(clients)}
+                "clients": len(clients), "action_mode": ACTION_MODE,
+                "actions_armed": collie.armed if collie is not None else None}
+
+    @app.get("/api/actions/status")
+    async def _action_status() -> dict:
+        return {"mode": ACTION_MODE,
+                "armed": collie.armed if collie is not None else None}
+
+    @app.post("/api/actions/arm")
+    async def _arm_actions() -> dict:
+        if collie is None:
+            return {"mode": ACTION_MODE, "armed": None}
+        collie.arm()
+        print("[collie] voice actions armed from the local UI", flush=True)
+        return {"mode": ACTION_MODE, "armed": True}
+
+    @app.post("/api/actions/disarm")
+    async def _disarm_actions() -> dict:
+        if collie is None:
+            return {"mode": ACTION_MODE, "armed": None}
+        collie.disarm()
+        print("[collie] voice actions disarmed", flush=True)
+        return {"mode": ACTION_MODE, "armed": False}
 
     @app.get("/", response_class=HTMLResponse)
     async def _index() -> str:

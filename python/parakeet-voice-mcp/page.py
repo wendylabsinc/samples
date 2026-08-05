@@ -38,6 +38,14 @@ INDEX_HTML = """<!doctype html>
   .action code { color: #eafff2; }
   .action.err { background: #2a1618; border-color: #5a2a2e; color: #f3b7bc; }
   .pending { color: #8b94a7; font-style: italic; }
+  #actionControls { display: none; align-items: center; gap: 10px; margin: 0 0 16px;
+                    padding: 12px 14px; border: 1px solid #4a3c1e; border-radius: 12px;
+                    background: #211d13; color: #ead9a0; }
+  #actionControls.show { display: flex; }
+  #actionControls button { margin-left: auto; border: 0; border-radius: 9px; padding: 9px 13px;
+                           background: #3577e5; color: white; font-weight: 650; cursor: pointer; }
+  #actionControls button.armed { background: #b33f46; }
+  #actionState { font-weight: 700; }
 </style>
 </head>
 <body>
@@ -47,6 +55,12 @@ INDEX_HTML = """<!doctype html>
 </header>
 <main>
   <div class="hint">Say <b>&ldquo;{{WAKE}}&rdquo;</b>, then a command. Everything runs on the device.</div>
+  <div id="actionControls">
+    <span>Border Collie voice actions: <span id="actionState">disarmed</span>.<br>
+      <small>Allowed: &ldquo;go to pear/apple&rdquo; and convenience stop. Keep the physical remote ready.</small>
+    </span>
+    <button id="armButton" type="button">Arm voice actions</button>
+  </div>
   <div id="wake"><span class="pulse"></span><span>Heard &ldquo;{{WAKE}}&rdquo; &mdash; listening...</span></div>
   <div id="feed"><div id="empty">Waiting for &ldquo;{{WAKE}}&rdquo;...</div></div>
 </main>
@@ -55,6 +69,9 @@ INDEX_HTML = """<!doctype html>
   const dot = document.getElementById('dot');
   const statusText = document.getElementById('statusText');
   const wake = document.getElementById('wake');
+  const actionControls = document.getElementById('actionControls');
+  const actionState = document.getElementById('actionState');
+  const armButton = document.getElementById('armButton');
   let empty = document.getElementById('empty');
   const cards = {};
   let wakeTimer = null;
@@ -124,7 +141,32 @@ INDEX_HTML = """<!doctype html>
       else if (msg.kind === 'action') addAction(msg);
     };
   }
+  function renderActionState(status) {
+    if (status.mode !== 'border_collie') return;
+    actionControls.classList.add('show');
+    actionState.textContent = status.armed ? 'ARMED' : 'disarmed';
+    armButton.textContent = status.armed ? 'Disarm voice actions' : 'Arm voice actions';
+    armButton.className = status.armed ? 'armed' : '';
+    armButton.dataset.armed = status.armed ? '1' : '0';
+  }
+  async function refreshActionState() {
+    try {
+      const response = await fetch('/api/actions/status');
+      renderActionState(await response.json());
+    } catch (_) {}
+  }
+  armButton.addEventListener('click', async () => {
+    const operation = armButton.dataset.armed === '1' ? 'disarm' : 'arm';
+    armButton.disabled = true;
+    try {
+      const response = await fetch('/api/actions/' + operation, { method: 'POST' });
+      renderActionState(await response.json());
+    } finally {
+      armButton.disabled = false;
+    }
+  });
   connect();
+  refreshActionState();
 </script>
 </body>
 </html>

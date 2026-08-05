@@ -53,6 +53,24 @@ call that ran and what it returned.
 | `LLM_MODEL` | `qwen2.5:3b` | Any Ollama model that supports tools |
 | `AUDIO_DEVICE` | `auto` | `auto`, a device index, or part of a device name |
 | `PORT` | `8080` | Web UI port |
+| `ACTION_MODE` | `mcp` | `mcp` for discovered tools, or `border_collie` for the stage-demo allowlist |
+| `BORDER_COLLIE_URL` | `http://127.0.0.1:8110` | Border Collie API used by the allowlisted adapter |
+
+### Border Collie demo mode
+
+This sample manifest selects `ACTION_MODE=border_collie` for Woof. In that mode
+the LLM and general MCP discovery are bypassed. Only these phrases are accepted
+after **Hey Wendy**:
+
+* `go to pear` / `go to the pear`
+* `go to apple` / `go to the apple`
+* `stop`, `stop demo`, or `stop the demo`
+
+Voice actions start **disarmed after every app restart**. Review live transcripts
+at `http://<device>:8080`, then explicitly arm them there. The adapter calls the
+Border Collie app's existing `/api/run` and `/api/stop` endpoints, so its normal
+preflight and motion gates still apply. Spoken stop is only a convenience; it is
+not an emergency-stop mechanism, and the physical remote remains authoritative.
 
 ### Your own wake word
 
