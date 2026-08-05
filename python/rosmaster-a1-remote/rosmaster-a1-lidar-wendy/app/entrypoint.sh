@@ -49,6 +49,10 @@ fi
 echo "Starting sensor-only probe"
 export SENSOR_PROBE_NODE_NAME="${SENSOR_PROBE_NODE_NAME:-lidar_sensor_probe}"
 export SENSOR_PROBE_STATUS_TOPIC="${SENSOR_PROBE_STATUS_TOPIC:-/lidar_sensor_probe/status}"
+# The base service's probe owns camera/audio capture; this copy exists for the
+# /lidar_sensor_probe/status heartbeat and /scan monitoring only.
+export PROBE_CAMERA=0
+export PROBE_AUDIO=0
 unset PROBE_RAW_LIDAR
 python3 /app/sensor_probe.py &
 sensor_probe_pid=$!

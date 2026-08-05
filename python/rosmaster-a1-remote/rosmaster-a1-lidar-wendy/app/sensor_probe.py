@@ -47,11 +47,25 @@ class SensorProbe(Node):
         }
         status_topic = os.environ.get("SENSOR_PROBE_STATUS_TOPIC", "/sensor_probe/status")
         self.status_publisher = self.create_publisher(String, status_topic, 10)
-        self.imu_publisher = self.create_publisher(Imu, "/imu/data_raw", 10)
-        self.mag_publisher = self.create_publisher(MagneticField, "/imu/mag", 10)
-        self.joint_publisher = self.create_publisher(JointState, "/joint_states", 10)
-        self.vel_publisher = self.create_publisher(Twist, "/vel_raw", 10)
-        self.voltage_publisher = self.create_publisher(Float32, "/voltage", 10)
+
+        # /imu/data_raw, /imu/mag, /joint_states, /vel_raw, and /voltage are owned by
+        # base_bridge.py in the base container. This probe only republishes them itself
+        # when it is decoding the raw serial stream (PROBE_BASE_SERIAL=1); otherwise it
+        # only ever subscribes to them below, so creating these publishers would just be
+        # a duplicate, unused publisher on topics someone else already owns.
+        probe_base_serial = os.environ.get("PROBE_BASE_SERIAL") == "1"
+        if probe_base_serial:
+            self.imu_publisher = self.create_publisher(Imu, "/imu/data_raw", 10)
+            self.mag_publisher = self.create_publisher(MagneticField, "/imu/mag", 10)
+            self.joint_publisher = self.create_publisher(JointState, "/joint_states", 10)
+            self.vel_publisher = self.create_publisher(Twist, "/vel_raw", 10)
+            self.voltage_publisher = self.create_publisher(Float32, "/voltage", 10)
+        else:
+            self.imu_publisher = None
+            self.mag_publisher = None
+            self.joint_publisher = None
+            self.vel_publisher = None
+            self.voltage_publisher = None
 
         self.create_subscription(Imu, "/imu/data_raw", self.on_imu, 10)
         self.create_subscription(MagneticField, "/imu/mag", self.on_mag, 10)
@@ -62,10 +76,12 @@ class SensorProbe(Node):
         self.create_subscription(LaserScan, "/scan", self.on_scan, qos_profile_sensor_data)
 
         self.create_timer(2.0, self.publish_status)
-        if os.environ.get("PROBE_BASE_SERIAL") == "1":
+        if probe_base_serial:
             threading.Thread(target=self.base_serial_loop, daemon=True).start()
-        threading.Thread(target=self.camera_loop, daemon=True).start()
-        threading.Thread(target=self.audio_loop, daemon=True).start()
+        if os.environ.get("PROBE_CAMERA", "1") == "1":
+            threading.Thread(target=self.camera_loop, daemon=True).start()
+        if os.environ.get("PROBE_AUDIO", "1") == "1":
+            threading.Thread(target=self.audio_loop, daemon=True).start()
         if os.environ.get("PROBE_RAW_LIDAR") == "1":
             threading.Thread(target=self.lidar_probe, daemon=True).start()
         else:
