@@ -72,7 +72,12 @@ after **Hey Wendy**:
 
 * `go to pear` / `go to the pear`
 * `go to apple` / `go to the apple`
+* natural variants such as `can you find a pear for me` and `locate the red apple`
 * `stop`, `stop demo`, or `stop the demo`
+
+The pear homophone `pair` is accepted only when it appears with a supported
+action verb. A casual fruit mention or a command containing multiple fruits is
+rejected as ambiguous.
 
 Voice actions start **disarmed after every app restart**. Review live transcripts
 at `http://<device>:8080`, then explicitly arm them there. The adapter calls the

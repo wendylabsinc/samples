@@ -57,7 +57,7 @@ INDEX_HTML = """<!doctype html>
   <div class="hint">Say <b>&ldquo;{{WAKE}}&rdquo;</b>, then a command. Everything runs on the device.</div>
   <div id="actionControls">
     <span>Border Collie voice actions: <span id="actionState">disarmed</span>.<br>
-      <small>Allowed: &ldquo;go to pear/apple&rdquo; and convenience stop. Keep the physical remote ready.</small>
+      <small>Allowed: &ldquo;find/go to pear or apple&rdquo; and convenience stop. Keep the physical remote ready.</small>
     </span>
     <button id="armButton" type="button">Arm voice actions</button>
   </div>

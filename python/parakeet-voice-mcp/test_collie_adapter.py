@@ -39,6 +39,20 @@ class InterpretCommandTests(unittest.TestCase):
         self.assertIsNone(interpret_command("go forward"))
         self.assertIsNone(interpret_command("go to banana"))
 
+    def test_accepts_natural_find_requests_and_the_pear_homophone(self) -> None:
+        self.assertEqual(
+            interpret_command("can you find a pair for me uh"),
+            VoiceIntent(action="activate_demo", target_fruit="pear"),
+        )
+        self.assertEqual(
+            interpret_command("please locate the red apple"),
+            VoiceIntent(action="activate_demo", target_fruit="apple"),
+        )
+
+    def test_does_not_trigger_on_a_casual_or_ambiguous_fruit_mention(self) -> None:
+        self.assertIsNone(interpret_command("I like pears"))
+        self.assertIsNone(interpret_command("find an apple and a pear"))
+
     def test_accepts_a_narrow_stop_vocabulary(self) -> None:
         self.assertEqual(interpret_command("stop the demo"), VoiceIntent("stop_demo"))
 

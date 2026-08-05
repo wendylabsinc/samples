@@ -37,5 +37,12 @@ COPY hey_wendy.onnx /app/hey_wendy.onnx
 
 ENV PYTHONUNBUFFERED=1
 ENV MODEL_DIR=/models
+# This branch is the supervised Woof stage-demo deployment. Wendy's legacy
+# single-service manifest does not apply a top-level `env` block, so keep the
+# runtime mode explicit in the image until the sample migrates manifest schema.
+ENV ACTION_MODE=border_collie
+ENV BORDER_COLLIE_URL=http://127.0.0.1:8110
+ENV CONTINUOUS_TRANSCRIPTION=0
+ENV AUDIO_DEVICE="DJI MIC MINI"
 
 CMD ["python", "app.py"]

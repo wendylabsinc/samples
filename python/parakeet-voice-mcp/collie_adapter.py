@@ -20,11 +20,22 @@ class VoiceIntent:
 def interpret_command(text: str) -> Optional[VoiceIntent]:
     """Interpret only the deliberately supported stage phrases."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    match = re.fullmatch(r"go to (?:the )?(pear|apple)", normalized)
-    if match:
-        return VoiceIntent(action="activate_demo", target_fruit=match.group(1))
     if normalized in {"stop", "stop demo", "stop the demo"}:
         return VoiceIntent(action="stop_demo")
+
+    words = set(normalized.split())
+    fruits = set()
+    if words.intersection({"pear", "pears", "pair", "pairs"}):
+        fruits.add("pear")
+    if words.intersection({"apple", "apples"}):
+        fruits.add("apple")
+    if len(fruits) != 1:
+        return None
+
+    has_find_intent = bool(words.intersection({"find", "locate", "approach"}))
+    has_go_to_intent = bool(re.search(r"\bgo\s+(?:over\s+)?to\b", normalized))
+    if has_find_intent or has_go_to_intent:
+        return VoiceIntent(action="activate_demo", target_fruit=fruits.pop())
     return None
 
 
