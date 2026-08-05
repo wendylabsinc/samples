@@ -159,8 +159,10 @@ struct AudioServer {
         let app = Application(
             router: router,
             server: .http1WebSocketUpgrade { request, _, logger in
-                // Only upgrade /ws/microphone
-                guard request.path == "/ws/microphone" else {
+                // Only upgrade /ws/microphone, including any attached query string.
+                let target = request.path ?? ""
+                guard target.prefix(while: { $0 != "?" }) == "/ws/microphone" else {
+                    logger.debug("Not a microphone WebSocket path, not upgrading: \(target)")
                     return .dontUpgrade
                 }
 
@@ -258,7 +260,7 @@ func handleMicrophoneWebSocket(
         }
 
         var pipeline: Pipeline?
-        var sink: AudioSink?
+        var sink: AudioBufferSink?
 
         for backend in backends {
             let pipelineDesc = """
@@ -271,7 +273,7 @@ func handleMicrophoneWebSocket(
 
             do {
                 pipeline = try Pipeline(pipelineDesc)
-                sink = try pipeline!.audioSink(named: "sink")
+                sink = try pipeline!.audioBufferSink(named: "sink")
                 try pipeline!.play()
                 logger.info("Using audio backend: \(backend)")
                 break

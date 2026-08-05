@@ -1,5 +1,5 @@
-# Use NVIDIA L4T base for Jetson with GStreamer support
-FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
+# Use lightweight Debian base with GStreamer support
+FROM debian:bookworm-slim
 
 # Flush stdout/stderr immediately so logs appear in `wendy run` output.
 ENV PYTHONUNBUFFERED=1
@@ -8,6 +8,7 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
+    python3-venv \
     python3-gi \
     gir1.2-gst-plugins-base-1.0 \
     gir1.2-gst-plugins-bad-1.0 \
@@ -28,8 +29,10 @@ WORKDIR /app
 # Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Install Python dependencies in a venv
+RUN python3 -m venv --system-site-packages /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
@@ -47,4 +50,4 @@ USER app
 EXPOSE 3003
 
 # Run the application with uvicorn
-CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3003"]
+CMD ["/app/venv/bin/uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3003"]

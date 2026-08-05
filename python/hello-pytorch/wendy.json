@@ -1,0 +1,9 @@
+{
+    "appId": "com.example.hello-pytorch",
+    "version": "0.0.1",
+    "entitlements": [
+        {
+            "type": "gpu"
+        }
+    ]
+}

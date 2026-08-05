@@ -1,0 +1,19 @@
+{
+  "appId": "rosmaster-a1-devscan",
+  "version": "0.1.0",
+  "platform": "linux",
+  "services": {
+    "scan": {
+      "context": ".",
+      "entitlements": [
+        {
+          "type": "network",
+          "mode": "host"
+        },
+        {
+          "type": "usb"
+        }
+      ]
+    }
+  }
+}

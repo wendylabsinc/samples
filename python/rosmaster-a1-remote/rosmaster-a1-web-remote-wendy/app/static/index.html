@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rosmaster A1 Remote</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #121615;
+        color: #eef2ef;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #121615;
+      }
+
+      header {
+        min-height: 60px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 10px 18px;
+        border-bottom: 1px solid #2b3431;
+        background: #181f1c;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 12px;
+        border: 1px solid #34413c;
+        border-radius: 6px;
+        background: #111614;
+        color: #b7c3bd;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #d78c5c;
+      }
+
+      .dot.good {
+        background: #58c897;
+      }
+
+      .dot.bad {
+        background: #e26767;
+      }
+
+      /* The Drive panel readout wears this whenever a stop was requested and
+         nothing has confirmed it landed. It must not be mistakable for the
+         calm disarmed state, because the car may still be moving. */
+      #modeValue.unresolved {
+        color: #ffe2e2;
+        background: #8c2020;
+        border-radius: 4px;
+        padding: 1px 8px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      main {
+        width: min(1360px, calc(100vw - 28px));
+        max-width: 100%;
+        margin: 0 auto;
+        padding: 16px 0 24px;
+        display: grid;
+        /* Both tracks start at minmax(0, ...) so a wide child can never push a
+           column past its share and clip whatever sits to its right. Anything
+           genuinely wide scrolls inside its own container instead.
+
+           The drive column is narrow and capped now. It holds the stick, its
+           bars and the controls that used to sit in the same wide row as the
+           stick and clipped on the operator's screen; everything the width
+           buys goes to the camera gallery on the left. */
+        grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
+        gap: 14px;
+      }
+
+      section {
+        min-width: 0;
+      }
+
+      .panel {
+        border: 1px solid #2b3431;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #101513;
+      }
+
+      .panel-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #2b3431;
+        background: #171d1a;
+        color: #b7c3bd;
+        font-size: 13px;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      /* The camera gallery ==================================================
+         One tile per entry in the feed registry the car reports. The tile list
+         is never written down here: auto-fit means two feeds fill the row and
+         a third joins it without a rule changing. */
+      .gallery-tools {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .gallery-tools button {
+        min-height: 30px;
+        padding: 0 10px;
+      }
+
+      .camera-gallery {
+        display: grid;
+        /* Two columns, fixed. auto-fit packed three tiles onto a wide screen
+           and left the fourth stranded on its own row, which wastes the space
+           and makes the odd one out look like an error. Four feeds in a two by
+           two block also keeps every tile the same size, so no view is
+           implicitly the important one. minmax(0, 1fr) rather than 1fr so a
+           wide frame cannot push its column past its share. */
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        padding: 10px;
+      }
+
+      .camera-gallery.expanded {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .camera-gallery.expanded .tile:not(.is-expanded) {
+        display: none;
+      }
+
+      .tile {
+        min-width: 0;
+        margin: 0;
+        border: 1px solid #2b3431;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #0c100e;
+        cursor: pointer;
+      }
+
+      .tile-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 7px 10px;
+        border-bottom: 1px solid #2b3431;
+        background: #171d1a;
+        color: #b7c3bd;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .tile-state {
+        white-space: nowrap;
+      }
+
+      .tile-image {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        object-fit: contain;
+        background: #080a09;
+      }
+
+      .camera-gallery.expanded .tile-image {
+        aspect-ratio: auto;
+        height: min(64vh, 620px);
+      }
+
+      .tile.live .tile-state {
+        color: #bdf0da;
+      }
+
+      /* A stale feed leaves its last frame on the screen. Left alone that is
+         indistinguishable from a live view of a car that is not moving, so the
+         tile has to look wrong as well as read wrong. */
+      .tile.stale {
+        border-color: #7a6330;
+      }
+
+      .tile.stale .tile-state {
+        color: #f2e3bd;
+      }
+
+      .tile.stale .tile-image {
+        opacity: 0.4;
+        filter: grayscale(0.65);
+      }
+
+      .tile.waiting .tile-state {
+        color: #95a39c;
+      }
+
+      .tile.waiting .tile-image {
+        opacity: 0.2;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+        /* Panels keep their own height. Without this the shorter column
+           stretches its panels to match the taller one, which left the camera
+           gallery as a mostly empty rectangle under two tiles. */
+        align-content: start;
+      }
+
+      .panel-body {
+        display: grid;
+        gap: 12px;
+        padding: 14px;
+      }
+
+      /* Three toggles and the action buttons. This used to be a fixed four
+         column grid, which at 1280 CSS pixels left each toggle about 78px and
+         clipped its label. It wraps now: the toggles share the row while they
+         fit and drop to a second row when they do not. */
+      .top-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .top-actions .toggle {
+        flex: 1 1 118px;
+        min-width: 0;
+      }
+
+      .top-actions .action-buttons {
+        flex: 0 0 auto;
+        margin-left: auto;
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 44px;
+        padding: 0 12px;
+        border: 1px solid #34413c;
+        border-radius: 8px;
+        background: #101513;
+        color: #dbe4de;
+        font-size: 14px;
+        font-weight: 700;
+        user-select: none;
+        white-space: nowrap;
+      }
+
+      .toggle input {
+        width: 22px;
+        height: 22px;
+        accent-color: #58c897;
+      }
+
+      button {
+        min-height: 38px;
+        border: 1px solid #3a4742;
+        border-radius: 8px;
+        background: #24302b;
+        color: #eef2ef;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 750;
+        letter-spacing: 0;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #2d3b35;
+      }
+
+      .stop {
+        min-width: 112px;
+        min-height: 44px;
+        border-color: #ba4b4b;
+        background: #8c3030;
+      }
+
+      .stop:hover {
+        background: #a23a3a;
+      }
+
+      .action-buttons {
+        display: grid;
+        grid-template-columns: repeat(2, 92px);
+        gap: 8px;
+      }
+
+      .start {
+        min-width: 88px;
+        min-height: 44px;
+        border-color: #4f9d74;
+        background: #236345;
+      }
+
+      .start:hover {
+        background: #2b7954;
+      }
+
+      .action-buttons .stop {
+        min-width: 92px;
+      }
+
+      /* One stick now. The Turn stick is gone: commanding angular_z for two
+         seconds moved no encoder on any channel, because this is an Ackermann
+         chassis with no in place turn. */
+      .joysticks {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+      }
+
+      .stick-card {
+        min-width: 0;
+        display: grid;
+        gap: 10px;
+        justify-items: center;
+        padding: 12px;
+        border: 1px solid #2b3431;
+        border-radius: 8px;
+        background: #101513;
+      }
+
+      .readout {
+        color: #95a39c;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .joystick {
+        position: relative;
+        width: min(26vw, 190px);
+        max-width: 100%;
+        aspect-ratio: 1;
+        border-radius: 50%;
+        border: 1px solid #3b4943;
+        background:
+          linear-gradient(90deg, transparent calc(50% - 1px), #3b4943 calc(50% - 1px), #3b4943 calc(50% + 1px), transparent calc(50% + 1px)),
+          linear-gradient(0deg, transparent calc(50% - 1px), #3b4943 calc(50% - 1px), #3b4943 calc(50% + 1px), transparent calc(50% + 1px)),
+          #202923;
+        touch-action: none;
+        user-select: none;
+      }
+
+      .knob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 34%;
+        aspect-ratio: 1;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        background: #58c897;
+        border: 2px solid #bdf0da;
+        box-shadow: 0 9px 24px rgba(0, 0, 0, 0.38);
+      }
+
+      /* One column. These panels are in the narrow drive column now, where a
+         second column of range inputs would leave each one too short to aim
+         at. The telemetry keeps two, because its cells are short. */
+      .sliders {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+      }
+
+      .telemetry {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      label.slider {
+        display: grid;
+        gap: 7px;
+        color: #b7c3bd;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .speed-control {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 92px;
+        gap: 8px;
+        align-items: center;
+      }
+
+      input[type="range"] {
+        width: 100%;
+        /* The browser's default 2px side margin on a range input pushes a
+           100% wide slider past its column and clips the panel edge. */
+        margin: 0;
+        accent-color: #58c897;
+      }
+
+      input[type="number"] {
+        width: 100%;
+        min-height: 34px;
+        border: 1px solid #3a4742;
+        border-radius: 8px;
+        background: #101513;
+        color: #eef2ef;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 750;
+        padding: 0 8px;
+      }
+
+      .metric {
+        min-height: 62px;
+        border: 1px solid #2b3431;
+        border-radius: 8px;
+        background: #101513;
+        padding: 10px;
+        display: grid;
+        align-content: center;
+        gap: 4px;
+      }
+
+      .metric span {
+        color: #8f9d96;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .metric strong {
+        color: #eef2ef;
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .lidar-canvas {
+        width: 100%;
+        aspect-ratio: 1.6;
+        border: 1px solid #2b3431;
+        border-radius: 8px;
+        background: #080a09;
+      }
+
+      /* The Controller panel. Every line in it is diagnostic text of unknown
+         length, so each one scrolls inside its own box rather than widening
+         the column and pushing the page sideways. */
+      .diagnostic {
+        display: grid;
+        gap: 4px;
+      }
+
+      /* .hidden is declared above this rule, and both are one class deep, so
+         the later display wins and a hidden diagnostic block would stay on
+         screen. The debug byte dump is one, so it needs saying again here. A
+         node:vm test cannot see this: the harness has no CSS, so classList is
+         all it can assert on and both orderings look identical to it. */
+      .diagnostic.hidden {
+        display: none;
+      }
+
+      .diagnostic > span {
+        color: #8f9d96;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .diagnostic > pre {
+        margin: 0;
+        max-height: 240px;
+        overflow: auto;
+        padding: 8px 10px;
+        border: 1px solid #2b3431;
+        border-radius: 8px;
+        background: #0c100e;
+        color: #dbe4de;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre;
+      }
+
+      /* The context notice is prose, so it wraps rather than scrolls. */
+      .diagnostic > pre.wrap {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .diagnostic > pre.good {
+        border-color: #2f5c48;
+        color: #bdf0da;
+      }
+
+      .diagnostic > pre.warn {
+        border-color: #7a6330;
+        color: #f2e3bd;
+      }
+
+      .diagnostic > pre.bad {
+        border-color: #8c2020;
+        background: #1d0f0f;
+        color: #ffe2e2;
+      }
+
+      /* The WebHID controls sit inside a diagnostic block, so they wrap with it
+         rather than widening the narrow column. */
+      .hid-tools {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        padding-top: 2px;
+      }
+
+      .toggle.compact {
+        min-height: 34px;
+        padding: 0 10px;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .toggle.compact input {
+        width: 17px;
+        height: 17px;
+      }
+
+      /* A browser with no navigator.hid cannot open the chooser at all, and a
+         button that looks pressable but does nothing is how the operator lost
+         hours to the Gamepad API. */
+      button:disabled {
+        border-color: #2b3431;
+        background: #171d1a;
+        color: #6d7a74;
+        cursor: not-allowed;
+      }
+
+      button:disabled:hover {
+        background: #171d1a;
+      }
+
+      @media (max-width: 940px) {
+        main {
+          width: min(100vw - 20px, 760px);
+          grid-template-columns: 1fr;
+          padding-top: 10px;
+        }
+
+        .joystick {
+          width: min(42vw, 210px);
+        }
+      }
+
+      /* Below this the gallery next to the drive column leaves neither enough
+         room, so the columns stack before anything clips. */
+      @media (max-width: 1020px) {
+        main {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 560px) {
+        .telemetry {
+          grid-template-columns: 1fr;
+        }
+
+        .top-actions .toggle {
+          flex: 1 1 100%;
+        }
+
+        .top-actions .action-buttons {
+          margin-left: 0;
+        }
+
+        .joystick {
+          width: min(72vw, 230px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Rosmaster A1 Remote</h1>
+      <div class="status-pill"><span id="statusDot" class="dot"></span><span id="statusText">Starting</span></div>
+    </header>
+
+    <main>
+      <div class="stack">
+      <section class="panel">
+        <div class="panel-title">
+          <span>Cameras</span>
+          <span class="gallery-tools">
+            <span id="galleryStats">no feeds reported</span>
+            <button id="galleryBack" class="hidden" type="button">Back to gallery</button>
+          </span>
+        </div>
+        <!-- Filled in from the feed registry in /api/status. Deliberately
+             empty here: a tile written into the markup would be a tile the
+             page shows whether or not the car has that camera. -->
+        <div id="cameraGallery" class="camera-gallery"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <span>Controller</span>
+          <span>Pads seen: <strong id="padCount">0</strong></span>
+        </div>
+        <div class="panel-body">
+          <div class="diagnostic">
+            <span>Browser context</span>
+            <pre id="padContext" class="wrap">Checking</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Pads the browser reports</span>
+            <pre id="padList">Waiting</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Selection</span>
+            <pre id="padSelection" class="wrap">Waiting</pre>
+          </div>
+          <!-- The WebHID fallback. The Gamepad API above keeps priority
+               whenever it lists a pad at all; this is the way in when it lists
+               none, which is the case on the operator's machine. The chooser
+               only opens from a click, so this has to be a button. -->
+          <div class="diagnostic">
+            <span>WebHID fallback</span>
+            <pre id="hidStatus" class="wrap">Checking</pre>
+            <div class="hid-tools">
+              <button id="hidConnect" type="button">Connect controller</button>
+              <label class="toggle compact">
+                <input id="hidDebug" type="checkbox" />
+                <span>Raw report bytes</span>
+              </label>
+            </div>
+          </div>
+          <!-- Hidden until the debug toggle is on. The byte layout the decoder
+               uses is documented rather than measured, so these bytes are how
+               the operator confirms which one moves when they push a stick. -->
+          <div id="hidRawBox" class="diagnostic hidden">
+            <span>Raw report bytes, offset labelled</span>
+            <pre id="hidRaw">no report received yet</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Input source driving the car</span>
+            <pre id="padSource" class="wrap">none</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Axes</span>
+            <pre id="padAxes">none</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Buttons down</span>
+            <pre id="padButtons">none</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Controller actions, most recent first</span>
+            <pre id="padLog">No controller actions yet.</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Last drive payload sent</span>
+            <pre id="padDrive">none sent yet</pre>
+          </div>
+          <div class="diagnostic">
+            <span>Last drive response from the car</span>
+            <pre id="padResponse">never</pre>
+          </div>
+        </div>
+      </section>
+
+      </div>
+
+      <div class="stack">
+        <!-- The mode controls come first in this column, so STOP sits at the
+             top of the operator's reach. They used to share the wide row with
+             the stick, which is what clipped. -->
+        <section class="panel">
+          <div class="panel-title">
+            <span>Mode</span>
+            <span id="modeValue">Disarmed</span>
+          </div>
+          <div class="panel-body">
+            <div class="top-actions">
+              <label class="toggle">
+                <input id="arm" type="checkbox" />
+                <span>Manual</span>
+              </label>
+              <label class="toggle">
+                <input id="auto" type="checkbox" />
+                <span>Auto Nav</span>
+              </label>
+              <label class="toggle">
+                <input id="gamepad" type="checkbox" checked />
+                <span>Xbox</span>
+              </label>
+              <div class="action-buttons">
+                <button id="start" class="start" type="button">START</button>
+                <button id="stop" class="stop" type="button">STOP</button>
+              </div>
+            </div>
+
+            <div class="telemetry">
+              <div class="metric"><span>Autonomy</span><strong id="autoReadyValue">Not ready</strong></div>
+              <div class="metric"><span>Driver</span><strong id="driverValue">0 subs</strong></div>
+              <div class="metric"><span>Command</span><strong id="commandValue">0.00 / 0.00</strong></div>
+              <div class="metric"><span>Watchdog</span><strong id="watchdogValue">0.50 s</strong></div>
+              <div class="metric"><span>Auto Action</span><strong id="autoValue">Disabled</strong></div>
+              <div class="metric"><span>Xbox</span><strong id="gamepadValue">Off</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- The drive block is the stick and the two bars that scale what it
+             commands, and nothing else. -->
+        <section class="panel">
+          <div class="panel-title">
+            <span>Drive</span>
+            <span id="leftReadout" class="readout">0.00 / 0.00</span>
+          </div>
+          <div class="panel-body">
+            <div class="joysticks">
+              <div class="stick-card">
+                <div id="leftStick" class="joystick"><div class="knob"></div></div>
+              </div>
+            </div>
+
+            <div class="sliders">
+              <label class="slider">
+                Manual Speed <span id="speedLabel">0.35 m/s</span>
+                <div class="speed-control">
+                  <input id="speed" type="range" min="0" max="2" step="0.05" value="1.50" />
+                  <input id="speedInput" type="number" min="0" max="2" step="0.05" value="1.50" />
+                </div>
+              </label>
+              <label class="slider">
+                Manual Steering <span id="steerLabel">70%</span>
+                <input id="steer" type="range" min="10" max="100" value="70" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span>Auto Nav</span>
+            <span>tuning</span>
+          </div>
+          <div class="panel-body">
+            <div class="sliders">
+              <label class="slider">
+                Auto Speed <span id="autoSpeedLabel">1.00 m/s</span>
+                <div class="speed-control">
+                  <input id="autoSpeed" type="range" min="0" max="2" step="0.01" value="1.00" />
+                  <input id="autoSpeedInput" type="number" min="0" step="0.01" value="1.00" />
+                </div>
+              </label>
+              <label class="slider">
+                Stop Range <span id="stopRangeLabel">0.35 m</span>
+                <input id="stopRange" type="range" min="20" max="80" value="35" />
+              </label>
+              <label class="slider">
+                Avoid Range <span id="avoidRangeLabel">0.85 m</span>
+                <input id="avoidRange" type="range" min="45" max="180" value="85" />
+              </label>
+              <label class="slider">
+                Clear Range <span id="clearRangeLabel">1.60 m</span>
+                <input id="clearRange" type="range" min="90" max="300" value="160" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span>LiDAR</span>
+            <span id="lidarStats">waiting</span>
+          </div>
+          <div class="panel-body">
+            <canvas id="lidarCanvas" class="lidar-canvas" width="640" height="400"></canvas>
+            <div class="telemetry">
+              <div class="metric"><span>Front</span><strong id="frontValue">--</strong></div>
+              <div class="metric"><span>Left</span><strong id="leftValue">--</strong></div>
+              <div class="metric"><span>Right</span><strong id="rightValue">--</strong></div>
+              <div class="metric"><span>Closest</span><strong id="closestValue">--</strong></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script src="/static/gamepad.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

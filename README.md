@@ -36,6 +36,20 @@ docker run --rm python-hello-world
 ```
 </details>
 
+### `python/rosmaster-a1-remote`
+Drive a Yahboom Rosmaster A1 from the browser with an Xbox controller, watching
+four live RealSense camera feeds. Four apps: motor bridge, LiDAR driver,
+RealSense driver, and the web remote with autonomous mode.
+
+```bash
+cd python/rosmaster-a1-remote/rosmaster-a1-web-remote-wendy
+wendy run
+```
+
+Deploy all four apps in order, or use `scripts/deploy_car.sh`. Note the remote
+must be opened over HTTPS, because browsers only expose the Gamepad API to a
+secure context. See the sample README for the full deploy order and controls.
+
 ### `python/parakeet-live-transcribe`
 Live speech-to-text on the device: a USB microphone is transcribed locally with
 NVIDIA Parakeet (sherpa-onnx) and streamed to a web page over a WebSocket. Runs
@@ -47,10 +61,10 @@ wendy run
 ```
 
 ### `python/parakeet-voice-mcp`
-Voice commands that do something: a bundled "Hey Wendy" wake word gates local Parakeet recognition,
-a local LLM turns what you said into a tool call, and the call is dispatched to
-a real MCP server. Tools are discovered from the server, so the model can only
-call what genuinely exists.
+Voice commands that do something: a bundled "Hey Wendy" wake word gates local
+Parakeet recognition, a local LLM turns what you said into a tool call, and the
+call is dispatched to a real MCP server. Tools are discovered from the server,
+so the model can only call what genuinely exists.
 
 ```bash
 cd python/parakeet-voice-mcp

@@ -266,7 +266,10 @@ struct WebcamServer {
     let app = Application(
       router: router,
       server: .http1WebSocketUpgrade { request, _, _ in
-        guard request.path == "/stream" else {
+        // Only upgrade /stream, including any attached query string.
+        let target = request.path ?? ""
+        guard target.prefix(while: { $0 != "?" }) == "/stream" else {
+          logger.debug("Not a stream WebSocket path, not upgrading: \(target)")
           return .dontUpgrade
         }
         return .upgrade([:]) { inbound, outbound, _ in

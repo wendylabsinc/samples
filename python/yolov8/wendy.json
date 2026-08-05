@@ -15,7 +15,7 @@
             "type": "gpu"
         },
         {
-            "type": "video"
+            "type": "camera"
         },
         {
             "type": "persist",
@@ -29,7 +29,7 @@
     },
     "hooks": {
         "postStart": {
-            "cli": "open http://${WENDY_HOSTNAME}:3007"
+            "cli": "wendy utils open-browser http://${WENDY_HOSTNAME}:3007"
         }
     }
 }
