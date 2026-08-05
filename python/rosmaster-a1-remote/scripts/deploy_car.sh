@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the car's apps with entitlements that match the hardware present.
+# Deploy the car's services with entitlements that match the hardware present.
 #
 # A Wendy serial entitlement naming a device that is not connected does not
 # degrade, it hard-fails container creation:
@@ -12,25 +12,30 @@
 # has now broken a deploy three times, once taking motor control with it.
 #
 # So: ask the device which tty nodes actually exist, write only those into the
-# serial entitlements, and deploy. The apps already choose the right port at
-# runtime by elimination, and the LiDAR app retries, so over-entitling is safe
-# and under-entitling only costs a redeploy once the hardware returns.
+# serial entitlements, and deploy. The services already choose the right port
+# at runtime by elimination, and the LiDAR service retries, so over-entitling
+# is safe and under-entitling only costs a redeploy once the hardware returns.
 #
-# Usage: scripts/deploy_car.sh [device-address] [app-dir ...]
+# The four apps that used to deploy separately (each with its own wendy.json)
+# are now one app, rosmaster-a1, with four services (base, lidar, realsense,
+# web) sharing a single root wendy.json, so pruning runs once against that
+# manifest instead of once per app directory. That also raises the stakes:
+# with all four services in one app, an absent entitled tty now blocks that
+# service's container for the whole app deploy, which makes pruning MORE
+# important than it was with four separate apps.
+#
+# Usage: scripts/deploy_car.sh <car-hostname>.local:50052 [service ...]
 
 set -uo pipefail
 
 DEVICE="${1:-${WENDY_DEVICE:-}}"
 if [[ -z "${DEVICE}" ]]; then
-  echo "usage: scripts/deploy_car.sh <car-hostname>.local:50052 [app-dir ...]" >&2
+  echo "usage: scripts/deploy_car.sh <car-hostname>.local:50052 [service ...]" >&2
   echo "   or: WENDY_DEVICE=<car-hostname>.local:50052 scripts/deploy_car.sh" >&2
   exit 2
 fi
 shift || true
-APPS=("$@")
-if [[ ${#APPS[@]} -eq 0 ]]; then
-  APPS=(rosmaster-a1-wendy rosmaster-a1-lidar-wendy rosmaster-a1-realsense-wendy rosmaster-a1-web-remote-wendy)
-fi
+SERVICES=("$@")
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${repo_root}"
@@ -58,12 +63,8 @@ else
   echo "Present tty nodes: ${present//$'\n'/ }"
 fi
 
-for app in "${APPS[@]}"; do
-  [[ -d "${app}" ]] || { echo "skipping ${app}: not a directory"; continue; }
-  echo
-  echo "=== ${app} ==="
-  if [[ -n "${present}" ]]; then
-    PRESENT="${present}" python3 - "${app}/wendy.json" <<'PY'
+if [[ -n "${present}" ]]; then
+  PRESENT="${present}" python3 - "wendy.json" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 present = set(os.environ["PRESENT"].split())
@@ -83,11 +84,26 @@ if changed:
     json.dump(doc, open(path, "w"), indent=2)
     open(path, "a").write("\n")
 PY
-  fi
-  (cd "${app}" && wendy run --yes --detach --builder docker --device "${DEVICE}") || \
-    echo "  deploy of ${app} FAILED" >&2
-done
+fi
+
+if [[ ${#SERVICES[@]} -eq 0 ]]; then
+  echo
+  echo "=== rosmaster-a1 (all services) ==="
+  # --keep-going deploys the services whose builds/pushes succeed instead of
+  # aborting the whole group (the moral equivalent of the old loop's
+  # continue-past-failures); absent-serial hard-fails are what the pruning
+  # above is for.
+  wendy run --yes --detach --builder docker --keep-going --device "${DEVICE}" || \
+    echo "  deploy FAILED" >&2
+else
+  for svc in "${SERVICES[@]}"; do
+    echo
+    echo "=== ${svc} ==="
+    wendy run --yes --detach --builder docker --service "${svc}" --device "${DEVICE}" || \
+      echo "  deploy of ${svc} FAILED" >&2
+  done
+fi
 
 echo
 echo "Note: entitlements may have been edited to match present hardware."
-echo "Review with: git diff -- '*/wendy.json'"
+echo "Review with: git diff -- wendy.json"
