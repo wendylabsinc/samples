@@ -22,7 +22,7 @@ export CMAKE_PREFIX_PATH="${AMENT_PREFIX_PATH}"
 export LD_LIBRARY_PATH="/ros_ws/install/ydlidar_ros2_driver/lib:/ros_ws/install/yahboomcar_msgs/lib:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="/ros_ws/install/yahboomcar_ctrl/lib/python3.10/site-packages:/ros_ws/install/yahboomcar_bringup/lib/python3.10/site-packages:/ros_ws/install/yahboomcar_msgs/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:${PYTHONPATH:-}"
 
-echo "rosmaster-a1-lidar starting"
+echo "rosmaster-a1 lidar service starting"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}"
 echo "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}"
 

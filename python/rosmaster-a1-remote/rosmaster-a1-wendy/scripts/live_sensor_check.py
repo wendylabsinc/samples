@@ -279,12 +279,16 @@ def main() -> int:
         topics_payload = parse_json_or_none(topics.stdout)
         command_counts = command_topic_publishers(topics_payload)
 
-        for app in ("rosmaster-a1-base", "rosmaster-a1-lidar"):
+        for service in ("base", "lidar"):
             logs = stream_for(
-                ["wendy", "--json", "device", "logs", "--app", app, "--tail", "100", "--device", args.device],
+                [
+                    "wendy", "--json", "device", "logs",
+                    "--app", "rosmaster-a1", "--service", service,
+                    "--tail", "100", "--device", args.device,
+                ],
                 seconds=args.log_seconds,
             )
-            print_command_result(f"logs:{app}", logs)
+            print_command_result(f"logs:{service}", logs)
             combined_logs += "\n" + logs.stdout
 
     evidence = parse_evidence(combined_logs)

@@ -77,6 +77,8 @@ class RosmasterBaseBridge(Node):
             "/dev/myserial",
             "/dev/ttyUSB1",
             "/dev/ttyUSB2",
+            # ttyUSB0 is deliberately omitted: it's the LiDAR's usual slot (see
+            # the entrypoint comment for the port-ownership policy).
         ]
         seen = set()
         for candidate in candidates:

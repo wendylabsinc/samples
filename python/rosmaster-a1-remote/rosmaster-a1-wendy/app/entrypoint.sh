@@ -22,7 +22,7 @@ export CMAKE_PREFIX_PATH="${AMENT_PREFIX_PATH}"
 export LD_LIBRARY_PATH="/ros_ws/install/ydlidar_ros2_driver/lib:/ros_ws/install/yahboomcar_msgs/lib:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="/ros_ws/install/yahboomcar_ctrl/lib/python3.10/site-packages:/ros_ws/install/yahboomcar_bringup/lib/python3.10/site-packages:/ros_ws/install/yahboomcar_msgs/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:${PYTHONPATH:-}"
 
-echo "rosmaster-a1-base starting"
+echo "rosmaster-a1 base service starting"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}"
 echo "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}"
 
@@ -48,6 +48,11 @@ unset ROSMASTER_SERIAL_PORT
 # drive command went nowhere. SERIAL_IDENTIFY lines make that visible in logs.
 # The probe reports through a file, not stdout: Rosmaster_Lib prints a banner
 # on every successful open and would otherwise end up inside the port name.
+# Only firmware-version identification (identify_serial.py) is allowed to select
+# ttyUSB0, because it proves the device is the motor board before claiming it.
+# The blind fallback below must never claim the LiDAR's usual slot: opening the
+# wrong CH340 succeeds silently, and in the merged app the base container's
+# entitlements normally don't include ttyUSB0 anyway.
 identify_out=/tmp/rosmaster_serial_port
 rm -f "${identify_out}"
 # The census is deliberately NOT run here. Opening a port to inspect it means
@@ -66,7 +71,6 @@ if [[ -n "${identified}" ]]; then
 else
   for candidate in \
     /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 \
-    /dev/ttyUSB0 \
     /dev/ttyUSB1 \
     /dev/ttyUSB2 \
     /dev/myserial; do
