@@ -30,7 +30,9 @@ from devices import list_input_devices, select_input_device
 from frontend import AudioFrontEnd
 from mcpclient import MultiMCP
 from model_cache import ensure_model
+from observe_page import OBSERVE_HTML
 from page import INDEX_HTML
+from transcription_policy import should_transcribe
 from utterance import UtteranceChunker
 from wakeword import OpenWakeWordSpotter
 
@@ -49,6 +51,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 AUDIO_DEVICE = os.environ.get("AUDIO_DEVICE", "auto")
 ACTION_MODE = os.environ.get("ACTION_MODE", "mcp")
 BORDER_COLLIE_URL = os.environ.get("BORDER_COLLIE_URL", "http://127.0.0.1:8110")
+CONTINUOUS_TRANSCRIPTION = os.environ.get("CONTINUOUS_TRANSCRIPTION", "0") == "1"
 
 # A path to a custom wake-word model, or a pretrained openWakeWord name
 # ("hey_jarvis", "alexa", ...). The bundled "Hey Wendy" model was trained with
@@ -83,9 +86,15 @@ def build_app() -> FastAPI:
     transcriber = SherpaTranscriber(MODEL_DIR, model_name="parakeet-tdt-0.6b")
     print("[asr] ready", flush=True)
 
-    print(f"[wake] loading wake word {WAKE_WORD!r}...", flush=True)
-    spotter = OpenWakeWordSpotter(WAKE_WORD, threshold=WAKE_THRESHOLD)
-    print(f"[wake] ready: {spotter.key}", flush=True)
+    if CONTINUOUS_TRANSCRIPTION:
+        spotter = None
+        wake_key = "disabled"
+        print("[wake] disabled for continuous observation mode", flush=True)
+    else:
+        print(f"[wake] loading wake word {WAKE_WORD!r}...", flush=True)
+        spotter = OpenWakeWordSpotter(WAKE_WORD, threshold=WAKE_THRESHOLD)
+        wake_key = spotter.key
+        print(f"[wake] ready: {wake_key}", flush=True)
 
     app = FastAPI()
     clients: set[WebSocket] = set()
@@ -118,49 +127,68 @@ def build_app() -> FastAPI:
         capture = Capture(device)
         capture.start()
         armed_until = 0.0
+        last_level_broadcast = 0.0
         import time
 
-        print(f"[web] listening for '{spotter.key}'; open http://<device>:{PORT}", flush=True)
+        if CONTINUOUS_TRANSCRIPTION:
+            print(f"[web] continuously transcribing; open http://<device>:{PORT}", flush=True)
+        else:
+            print(f"[web] listening for '{wake_key}'; open http://<device>:{PORT}", flush=True)
         try:
             for frame in capture.frames():
                 # The wake word runs on every raw frame; it is small enough to do
                 # so continuously, and it is what keeps the ASR idle until needed.
-                if spotter.spot(frame):
+                now = time.monotonic()
+                if spotter is not None and spotter.spot(frame):
                     armed_until = time.monotonic() + COMMAND_WINDOW_S
-                    print(f"[wake] heard '{spotter.key}'", flush=True)
+                    print(f"[wake] heard '{wake_key}'", flush=True)
                     loop = state["loop"]
                     if loop is not None:
                         asyncio.run_coroutine_threadsafe(broadcast({"kind": "armed"}), loop)
 
                 normalised = frontend.process(frame)
+                loop = state["loop"]
+                if (CONTINUOUS_TRANSCRIPTION and loop is not None
+                        and now - last_level_broadcast >= 0.2):
+                    last_level_broadcast = now
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast({"kind": "level",
+                                   "input_dbfs": round(frontend.input_dbfs, 1)}), loop)
                 utterance = chunker.process(normalised, level_dbfs=frontend.input_dbfs)
                 if utterance is None:
                     continue
-                # Only transcribe inside the window opened by the wake word.
-                if time.monotonic() > armed_until:
+                if not should_transcribe(
+                    continuous=CONTINUOUS_TRANSCRIPTION,
+                    now=time.monotonic(),
+                    armed_until=armed_until,
+                ):
                     continue
 
                 result = transcriber.transcribe(utterance, 16000)
-                command = strip_wake_prefix(result.text, spotter.key)
+                command = (result.text.strip() if CONTINUOUS_TRANSCRIPTION
+                           else strip_wake_prefix(result.text, wake_key))
                 if not command:
                     # Just the wake phrase on its own: keep the window open for
                     # the command that follows rather than dispatching nothing.
-                    armed_until = time.monotonic() + COMMAND_WINDOW_S
+                    if not CONTINUOUS_TRANSCRIPTION:
+                        armed_until = time.monotonic() + COMMAND_WINDOW_S
                     continue
-                armed_until = 0.0
-                print(f"[command] {command}", flush=True)
+                if not CONTINUOUS_TRANSCRIPTION:
+                    armed_until = 0.0
+                event_kind = "transcript" if CONTINUOUS_TRANSCRIPTION else "command"
+                print(f"[{event_kind}] {command}", flush=True)
                 loop = state["loop"]
                 if loop is None:
                     continue
                 event = {
-                    "kind": "command",
+                    "kind": event_kind,
                     "id": uuid.uuid4().hex[:8],
                     "text": command,
                     "audio_ms": result.audio_ms,
                     "input_dbfs": round(frontend.input_dbfs, 1),
                 }
                 asyncio.run_coroutine_threadsafe(broadcast(event), loop)
-                if ready["ready"]:
+                if not CONTINUOUS_TRANSCRIPTION and ready["ready"]:
                     asyncio.run_coroutine_threadsafe(
                         commands.put((event["id"], event["text"])), loop)
         finally:
@@ -234,13 +262,15 @@ def build_app() -> FastAPI:
         state["loop"] = asyncio.get_running_loop()
         threading.Thread(target=listen, name="listen", daemon=True).start()
         # A background task, so a missing MCP server or LLM never blocks the page.
-        asyncio.create_task(collie_bridge() if collie is not None else bridge())
+        if ACTION_MODE != "observe":
+            asyncio.create_task(collie_bridge() if collie is not None else bridge())
 
     @app.get("/healthz")
     async def _healthz() -> dict:
-        return {"ok": True, "wake_word": spotter.key, "tools_ready": ready["ready"],
+        return {"ok": True, "wake_word": wake_key, "tools_ready": ready["ready"],
                 "clients": len(clients), "action_mode": ACTION_MODE,
-                "actions_armed": collie.armed if collie is not None else None}
+                "actions_armed": collie.armed if collie is not None else None,
+                "continuous_transcription": CONTINUOUS_TRANSCRIPTION}
 
     @app.get("/api/actions/status")
     async def _action_status() -> dict:
@@ -265,7 +295,9 @@ def build_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def _index() -> str:
-        return INDEX_HTML.replace("{{WAKE}}", spotter.key.replace("_", " "))
+        if CONTINUOUS_TRANSCRIPTION:
+            return OBSERVE_HTML
+        return INDEX_HTML.replace("{{WAKE}}", wake_key.replace("_", " "))
 
     @app.websocket("/ws")
     async def _ws(websocket: WebSocket) -> None:

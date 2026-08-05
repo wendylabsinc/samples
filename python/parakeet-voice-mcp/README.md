@@ -55,6 +55,14 @@ call that ran and what it returned.
 | `PORT` | `8080` | Web UI port |
 | `ACTION_MODE` | `mcp` | `mcp` for discovered tools, or `border_collie` for the stage-demo allowlist |
 | `BORDER_COLLIE_URL` | `http://127.0.0.1:8110` | Border Collie API used by the allowlisted adapter |
+| `CONTINUOUS_TRANSCRIPTION` | `0` | Set to `1` to bypass the wake word and transcribe every completed utterance |
+
+### Microphone observation mode
+
+For microphone bring-up, use `ACTION_MODE=observe` with
+`CONTINUOUS_TRANSCRIPTION=1`. The page becomes a small live level meter and
+transcript feed. The wake-word detector and every action dispatcher are skipped,
+so this mode cannot command the robot.
 
 ### Border Collie demo mode
 

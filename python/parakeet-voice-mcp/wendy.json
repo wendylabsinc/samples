@@ -2,8 +2,9 @@
     "appId": "sh.wendy.examples.parakeet-voice-mcp",
     "version": "0.0.1",
     "env": {
-        "ACTION_MODE": "border_collie",
-        "BORDER_COLLIE_URL": "http://127.0.0.1:8110"
+        "ACTION_MODE": "observe",
+        "CONTINUOUS_TRANSCRIPTION": "1",
+        "AUDIO_DEVICE": "DJI MIC MINI"
     },
     "entitlements": [
         {
