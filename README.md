@@ -50,6 +50,30 @@ Deploy all four apps in order, or use `scripts/deploy_car.sh`. Note the remote
 must be opened over HTTPS, because browsers only expose the Gamepad API to a
 secure context. See the sample README for the full deploy order and controls.
 
+### `python/parakeet-live-transcribe`
+Live speech-to-text on the device: a USB microphone is transcribed locally with
+NVIDIA Parakeet (sherpa-onnx) and streamed to a web page over a WebSocket. Runs
+on CPU, so the GPU stays free.
+
+```bash
+cd python/parakeet-live-transcribe
+wendy run
+```
+
+### `python/parakeet-voice-mcp`
+Voice commands that do something: a bundled "Hey Wendy" wake word gates local
+Parakeet recognition, a local LLM turns what you said into a tool call, and the
+call is dispatched to a real MCP server. Tools are discovered from the server,
+so the model can only call what genuinely exists.
+
+```bash
+cd python/parakeet-voice-mcp
+wendy run
+```
+
+Needs an LLM (Ollama) and an MCP server on the same device; see the sample's
+README.
+
 ## Swift
 
 ### `swift/hello-world`

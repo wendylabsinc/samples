@@ -1,0 +1,5 @@
+sherpa-onnx
+sounddevice
+numpy
+fastapi
+uvicorn[standard]
