@@ -66,7 +66,7 @@ so this mode cannot command the robot.
 
 ### Border Collie demo mode
 
-This sample manifest selects `ACTION_MODE=border_collie` for Woof. In that mode
+The supervised Woof image selects `ACTION_MODE=border_collie`. In that mode
 the LLM and general MCP discovery are bypassed. Only these phrases are accepted
 after **Hey Wendy**:
 
@@ -84,6 +84,15 @@ at `http://<device>:8080`, then explicitly arm them there. The adapter calls the
 Border Collie app's existing `/api/run` and `/api/stop` endpoints, so its normal
 preflight and motion gates still apply. Spoken stop is only a convenience; it is
 not an emergency-stop mechanism, and the physical remote remains authoritative.
+
+### Potential features
+
+* **“Follow me” person following:** after the wake word and explicit arming,
+  acquire a specific person with the perception system and have Woof follow at
+  a bounded speed and distance. This must stop safely if the person is lost,
+  camera data becomes stale, or the physical remote takes over. Remote Takeover
+  remains latched and requires an application restart. This feature is planned,
+  not currently implemented or accepted as a voice command.
 
 ### Your own wake word
 
