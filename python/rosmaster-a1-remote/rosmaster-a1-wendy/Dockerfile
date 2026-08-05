@@ -64,12 +64,16 @@ RUN pip3 install --no-cache-dir /opt/rosmaster-lib
 
 WORKDIR /ros_ws
 COPY ros_ws/src /ros_ws/src
-RUN git clone --depth 1 https://github.com/YDLIDAR/YDLidar-SDK.git /tmp/YDLidar-SDK \
+# Pinned: unpinned clones made image builds non-reproducible.
+ARG YDLIDAR_SDK_REF=V1.2.7
+ARG YDLIDAR_DRIVER_REF=4ef70d3f32a85704ade0be54b214f3763b1ab3e8
+RUN git clone --depth 1 --branch "${YDLIDAR_SDK_REF}" https://github.com/YDLIDAR/YDLidar-SDK.git /tmp/YDLidar-SDK \
     && cmake -S /tmp/YDLidar-SDK -B /tmp/YDLidar-SDK/build \
     && cmake --build /tmp/YDLidar-SDK/build -j2 \
     && cmake --install /tmp/YDLidar-SDK/build \
     && rm -rf /tmp/YDLidar-SDK
-RUN git clone --depth 1 --branch humble https://github.com/YDLIDAR/ydlidar_ros2_driver.git /ros_ws/src/ydlidar_ros2_driver
+RUN git clone https://github.com/YDLIDAR/ydlidar_ros2_driver.git /ros_ws/src/ydlidar_ros2_driver \
+    && git -C /ros_ws/src/ydlidar_ros2_driver checkout "${YDLIDAR_DRIVER_REF}"
 RUN . /opt/ros/humble/setup.sh \
     && colcon build --packages-select \
       ydlidar_ros2_driver \
