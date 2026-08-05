@@ -53,14 +53,19 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${repo_root}"
 
 echo "Asking ${DEVICE} which serial nodes exist"
+# Older CLIs exposed this as `wendy hardware capabilities` returning a
+# {"capabilities": [...]} object; current CLIs use `wendy device hardware list`
+# returning a bare array. Older agents (0.17.x) also omit serial entries
+# entirely, which lands in the empty-result fallback below.
 present=$(wendy --json device info --device "${DEVICE}" >/dev/null 2>&1 && \
-          wendy --json hardware capabilities --device "${DEVICE}" 2>/dev/null | \
+          wendy --json device hardware list --device "${DEVICE}" 2>/dev/null | \
           python3 -c '
 import json,sys
 try:
-    caps=json.load(sys.stdin).get("capabilities",[])
+    doc=json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+caps=doc.get("capabilities",[]) if isinstance(doc,dict) else doc
 for c in caps:
     p=c.get("device_path","")
     if p.startswith("/dev/ttyUSB"):
