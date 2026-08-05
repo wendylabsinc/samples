@@ -56,10 +56,17 @@ fi
 # resolve from /usr/lib/python310.zip, so the failure arrives as a confusing
 # ModuleNotFoundError for termios or similar. Restore before every launch and
 # relaunch on exit instead of letting a lost race kill the process for good.
+# The flock serializes concurrent restores (the probe supervisor below races
+# the ros2 shim inside lidar_supervisor, which uses the same lock): an rm -rf
+# landing while another restore's tar is mid-extract leaves the tree
+# transiently incomplete.
 restore_stdlib() {
   if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then
-    rm -rf /usr/lib/python3.10
-    tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib
+    (
+      flock 9
+      rm -rf /usr/lib/python3.10
+      tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib
+    ) 9>/tmp/python-stdlib-restore.lock
   fi
 }
 

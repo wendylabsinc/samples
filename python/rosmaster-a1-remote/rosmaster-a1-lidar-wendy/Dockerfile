@@ -81,8 +81,11 @@ RUN mv /opt/ros/humble/bin/ros2 /opt/ros/humble/bin/ros2.real \
     && printf '%s\n' \
       '#!/usr/bin/env bash' \
       'if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then' \
-      '  rm -rf /usr/lib/python3.10' \
-      '  tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib' \
+      '  (' \
+      '    flock 9' \
+      '    rm -rf /usr/lib/python3.10' \
+      '    tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib' \
+      '  ) 9>/tmp/python-stdlib-restore.lock' \
       'fi' \
       'exec /opt/ros/humble/bin/ros2.real "$@"' \
       > /opt/ros/humble/bin/ros2 \
