@@ -35,16 +35,6 @@ class SensorProbe(Node):
         self.states = {}
         self.lidar_failures = []
         self.base_failures = []
-        self.camera_publishers = {
-            "/dev/video0": (
-                "/sensor_probe/video0/image/compressed",
-                self.create_publisher(CompressedImage, "/sensor_probe/video0/image/compressed", 1),
-            ),
-            "/dev/video1": (
-                "/sensor_probe/video1/image/compressed",
-                self.create_publisher(CompressedImage, "/sensor_probe/video1/image/compressed", 1),
-            ),
-        }
         status_topic = os.environ.get("SENSOR_PROBE_STATUS_TOPIC", "/sensor_probe/status")
         self.status_publisher = self.create_publisher(String, status_topic, 10)
 
@@ -67,6 +57,26 @@ class SensorProbe(Node):
             self.vel_publisher = None
             self.voltage_publisher = None
 
+        # Same story as probe_base_serial above: the lidar container's copy of this
+        # probe sets PROBE_CAMERA=0 because the base container's probe already owns
+        # camera capture, so creating these publishers there too -- with no
+        # camera_loop ever writing to them -- would be the exact duplicate, unused
+        # publisher this file just argued against.
+        probe_camera = os.environ.get("PROBE_CAMERA", "1") == "1"
+        if probe_camera:
+            self.camera_publishers = {
+                "/dev/video0": (
+                    "/sensor_probe/video0/image/compressed",
+                    self.create_publisher(CompressedImage, "/sensor_probe/video0/image/compressed", 1),
+                ),
+                "/dev/video1": (
+                    "/sensor_probe/video1/image/compressed",
+                    self.create_publisher(CompressedImage, "/sensor_probe/video1/image/compressed", 1),
+                ),
+            }
+        else:
+            self.camera_publishers = {}
+
         self.create_subscription(Imu, "/imu/data_raw", self.on_imu, 10)
         self.create_subscription(MagneticField, "/imu/mag", self.on_mag, 10)
         self.create_subscription(JointState, "/joint_states", self.on_joint, 10)
@@ -78,7 +88,7 @@ class SensorProbe(Node):
         self.create_timer(2.0, self.publish_status)
         if probe_base_serial:
             threading.Thread(target=self.base_serial_loop, daemon=True).start()
-        if os.environ.get("PROBE_CAMERA", "1") == "1":
+        if probe_camera:
             threading.Thread(target=self.camera_loop, daemon=True).start()
         if os.environ.get("PROBE_AUDIO", "1") == "1":
             threading.Thread(target=self.audio_loop, daemon=True).start()

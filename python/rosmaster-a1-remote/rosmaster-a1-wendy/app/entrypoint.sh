@@ -85,7 +85,10 @@ fi
 
 if [[ ! -e "${ROSMASTER_SERIAL_PORT}" ]]; then
   echo "No Rosmaster telemetry serial device found. Check USB entitlement/device wiring." >&2
-  sleep infinity
+  while true; do
+    echo "rosmaster-a1 base still down: no Rosmaster telemetry serial device found (ROSMASTER_SERIAL_PORT=${ROSMASTER_SERIAL_PORT:-unset}); idling for diagnostics." >&2
+    sleep 300
+  done
 fi
 
 echo "Checking Python ROS imports"
@@ -100,7 +103,10 @@ PY
 import_status=$?
 if [[ "${import_status}" -ne 0 ]]; then
   echo "Python ROS import check failed with status ${import_status}; keeping container alive for diagnostics." >&2
-  sleep infinity
+  while true; do
+    echo "rosmaster-a1 base still down: Python ROS import check failed with status ${import_status}; idling for diagnostics." >&2
+    sleep 300
+  done
 fi
 
 echo "Starting sensor-only probe"

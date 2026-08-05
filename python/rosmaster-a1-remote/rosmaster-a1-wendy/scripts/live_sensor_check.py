@@ -76,6 +76,12 @@ def run(command: list[str], timeout: float) -> CommandResult:
             exc.stderr or "",
             timed_out=True,
         )
+    except FileNotFoundError as exc:
+        # macOS-only tools (networksetup, ipconfig) are unconditionally invoked by
+        # ethernet_devices()/local_network_state() below; on Linux they don't exist,
+        # and without this the missing binary would traceback the whole script
+        # instead of surfacing as a normal failed-command result.
+        return CommandResult(command, None, "", str(exc))
 
 
 def stream_for(command: list[str], seconds: float) -> CommandResult:

@@ -43,7 +43,10 @@ PY
 import_status=$?
 if [[ "${import_status}" -ne 0 ]]; then
   echo "Python ROS import check failed with status ${import_status}; keeping container alive for diagnostics." >&2
-  sleep infinity
+  while true; do
+    echo "rosmaster-a1 lidar still down: Python ROS import check failed with status ${import_status}; idling for diagnostics." >&2
+    sleep 300
+  done
 fi
 
 echo "Starting sensor-only probe"

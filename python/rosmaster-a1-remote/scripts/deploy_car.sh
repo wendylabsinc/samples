@@ -24,6 +24,18 @@
 # service's container for the whole app deploy, which makes pruning MORE
 # important than it was with four separate apps.
 #
+# Division of labor for a no-args deploy (all four services):
+#   - pruning above handles the absent-serial hard-fail when enumeration
+#     succeeds, by dropping the offending entitlement before the single
+#     group `wendy run` call, so no service ever tries to create a container
+#     against a device that isn't there;
+#   - when enumeration fails, pruning can't run, so the per-service fallback
+#     below restores the old isolation: each service deploys on its own,
+#     so an absent-serial hard-fail in one can't abort its siblings;
+#   - --keep-going on the group call covers a different failure class
+#     entirely (build/push failures), not on-device container-creation
+#     hard-fails, in either of the above cases.
+#
 # Usage: scripts/deploy_car.sh <car-hostname>.local:50052 [service ...]
 
 set -uo pipefail
@@ -59,6 +71,8 @@ if [[ -z "${present}" ]]; then
   echo "Could not enumerate tty nodes from the device." >&2
   echo "Deploying with wendy.json as committed; if container creation fails with" >&2
   echo "'serial device ... unavailable', remove that device and retry." >&2
+  echo "(A no-args deploy falls back to one 'wendy run' per service below, so" >&2
+  echo "that hard-fail can't take its sibling services down with it.)" >&2
 else
   echo "Present tty nodes: ${present//$'\n'/ }"
 fi
@@ -86,13 +100,23 @@ if changed:
 PY
 fi
 
+if [[ ${#SERVICES[@]} -eq 0 && -z "${present}" ]]; then
+  echo
+  echo "Enumeration failed, so pruning could not drop absent-serial entitlements;" >&2
+  echo "falling back to the per-service loop so a container-creation hard-fail in" >&2
+  echo "one service can't abort the others." >&2
+  SERVICES=(base lidar realsense web)
+fi
+
 if [[ ${#SERVICES[@]} -eq 0 ]]; then
   echo
   echo "=== rosmaster-a1 (all services) ==="
   # --keep-going deploys the services whose builds/pushes succeed instead of
   # aborting the whole group (the moral equivalent of the old loop's
-  # continue-past-failures); absent-serial hard-fails are what the pruning
-  # above is for.
+  # continue-past-failures) -- it only covers build/push failures. Absent-serial
+  # hard-fails are what the pruning above is for; this group path only runs
+  # once pruning has actually had a chance to drop them (enumeration
+  # succeeded), so it's safe to fail as one unit here.
   wendy run --yes --detach --builder docker --keep-going --device "${DEVICE}" || \
     echo "  deploy FAILED" >&2
 else
