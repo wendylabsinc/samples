@@ -1,0 +1,62 @@
+{
+  "appId": "rosmaster-a1",
+  "version": "0.1.0",
+  "platform": "linux",
+  "services": {
+    "base": {
+      "context": "rosmaster-a1-wendy",
+      "entitlements": [
+        { "type": "network", "mode": "host" },
+        { "type": "usb" },
+        { "type": "serial", "device": "ttyUSB1" },
+        { "type": "serial", "device": "ttyUSB2" },
+        { "type": "camera" },
+        { "type": "input" },
+        { "type": "audio" }
+      ],
+      "frameworks": {
+        "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
+      }
+    },
+    "lidar": {
+      "context": "rosmaster-a1-lidar-wendy",
+      "entitlements": [
+        { "type": "network", "mode": "host" },
+        { "type": "usb" },
+        { "type": "serial", "device": "ttyUSB0" }
+      ],
+      "frameworks": {
+        "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
+      }
+    },
+    "realsense": {
+      "context": "rosmaster-a1-realsense-wendy",
+      "entitlements": [
+        { "type": "network", "mode": "host" },
+        { "type": "camera" },
+        { "type": "usb" }
+      ],
+      "frameworks": {
+        "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
+      }
+    },
+    "web": {
+      "context": "rosmaster-a1-web-remote-wendy",
+      "entitlements": [
+        { "type": "network", "mode": "host" }
+      ],
+      "readiness": {
+        "tcpSocket": { "port": 8091 },
+        "timeoutSeconds": 30
+      },
+      "hooks": {
+        "postStart": {
+          "cli": "wendy utils open-browser https://${WENDY_HOSTNAME}:8443"
+        }
+      },
+      "frameworks": {
+        "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
+      }
+    }
+  }
+}
