@@ -109,13 +109,41 @@ if [[ "${import_status}" -ne 0 ]]; then
   done
 fi
 
+# Something in the Wendy runtime deletes /usr/lib/python3.10 again after the
+# restore at the top of this script (the same recurring deletion the ros2
+# shim guards against). A Python process that starts while the stdlib is
+# missing dies on its first C-extension import -- pure-Python modules still
+# resolve from /usr/lib/python310.zip, so the failure arrives as a confusing
+# ModuleNotFoundError for termios or similar. Restore before every launch and
+# relaunch on exit instead of letting a lost race kill the process for good.
+restore_stdlib() {
+  if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then
+    rm -rf /usr/lib/python3.10
+    tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib
+  fi
+}
+
+supervise_python() {
+  local name=$1
+  shift
+  local attempt=0 backoff=5
+  while true; do
+    attempt=$((attempt + 1))
+    restore_stdlib
+    python3 "$@"
+    echo "${name} exited status=$? attempt=${attempt}; restarting in ${backoff}s" >&2
+    sleep "${backoff}"
+    backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
+  done
+}
+
 echo "Starting sensor-only probe"
 unset PROBE_RAW_LIDAR
-python3 /app/sensor_probe.py &
+supervise_python SENSOR_PROBE_SUPERVISOR /app/sensor_probe.py &
 sensor_probe_pid=$!
 
 echo "Starting direct Rosmaster base bridge with ROSMASTER_SERIAL_PORT=${ROSMASTER_SERIAL_PORT}"
-python3 /app/base_bridge.py &
+supervise_python BASE_BRIDGE_SUPERVISOR /app/base_bridge.py &
 driver_pid=$!
 
 wait "${sensor_probe_pid}" "${driver_pid}"
