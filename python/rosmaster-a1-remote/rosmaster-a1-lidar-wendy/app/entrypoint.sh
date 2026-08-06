@@ -116,49 +116,28 @@ lidar_supervisor() {
   while true; do
     attempt=$((attempt + 1))
 
-    local rosmaster_port=""
-    if [[ -e /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 ]]; then
-      rosmaster_port=$(readlink -f /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0)
-    fi
-
-    # The motor board owns the by-id symlink, so the LiDAR is the adapter that
-    # symlink does not resolve to. Re-evaluated every attempt because the two
+    # Selection is by USB vendor id from sysfs (pick_lidar_port.sh): this
+    # container gets no /dev/serial/by-id, so the old by-id sniff always came
+    # up empty and the blind /dev/ttyUSB* fallback behind it opened whichever
+    # node came first -- which, the day the adapters renumbered, was the motor
+    # board's CH340 while the base bridge was driving through it. The picker
+    # answers only ever a CP2102, and answers nothing rather than gambling;
+    # this loop already retries forever, so an adapter that comes and goes is
+    # picked up when it returns. Re-evaluated every attempt because the two
     # adapters swap numbers between boots.
     local lidar_port="${YDLIDAR_PORT:-}"
-
-    # Prefer the LiDAR's own by-id symlink. The YDLIDAR presents a Silicon Labs
-    # CP2102 bridge, not the CH340 the motor board uses, so its by-id name is
-    # unambiguous and survives renumbering. Guessing ttyUSB numbers has been
-    # wrong three times in one day, and the container's /dev also carries stale
-    # nodes baked into the image that look real but bind to nothing.
     if [[ -z "${lidar_port}" ]]; then
-      for link in /dev/serial/by-id/*CP2102*; do
-        [[ -e "${link}" ]] || continue
-        lidar_port="${link}"
-        echo "LIDAR_SUPERVISOR found CP2102 by-id ${link} -> $(readlink -f "${link}")"
-        break
-      done
-    fi
-
-    if [[ -z "${lidar_port}" ]]; then
-      for candidate in /dev/ttyUSB*; do
-        [[ -e "${candidate}" ]] || continue
-        if [[ -n "${rosmaster_port}" && "$(readlink -f "${candidate}")" == "${rosmaster_port}" ]]; then
-          continue
-        fi
-        lidar_port="${candidate}"
-        break
-      done
+      lidar_port=$(bash /app/pick_lidar_port.sh)
     fi
 
     if [[ -z "${lidar_port}" || ! -e "${lidar_port}" ]]; then
-      echo "LIDAR_SUPERVISOR attempt=${attempt} no candidate port present, retrying in ${backoff}s" >&2
+      echo "LIDAR_SUPERVISOR attempt=${attempt} no CP2102 LiDAR adapter present (a CH340 is never claimed), retrying in ${backoff}s" >&2
       sleep "${backoff}"
       backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
       continue
     fi
 
-    echo "LIDAR_SUPERVISOR attempt=${attempt} using ${lidar_port} (motor board is ${rosmaster_port:-unknown})"
+    echo "LIDAR_SUPERVISOR attempt=${attempt} using ${lidar_port}"
     if [[ -w "${lidar_params}" ]]; then
       sed -i "s|port: .*|port: \"${lidar_port}\"|" "${lidar_params}"
     fi

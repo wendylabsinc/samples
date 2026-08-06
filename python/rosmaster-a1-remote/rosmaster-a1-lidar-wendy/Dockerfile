@@ -95,6 +95,7 @@ WORKDIR /app
 COPY app/sensor_probe.py /app/sensor_probe.py
 COPY app/usb_reset.py /app/usb_reset.py
 COPY app/port_census.py /app/port_census.py
+COPY app/pick_lidar_port.sh /app/pick_lidar_port.sh
 COPY app/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

@@ -8,6 +8,7 @@
       "entitlements": [
         { "type": "network", "mode": "host" },
         { "type": "usb" },
+        { "type": "serial", "device": "ttyUSB0" },
         { "type": "serial", "device": "ttyUSB1" },
         { "type": "serial", "device": "ttyUSB2" },
         { "type": "camera" },
@@ -23,7 +24,8 @@
       "entitlements": [
         { "type": "network", "mode": "host" },
         { "type": "usb" },
-        { "type": "serial", "device": "ttyUSB0" }
+        { "type": "serial", "device": "ttyUSB0" },
+        { "type": "serial", "device": "ttyUSB1" }
       ],
       "frameworks": {
         "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
