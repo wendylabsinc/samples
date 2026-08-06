@@ -947,3 +947,130 @@ test("TRANSPORT: a second throttle does queue behind the first, rather than pili
   assert.ok(Math.abs(drive[1].body.linear_x - 0.25 * manualSpeed) < 1e-9,
     "the queued send must carry the newest stick position, not a stale one");
 });
+
+// Part 3: bounded fetches ====================================================
+//
+// The server wedged on the car once and every fetch on this page waited on it
+// forever, because nothing had a timeout. A hang never rejects, so none of the
+// existing catch/finally paths ever ran: driveInFlight above stayed stuck true
+// and every gamepad command after the one hung POST was silently dropped, the
+// status poll stacked a new connection every 750 ms tick with nothing to stop
+// it, and the only failure indicator (setConnection(false, ...)) never fired
+// because it only runs on a rejection. These tests hold a fetch open the way
+// the wedged server did and prove the page recovers instead of bricking.
+
+test("RESILIENCE: a hung drive POST times out, so the guard it left behind does not block the next command", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/drive");
+  page.run("state.armed = true; state.left = { x: 0, y: -1 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 1, "the throttle is on the wire and not yet answered");
+
+  // Simulate FETCH_TIMEOUT_MS actually elapsing on a server that never answers.
+  page.expireFetchTimeouts();
+  await page.settle();
+
+  // driveInFlight must be false again: a second non-zero command, which would
+  // otherwise queue behind an outstanding request forever, has to go out
+  // immediately rather than being silently dropped like every command after
+  // the one hung POST in the field.
+  page.run("state.left = { x: 0, y: -0.5 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 2,
+    "a timed-out drive must self-heal, not drop every command that follows it");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a throttle queued behind a drive that then times out still goes out, not lost with it", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/drive");
+  page.run("state.armed = true; state.left = { x: 0, y: -1 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 1);
+
+  // A second, different throttle arrives while the first is still in flight,
+  // so it queues rather than piling a second connection on top of the first.
+  page.run("state.left = { x: 0, y: -0.5 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 1, "still queued, the first request has not answered");
+
+  // The first request times out instead of ever answering. The finally in
+  // sendDrive that clears driveQueued and re-fires it must run all the same,
+  // the same way it already does when a held request is released normally
+  // (see the TRANSPORT test above); a timeout must not be a second way for a
+  // queued command to be dropped on the floor.
+  page.expireFetchTimeouts();
+  await page.settle();
+
+  const drive = page.posts("/api/drive");
+  assert.equal(drive.length, 2, "the queued throttle must still go out once the guard clears");
+  const manualSpeed = Number(page.el("speedInput").value);
+  assert.ok(Math.abs(drive[1].body.linear_x - 0.5 * manualSpeed) < 1e-9,
+    "and it must carry the value that was queued, not a stale one");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a hung status fetch is not re-issued by the next poll tick", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/status");
+
+  page.run("refreshStatus()");
+  await page.settle();
+  const gets = () => page.calls.filter((call) => call.path === "/api/status" && call.method === "GET");
+  assert.equal(gets().length, 1, "the first poll's fetch is on the wire");
+
+  // The 750 ms setInterval tick calls refreshStatus() again; the in-flight
+  // guard must find the previous fetch still outstanding and skip it rather
+  // than stacking a second connection on top of it, the way the wedged
+  // server's poll did in the field.
+  page.run("refreshStatus()");
+  await page.settle();
+  assert.equal(gets().length, 1, "a tick while the previous poll is still outstanding must not stack a request");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a hung /api/gamepad post is not re-issued while one is outstanding", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/gamepad");
+
+  page.run("state.gamepadLastReportAt = -1000;");
+  padFrame(page, { 0: { pressed: true } });
+  await page.settle();
+  assert.equal(page.posts("/api/gamepad").length, 1, "the first report is on the wire");
+
+  // Force past the 100 ms throttle again so it is the in-flight guard under
+  // test here, not the throttle, that stops the second post.
+  page.run("state.gamepadLastReportAt = -1000;");
+  padFrame(page, { 0: { pressed: true } });
+  await page.settle();
+  assert.equal(page.posts("/api/gamepad").length, 1, "a post already outstanding must not be stacked");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a status fetch that times out flips the connection indicator offline, the path a rejection already took", async () => {
+  const page = await freshPage();
+  assert.equal(page.state.lastStatusOk, true, "the initial poll in freshPage() already succeeded");
+  page.fake.held.add("/api/status");
+
+  page.run("refreshStatus()");
+  await page.settle();
+  assert.equal(page.state.lastStatusOk, true, "still waiting on the hung fetch, nothing has failed yet");
+
+  // A hang never rejects on its own, which is exactly why the operator saw no
+  // failure indicator in the field: setConnection(false, ...) only runs from
+  // a catch. The timeout is what turns the hang into a rejection.
+  page.expireFetchTimeouts();
+  await page.settle();
+
+  assert.equal(page.el("statusDot").className, "dot bad");
+  assert.equal(page.el("statusText").textContent, "Remote offline");
+  assert.equal(page.state.lastStatusOk, false);
+});

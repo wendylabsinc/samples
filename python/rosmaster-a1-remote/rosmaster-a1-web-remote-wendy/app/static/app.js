@@ -204,14 +204,38 @@ function scaledCommand() {
   };
 }
 
+// FETCH_TIMEOUT_MS bounds every fetch this page makes. The server wedged on
+// the car once, and nothing here had a timeout: every fetch waited on it
+// forever. A hang never rejects, so none of the existing catch/finally paths
+// ever ran to notice: driveInFlight below stayed stuck true and silently
+// dropped every gamepad command after the one hung POST, the status poll
+// stacked a new connection every 750 ms tick, and setConnection(false, ...)
+// never fired because it only runs from a rejection. Worse, this hardware
+// keeps four MJPEG streams open at all times, which already holds four of
+// Chrome's six per-origin sockets; wedged fetches piling up on the rest is
+// what made even a page refresh queue forever. 4000 ms sits comfortably above
+// the drive POST's 1212 ms 90th-percentile latency (server.py's
+// CommandFreshness docstring) and comfortably below where an operator gives
+// up and reloads.
+const FETCH_TIMEOUT_MS = 4000;
+
 async function postJson(path, payload) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload || {}),
-  });
-  if (!response.ok) throw new Error(`${path} ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    return response.json();
+  } finally {
+    // Cleared on every outcome, timeout included, so a request that answers
+    // just under the wire never leaves a stray abort() scheduled behind it.
+    clearTimeout(timer);
+  }
 }
 
 // The drive sender ==========================================================
@@ -946,6 +970,14 @@ function pressedButtons(pad) {
     .filter(Boolean);
 }
 
+// gamepadPostInFlight is the same guard driveInFlight and statusInFlight are:
+// reportGamepad already throttles itself to 10/s, but a hung post at that
+// rate is a new connection stacked every 100 ms with nothing to stop it,
+// exactly like the status poll. The throttle stays; this only skips the POST
+// itself when one is still outstanding, so the on-screen readout below still
+// updates every frame even while a slow post is in flight.
+let gamepadPostInFlight = false;
+
 function reportGamepad(pad) {
   const now = performance.now();
   if (now - state.gamepadLastReportAt < 100) return;
@@ -966,6 +998,8 @@ function reportGamepad(pad) {
   }
   updateGamepadText();
 
+  if (gamepadPostInFlight) return;
+  gamepadPostInFlight = true;
   postJson("/api/gamepad", {
     enabled: state.gamepadEnabled,
     armed: state.armed,
@@ -976,7 +1010,7 @@ function reportGamepad(pad) {
     buttons: pad.buttons ? pad.buttons.length : 0,
     axes,
     pressed,
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => { gamepadPostInFlight = false; });
 }
 
 // applyGamepadAction is the whole dispatcher: every decision was already
@@ -1109,9 +1143,21 @@ function pollGamepad() {
   renderControllerPanel();
 }
 
+// statusInFlight is the status poll's version of driveInFlight above: a status
+// fetch that hangs must not get a second one stacked on top of it by the next
+// 750 ms tick, the way the wedged server did in the field. Unlike a drive
+// command, nothing ever needs to jump this queue, so the guard is a plain
+// skip with no exception for it: the interval itself keeps running (below),
+// only the fetch inside a tick that finds one already outstanding is skipped.
+let statusInFlight = false;
+
 async function refreshStatus() {
+  if (statusInFlight) return;
+  statusInFlight = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const status = await fetch("/api/status", { cache: "no-store" }).then((r) => r.json());
+    const status = await fetch("/api/status", { cache: "no-store", signal: controller.signal }).then((r) => r.json());
     const cameras = Array.isArray(status.cameras) ? status.cameras : [];
     const control = status.control || {};
     const limits = control.limits || {};
@@ -1169,7 +1215,13 @@ async function refreshStatus() {
     drawLidar(lidar);
     updateReadouts();
   } catch {
+    // A hang never rejects on its own: this catch only runs because the
+    // timeout above turned it into one. Without that, a wedged server left
+    // this the only failure indicator, and it never fired.
     setConnection(false, "Remote offline");
+  } finally {
+    clearTimeout(timer);
+    statusInFlight = false;
   }
 }
 
