@@ -42,6 +42,13 @@ CMD_TIMEOUT_S = float(os.environ.get("CMD_TIMEOUT_S", "3.0"))
 DRIVE_MAX_AGE_MS = float(os.environ.get("DRIVE_MAX_AGE_MS", "400"))
 DRIVE_REJECT_LOG_INTERVAL_S = float(os.environ.get("DRIVE_REJECT_LOG_INTERVAL_S", "1.0"))
 PUBLISH_HZ = float(os.environ.get("PUBLISH_HZ", "20"))
+# count_publishers/count_subscribers are unbounded rclpy graph queries. This
+# is deliberately far slower than PUBLISH_HZ: the cache only needs to be
+# fresh enough for a status panel and a readiness check, and sampling it on
+# its own thread rather than in the /cmd_vel publish tick is the whole point
+# (see _sample_graph_counts_loop) -- a slow tick here costs a stale reading,
+# never a stalled command.
+GRAPH_COUNT_SAMPLE_INTERVAL_S = float(os.environ.get("GRAPH_COUNT_SAMPLE_INTERVAL_S", "0.5"))
 MAX_LINEAR_X = float(os.environ.get("MAX_LINEAR_X", "1000.00"))
 MAX_STEERING_Y = float(os.environ.get("MAX_STEERING_Y", "0.12"))
 MAX_ANGULAR_Z = float(os.environ.get("MAX_ANGULAR_Z", "1.0"))
@@ -563,11 +570,11 @@ class RosmasterControl(Node):
         # count_publishers/count_subscribers are unbounded rclpy graph
         # queries; the request path used to call them straight from the
         # handler thread, and a stalled rmw layer hung /api/drive and
-        # /api/status directly. Sampled once per publish tick instead (see
-        # _sample_graph_counts) and cached here so a handler thread only
-        # ever reads a dict under self._lock. Zeros until the first tick
-        # match "nothing discovered yet", the same meaning an unfitted
-        # camera or absent base driver already has.
+        # /api/status directly. Sampled instead on their own thread (see
+        # _sample_graph_counts_loop, started below) and cached here so a
+        # handler thread only ever reads a dict under self._lock. Zeros until
+        # the first sample match "nothing discovered yet", the same meaning
+        # an unfitted camera or absent base driver already has.
         self._graph_publisher_topics = (
             HP60C_DEPTH_TOPIC,
             HP60C_RGB_TOPIC,
@@ -605,6 +612,7 @@ class RosmasterControl(Node):
         }
         self._auto_state = self._new_auto_state()
         self.create_timer(1.0 / PUBLISH_HZ, self._publish)
+        threading.Thread(target=self._sample_graph_counts_loop, daemon=True, name="graph-count-sampler").start()
 
     def update(self, payload: dict) -> dict:
         enabled = bool(payload.get("enabled", False))
@@ -699,23 +707,45 @@ class RosmasterControl(Node):
             return self._graph_cmd_vel_subscribers
 
     def _sample_graph_counts(self) -> None:
-        """Query the ROS graph off the request path, once per publish tick.
+        """Query the ROS graph and refresh the cache. One call, one round trip.
 
         count_publishers/count_subscribers hit rmw with no timeout of their
         own. They used to be called inline from snapshot, _auto_ready,
         _planner_depth_source, hp60c_snapshot and realsense_snapshot, all
         reachable from POST /api/drive and GET /api/status; a stalled rmw
         layer hung both straight from the handler thread. The queries happen
-        here, outside self._lock, so a slow graph call delays this tick, not
-        every handler blocked on the lock behind it; only the already-known
-        result is stored under the lock, for _cached_publisher_count and
-        _cached_cmd_vel_subscribers to read.
+        here, outside self._lock, so a slow graph call delays only whoever
+        called this, not every handler blocked on the lock behind it; only
+        the already-known result is stored under the lock, for
+        _cached_publisher_count and _cached_cmd_vel_subscribers to read.
+        Kept as its own method, separate from the loop below, so a test can
+        prime the cache deterministically without waiting on a timer.
         """
         publishers = {topic: self.count_publishers(topic) for topic in self._graph_publisher_topics}
         cmd_vel_subscribers = self.count_subscribers("/cmd_vel")
         with self._lock:
             self._graph_publishers = publishers
             self._graph_cmd_vel_subscribers = cmd_vel_subscribers
+
+    def _sample_graph_counts_loop(self) -> None:
+        """Refresh the graph-count cache on its own thread, forever.
+
+        This used to run at the top of _publish(), the callback the 20 Hz
+        /cmd_vel timer ticks -- the single executor thread that also runs
+        every subscription callback. PREVIEW_MAX_FPS above documents what
+        happens when that thread is made to wait: a saturated executor once
+        starved the command timer, the base bridge stopped hearing from us,
+        its watchdog zeroed the motors, and the car stopped answering the
+        operator. count_publishers/count_subscribers are exactly the
+        unbounded rmw calls this whole file is being hardened against, so
+        calling them from the executor would have reproduced that failure
+        from a new cause. A dedicated daemon thread means a stalled graph
+        query only leaves the cache stale -- it can no longer touch the
+        publish tick, a sensor callback, or a handler thread.
+        """
+        while True:
+            self._sample_graph_counts()
+            time.sleep(GRAPH_COUNT_SAMPLE_INTERVAL_S)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -1527,7 +1557,6 @@ class RosmasterControl(Node):
         }
 
     def _publish(self) -> None:
-        self._sample_graph_counts()
         with self._lock:
             auto_enabled = bool(self._auto["enabled"])
             command = dict(self._command)

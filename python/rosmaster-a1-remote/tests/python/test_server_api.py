@@ -613,12 +613,18 @@ class GraphCountCacheTests(ServerTestCase):
     paths called them directly — in RosmasterControl.snapshot,
     _planner_depth_source, _auto_ready, hp60c_snapshot and realsense_snapshot
     — so a stalled rmw layer hung both POST /api/drive and GET /api/status.
-    They are now sampled once per publish tick and cached; a handler thread
-    only ever reads the cache through a lock, never the graph itself.
+    They are now sampled on their own daemon thread (_sample_graph_counts_loop)
+    and cached; a handler thread only ever reads the cache through a lock,
+    never the graph itself, and the /cmd_vel publish tick never touches the
+    graph at all.
     """
 
     def test_a_stalled_graph_query_does_not_block_drive_or_status(self):
-        server.control._publish()  # tick once so the cache is primed with real (stub) 0s
+        # Prime the cache the way _sample_graph_counts_loop would, without
+        # waiting on its GRAPH_COUNT_SAMPLE_INTERVAL_S sleep: _publish() no
+        # longer samples the graph itself (that used to run on the executor
+        # thread, see _sample_graph_counts_loop's docstring for why it moved).
+        server.control._sample_graph_counts()
 
         release = threading.Event()
 
@@ -666,6 +672,44 @@ class GraphCountCacheTests(ServerTestCase):
         self.assertEqual(status_body["control"]["cmd_vel_subscribers"], 0)
         self.assertEqual(status_body["hp60c"]["publishers"]["depth"], 0)
         self.assertEqual(status_body["realsense"]["publishers"]["depth"], 0)
+
+    def test_publish_never_calls_the_graph_directly_in_either_mode(self):
+        """Review finding: _sample_graph_counts() briefly ran at the top of
+        _publish(), the callback the /cmd_vel timer ticks on the single
+        threaded ROS executor -- the same thread whose saturation
+        PREVIEW_MAX_FPS's comment documents starving the command watchdog and
+        stopping the car answering the operator. count_publishers/
+        count_subscribers are exactly the unbounded rmw calls this file is
+        being hardened against, so a stall there would have frozen /cmd_vel
+        publishing itself, in every mode. Graph sampling now lives on its own
+        daemon thread; _publish() must never block on the graph, manual or
+        auto.
+        """
+        release = threading.Event()
+
+        def blocking(*args, **kwargs):
+            release.wait()
+            return 1
+
+        self.addCleanup(setattr, server.control, "_auto_state", server.control._new_auto_state())
+        with mock.patch.object(server.control, "count_publishers", side_effect=blocking), mock.patch.object(
+            server.control, "count_subscribers", side_effect=blocking
+        ):
+            self.addCleanup(release.set)
+            for auto_enabled in (False, True):
+                with self.subTest(auto_enabled=auto_enabled):
+                    server.control._auto["enabled"] = auto_enabled
+                    thread = threading.Thread(target=server.control._publish, daemon=True)
+                    start = time.monotonic()
+                    thread.start()
+                    thread.join(timeout=1.0)
+                    elapsed = time.monotonic() - start
+                    self.assertFalse(
+                        thread.is_alive(),
+                        "_publish() must never call the ROS graph directly, in "
+                        f"{'auto' if auto_enabled else 'manual'} mode ({elapsed:.2f}s and counting)",
+                    )
+        server.control._auto["enabled"] = False
 
 
 class MjpegStreamTests(ServerTestCase):
