@@ -111,8 +111,8 @@ function defaultStatus() {
     // what this hardware has: the HP60C driver publishes depth and rgb and no
     // infrared or stereo image at all.
     cameras: [
-      { id: "hp60c_depth", label: "Depth", path: "/stream_hp60c_depth.mjpg", ok: true, age_s: 0.06 },
-      { id: "hp60c_rgb", label: "RGB", path: "/stream_hp60c_rgb.mjpg", ok: true, age_s: 0.09 },
+      { id: "hp60c_depth", label: "Depth", path: "/stream_hp60c_depth.mjpg", frame: "/frame_hp60c_depth.jpg", ok: true, age_s: 0.06 },
+      { id: "hp60c_rgb", label: "RGB", path: "/stream_hp60c_rgb.mjpg", frame: "/frame_hp60c_rgb.jpg", ok: true, age_s: 0.09 },
     ],
     control: {
       command: { enabled: false, linear_x: 0, steering_y: 0, angular_z: 0 },

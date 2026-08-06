@@ -23,7 +23,12 @@ import http.client
 import json
 import os
 import queue
+import shutil
+import socket
+import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -98,6 +103,7 @@ class ServerTestCase(unittest.TestCase):
         server.control.publisher.messages.clear()
         server.control._realsense = server.control._empty_realsense()
         server.control._viewers.clear()
+        server.control._frame_polls.clear()
 
     def _connection(self):
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -861,7 +867,7 @@ class CameraFeedRegistryTests(ServerTestCase):
         for feed in feeds:
             self.assertEqual(
                 sorted(feed),
-                ["age_s", "id", "label", "ok", "path"],
+                ["age_s", "frame", "id", "label", "ok", "path"],
                 "the client renders straight from these keys",
             )
             self.assertTrue(feed["label"], "a tile with no label tells the operator nothing")
@@ -1870,6 +1876,167 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         self.assertIn("reverse_used_s", state)
         self.assertIn("reverse_used_m", state)
         self.assertGreater(state["reverse_used_s"], 0.0)
+
+
+class FrameEndpointTests(ServerTestCase):
+    """One finite JPEG per request, for browsers that cannot be trusted with
+    an infinite response.
+
+    Safari never reliably releases the connection behind an MJPEG <img>: each
+    stream churn leaked one ESTABLISHED connection until its six-per-host cap
+    was full, at which point every drive, gamepad and status fetch hung and
+    the operator's car 'froze' while perfectly healthy -- observed live
+    2026-08-06, six parked connections in lsof on the operator's machine.
+    A frame endpoint completes every request, so the page can poll the
+    expanded tile over its ordinary keep-alive pool and nothing can pin a
+    socket.
+    """
+
+    class _FakeControl:
+        def __init__(self, frame):
+            self.frame = frame
+            self.asked = []
+
+        def poll_camera_frame(self, camera, stream):
+            self.asked.append((camera, stream))
+            return self.frame
+
+    def test_every_feed_advertises_its_frame_path(self):
+        hp60c = {"depth": {"frames": 1, "ok": True, "age_s": 0.1}, "publishers": {}}
+        feeds = server.camera_feeds(hp60c=hp60c)
+        self.assertEqual(len(feeds), 1)
+        self.assertEqual(feeds[0]["frame"], "/frame_hp60c_depth.jpg")
+
+    def test_frame_endpoint_serves_the_latest_jpeg_with_a_length(self):
+        server.control = self._FakeControl(b"\xff\xd8 jpeg bytes")
+        conn = self._connection()
+        conn.request("GET", "/frame_realsense_color.jpg")
+        response = conn.getresponse()
+        body = response.read()
+        conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
+        self.assertEqual(int(response.getheader("Content-Length")), len(body))
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+        self.assertEqual(body, b"\xff\xd8 jpeg bytes")
+        self.assertEqual(server.control.asked, [("realsense", "color")])
+
+    def test_frame_endpoint_answers_404_before_any_frame(self):
+        server.control = self._FakeControl(None)
+        status, *_ = self._get("/frame_realsense_color.jpg")
+        self.assertEqual(status, 404)
+
+    def test_polling_counts_as_viewership_so_frames_get_encoded(self):
+        """The encoder is gated on someone watching; a poll is someone watching."""
+        control = server.control
+        self.assertIsNone(control.poll_camera_frame("realsense", "color"), "the first poll opens the lease and gets nothing")
+        control._on_realsense_color(RealSenseSubscriptionTests._image("rgb8"))
+        frame = control.poll_camera_frame("realsense", "color")
+        self.assertIsNotNone(frame)
+        self.assertTrue(frame.startswith(b"\xff\xd8"))
+
+    def test_an_expired_lease_does_not_replay_the_old_frame(self):
+        """A tile that comes back after a gap must not open on a stale frame."""
+        control = server.control
+        control.poll_camera_frame("realsense", "color")
+        control._on_realsense_color(RealSenseSubscriptionTests._image("rgb8"))
+        self.assertIsNotNone(control.poll_camera_frame("realsense", "color"))
+        with mock.patch.object(server, "POLL_VIEWER_TTL_S", 0.05):
+            time.sleep(0.1)
+            self.assertIsNone(
+                control.poll_camera_frame("realsense", "color"),
+                "the first poll after a lapse reopens the lease; only frames encoded after it are served",
+            )
+
+    def test_a_lapsed_lease_stops_the_encoder(self):
+        """Encoding for a tab that is gone is executor time stolen from /cmd_vel."""
+        control = server.control
+        control.poll_camera_frame("realsense", "color")
+        with mock.patch.object(server, "POLL_VIEWER_TTL_S", 0.05):
+            time.sleep(0.1)
+            control._on_realsense_color(RealSenseSubscriptionTests._image("rgb8"))
+            with control._lock:
+                self.assertIsNone(control._realsense.get("color_jpeg"), "no lease, no JPEG")
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl is needed to mint the test certificate")
+class TlsListenerTests(unittest.TestCase):
+    """The TLS handshake must never run on the accept thread.
+
+    serve_https used to hand ThreadingHTTPServer a listening socket wrapped
+    by ssl, which puts every client's handshake inside accept() on the one
+    serve_forever thread. A client that connects and then says nothing --
+    Safari parks speculative preconnects exactly like that -- blocked every
+    other HTTPS connection for as long as it stayed silent. Observed live on
+    the car, 2026-08-06: with the operator's Safari open, a curl to :8443
+    could not even complete a TCP handshake while :8091 answered normally,
+    and the operator's page showed every fetch that needed a new connection
+    dying at its timeout while fetches on established connections stayed
+    healthy. These tests pin the fix: an idle connection costs nobody else
+    anything.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cert = os.path.join(cls.tmp.name, "cert.pem")
+        key = os.path.join(cls.tmp.name, "key.pem")
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key, "-out", cert, "-days", "1",
+                "-subj", "/CN=localhost",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        cls.httpd = server.build_https_server(cert, key, host="127.0.0.1", port=0)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=2)
+        cls.tmp.cleanup()
+
+    def _https_get(self, path, timeout):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=timeout, context=context)
+        try:
+            conn.request("GET", path)
+            response = conn.getresponse()
+            body = response.read()
+            return response.status, body
+        finally:
+            conn.close()
+
+    def test_https_serves_at_all(self):
+        status, body = self._https_get("/api/gamepad", timeout=5)
+        self.assertEqual(status, 200)
+        self.assertIn(b"gamepad", body)
+
+    def test_an_idle_connection_does_not_block_other_clients(self):
+        idle = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        self.addCleanup(idle.close)
+        # The idle socket says nothing, like a parked browser preconnect. A
+        # server that handshakes on the accept thread now hangs every other
+        # client; the 3 s budget below is far above a loopback round trip
+        # and far below the old failure mode, which held on for as long as
+        # the idle socket lived.
+        status, _ = self._https_get("/api/gamepad", timeout=3)
+        self.assertEqual(status, 200)
+
+    def test_several_idle_connections_do_not_block_other_clients(self):
+        for _ in range(3):
+            parked = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            self.addCleanup(parked.close)
+        status, _ = self._https_get("/api/gamepad", timeout=3)
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":

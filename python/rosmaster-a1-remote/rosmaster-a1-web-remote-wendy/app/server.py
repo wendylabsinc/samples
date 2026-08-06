@@ -7,6 +7,7 @@ import os
 import queue
 import socket
 import ssl
+import sys
 import threading
 import time
 from io import BytesIO
@@ -151,6 +152,11 @@ CAMERA_STREAM_IDLE_TIMEOUT_S = float(os.environ.get("CAMERA_STREAM_IDLE_TIMEOUT_
 # encoding are rationed, never the sensing.
 PREVIEW_MAX_FPS = float(os.environ.get("PREVIEW_MAX_FPS", "6.0"))
 PREVIEW_MIN_INTERVAL_S = 1.0 / PREVIEW_MAX_FPS if PREVIEW_MAX_FPS > 0 else 0.0
+# How long one GET /frame_*.jpg counts as "someone is watching" for the
+# encoder gate. The page polls its expanded tile several times a second, so
+# a live viewer renews this continuously; a closed tab lapses within a couple
+# of seconds and encoding stops, same as an MJPEG viewer disconnecting.
+POLL_VIEWER_TTL_S = float(os.environ.get("POLL_VIEWER_TTL_S", "2.0"))
 # No depth feed is named here. Which depth camera this car carries is decided
 # at runtime, and naming one in a static list is exactly the bug that left Auto
 # Nav refusing to engage on a car whose HP60C had been replaced by a RealSense.
@@ -313,6 +319,13 @@ CAMERA_FEEDS = (
 )
 
 CAMERA_STREAM_PATHS = {feed["path"]: (feed["camera"], feed["stream"]) for feed in CAMERA_FEEDS}
+# One finite JPEG per GET, the polling alternative to the MJPEG streams
+# above. Safari never reliably releases the connection behind an MJPEG <img>;
+# each stream churn leaked one until its six-per-host cap was full and every
+# control fetch hung behind parked sockets. A frame request completes, so the
+# page polls these over its ordinary keep-alive pool instead.
+CAMERA_FRAME_PATHS = {f"/frame_{feed['id']}.jpg": (feed["camera"], feed["stream"]) for feed in CAMERA_FEEDS}
+CAMERA_FRAME_PATH_BY_ID = {feed["id"]: f"/frame_{feed['id']}.jpg" for feed in CAMERA_FEEDS}
 
 # The depth cameras autonomy is allowed to plan on ==========================
 #
@@ -412,6 +425,7 @@ def camera_feeds(hp60c: dict | None = None, realsense: dict | None = None) -> li
                 "id": spec["id"],
                 "label": spec["label"],
                 "path": spec["path"],
+                "frame": CAMERA_FRAME_PATH_BY_ID[spec["id"]],
                 "ok": bool(stream.get("ok")),
                 "age_s": stream.get("age_s"),
             }
@@ -601,6 +615,10 @@ class RosmasterControl(Node):
         self._viewers: dict[str, int] = {}
         # Last time each feed drew a preview, keyed "camera:stream".
         self._preview_last: dict[str, float] = {}
+        # Last time each feed was polled via /frame_*.jpg, keyed
+        # "camera:stream". A recent poll counts as viewership for the
+        # encoder gate, the way an open MJPEG response does.
+        self._frame_polls: dict[str, float] = {}
         self._sensors = self._empty_sensors()
         self._auto = {
             "enabled": False,
@@ -952,7 +970,27 @@ class RosmasterControl(Node):
                     self._realsense[slot] = None
 
     def _has_viewer_locked(self, camera: str, stream: str) -> bool:
-        return self._viewers.get(f"{camera}:{stream}", 0) > 0
+        key = f"{camera}:{stream}"
+        if self._viewers.get(key, 0) > 0:
+            return True
+        return time.monotonic() - self._frame_polls.get(key, 0.0) < POLL_VIEWER_TTL_S
+
+    def poll_camera_frame(self, camera: str, stream: str) -> bytes | None:
+        """One frame for one GET, and the GET itself is the viewership.
+
+        The first poll after a lapse returns None on purpose: the lease had
+        expired, so whatever JPEG is cached predates anyone watching and
+        would be replayed as if it were live. That poll reopens the lease,
+        the next ROS callback encodes, and the following poll is served.
+        """
+        key = f"{camera}:{stream}"
+        now = time.monotonic()
+        with self._lock:
+            lease_live = now - self._frame_polls.get(key, 0.0) < POLL_VIEWER_TTL_S
+            self._frame_polls[key] = now
+        if not lease_live:
+            return None
+        return self.camera_frame(camera, stream)
 
     def _preview_due_locked(self, key: str) -> bool:
         """True when this feed is allowed to draw another preview.
@@ -2688,6 +2726,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif parsed.path == "/api/gamepad":
             self._send_json({"ok": True, "gamepad": gamepad_snapshot()})
+        elif parsed.path in CAMERA_FRAME_PATHS:
+            self._send_camera_frame(*CAMERA_FRAME_PATHS[parsed.path])
         elif parsed.path in CAMERA_STREAM_PATHS:
             # Routed from the registry rather than a hand written branch per
             # feed, so a feed added to CAMERA_FEEDS is served as well as
@@ -2783,6 +2823,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_camera_frame(self, camera: str, stream: str) -> None:
+        """The latest JPEG for one feed, as a response that ends.
+
+        Unlike _stream_camera below, this holds no thread and no connection:
+        Content-Length is sent, the body completes, and the keep-alive
+        connection is immediately reusable for drive and status traffic.
+        404 simply means "no frame yet" -- the page polls, so the next
+        request answers once the lease has let the encoder run.
+        """
+        jpg = control.poll_camera_frame(camera, stream)
+        if jpg is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpg)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(jpg)
+
     def _stream_camera(self, camera: str, stream: str) -> None:
         """Serve one feed as MJPEG for as long as it has something to send.
 
@@ -2845,6 +2905,64 @@ class Handler(BaseHTTPRequestHandler):
         return "application/octet-stream"
 
 
+class TLSHandler(Handler):
+    """Handler whose TLS handshake runs on this connection's own thread.
+
+    The listening socket must never be the thing ssl wraps: that puts every
+    client's handshake inside accept() on the one serve_forever thread, and a
+    client that connects and then says nothing -- Safari parks speculative
+    preconnects exactly like that -- blocks every other HTTPS connection for
+    as long as it stays silent. Observed live on the car: with the operator's
+    Safari open, a curl to :8443 could not complete a TCP handshake while
+    :8091 answered normally, and the page showed every fetch that needed a
+    new connection dying at its timeout while fetches on connections it
+    already had stayed healthy. Wrapping here, in setup(), makes a stalled
+    peer cost one thread for `timeout` seconds and nobody else anything.
+    """
+
+    def setup(self) -> None:
+        # The class timeout bounds the handshake: a preconnect that never
+        # speaks is closed after 10 s instead of holding the thread forever.
+        self.request.settimeout(self.timeout)
+        self.request = self.server.tls_context.wrap_socket(self.request, server_side=True)
+        super().setup()
+
+    def finish(self) -> None:
+        # wrap_socket detaches the socket object the server machinery holds,
+        # so its close_request() no longer closes the fd; do it here.
+        try:
+            super().finish()
+        finally:
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+
+
+class TLSServer(ThreadingHTTPServer):
+    # The socketserver default backlog is 5. A browser reconnecting a page's
+    # worth of sockets after a blip bursts past that, and a full backlog
+    # turns into SYNs answered with nothing, which reads as the car being
+    # off the network.
+    request_queue_size = 64
+
+    def __init__(self, server_address, handler_class, tls_context: ssl.SSLContext) -> None:
+        super().__init__(server_address, handler_class)
+        self.tls_context = tls_context
+
+    def handle_error(self, request, client_address) -> None:
+        # Failed handshakes are routine: dropped preconnects, port scans,
+        # HTTP spoken to the TLS port. One quiet line, not a traceback each.
+        exc = sys.exc_info()[1]
+        log_line(f"TLS_CONN_ERROR client={client_address[0]} {type(exc).__name__}: {exc}")
+
+
+def build_https_server(cert: str, key: str, host: str = "0.0.0.0", port: int | None = None) -> TLSServer:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    return TLSServer((host, HTTPS_PORT if port is None else port), TLSHandler, context)
+
+
 def serve_https() -> None:
     """Serve the same app over TLS, so the browser will expose the gamepad.
 
@@ -2866,10 +2984,7 @@ def serve_https() -> None:
         print(f"WEB_REMOTE_TLS_SKIPPED cert={cert} missing", flush=True)
         return
     try:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(cert, key)
-        server = ThreadingHTTPServer(("0.0.0.0", HTTPS_PORT), Handler)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server = build_https_server(cert, key)
         print(f"WEB_REMOTE_READY_TLS port={HTTPS_PORT}", flush=True)
         server.serve_forever()
     except Exception as exc:  # noqa: BLE001 - TLS is a bonus, never fatal

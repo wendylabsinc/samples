@@ -605,7 +605,10 @@ test("GALLERY: one tile per feed the car reports, in the order it reports them",
   const page = await freshPage();
   assert.deepEqual(feedsOf(page), ["hp60c_depth", "hp60c_rgb"]);
   assert.equal(page.tile("hp60c_depth").label.textContent, "Depth");
-  assert.match(page.tile("hp60c_rgb").img.src, /stream_hp60c_rgb\.mjpg/);
+  // One stream at a time: the first feed auto-expands and streams; the other
+  // tile exists but rents no socket (see tests/web/feeds.test.mjs for why).
+  assert.match(page.tile("hp60c_depth").img.src, /frame_hp60c_depth\.jpg/);
+  assert.equal(page.tile("hp60c_rgb").img.src, "");
 });
 
 test("GALLERY: a feed the car does not report gets no tile at all", async () => {
@@ -634,7 +637,7 @@ test("GALLERY: a feed added to the registry later appears with no change to the 
   await page.settle();
 
   assert.deepEqual(feedsOf(page), ["hp60c_depth", "hp60c_rgb", "hp60c_ir"]);
-  assert.match(page.tile("hp60c_ir").img.src, /stream_hp60c_ir\.mjpg/);
+  assert.equal(page.tile("hp60c_ir").img.src, "", "a new tile appears disconnected; only the expanded feed streams");
 });
 
 test("GALLERY: a stale feed is marked on screen rather than left as a silently frozen frame", async () => {
@@ -735,17 +738,19 @@ test("GALLERY: X cycles which feed is expanded and then back to the gallery", as
   const page = await freshPage();
   page.run("state.gamepadEnabled = true;");
 
-  padFrame(page, { 2: { pressed: true } });
-  padFrame(page, {});
-  assert.equal(page.state.expandedFeed, "hp60c_depth");
-
+  // The page now opens with the first feed already expanded, so the cycle
+  // starts one step in: rgb, then the gallery, then depth again.
   padFrame(page, { 2: { pressed: true } });
   padFrame(page, {});
   assert.equal(page.state.expandedFeed, "hp60c_rgb");
 
   padFrame(page, { 2: { pressed: true } });
-  await page.settle();
+  padFrame(page, {});
   assert.equal(page.state.expandedFeed, null, "the pad needs a way out of an expanded feed, not only a way in");
+
+  padFrame(page, { 2: { pressed: true } });
+  await page.settle();
+  assert.equal(page.state.expandedFeed, "hp60c_depth");
 });
 
 test("GALLERY: an expanded feed that vanishes from the registry falls back to the gallery", async () => {
@@ -768,7 +773,9 @@ test("GALLERY: two tiles failing together do not retry together", async () => {
   page.tile("hp60c_rgb").img.dispatch("error", {});
   await page.settle();
 
-  const delays = page.timeouts;
+  // The expanded tile's poll loop also arms a long stall bound per frame;
+  // only the sub-stall delays are the retries this test reasons about.
+  const delays = page.timeouts.filter((ms) => ms < 3000);
   assert.equal(delays.length, 2, "each tile schedules its own retry");
   assert.notEqual(delays[0], delays[1], "several MJPEG reconnects on the same instant is the burst that starved the server");
   assert.ok(Math.min(...delays) >= 1000, "the one second wait before a retry is kept");
@@ -793,40 +800,39 @@ test("GALLERY: an errored tile really does reopen its stream", async () => {
   await page.settle();
 
   assert.notEqual(page.tile("hp60c_depth").img.src, before);
-  assert.match(page.tile("hp60c_depth").img.src, /stream_hp60c_depth\.mjpg/);
+  assert.match(page.tile("hp60c_depth").img.src, /frame_hp60c_depth\.jpg/);
 });
 
-test("GALLERY: the periodic refresh moves one tile at a time, round robin", async () => {
+test("GALLERY: the periodic refresh touches only the expanded feed's stream", async () => {
   const page = await freshPage();
   const before = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
 
   page.run("reconnectNextFeed()");
   const afterFirst = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
-  assert.notEqual(afterFirst[0], before[0]);
-  assert.equal(afterFirst[1], before[1], "the periodic refresh must not reopen every stream at once");
+  assert.notEqual(afterFirst[0], before[0], "the expanded feed's stream is refreshed on its turn");
+  assert.equal(afterFirst[1], "", "a disconnected tile stays disconnected");
 
   page.run("reconnectNextFeed()");
   const afterSecond = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
-  assert.equal(afterSecond[0], afterFirst[0]);
-  assert.notEqual(afterSecond[1], afterFirst[1]);
+  assert.equal(afterSecond[0], afterFirst[0], "the non-expanded tile's turn is a no-op, not a reopen");
+  assert.equal(afterSecond[1], "");
 });
 
-test("GALLERY: the View button reconnects every tile, staggered", async () => {
+test("GALLERY: the View button reopens the expanded stream and leaves the rest disconnected", async () => {
   const page = await freshPage();
   page.clearCalls();
-  const before = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
+  const before = page.tile("hp60c_depth").img.src;
 
   page.run("applyGamepadAction({ type: 'reconnectCamera' })");
   await page.settle();
 
-  const delays = page.timeouts;
-  assert.equal(delays.length, 2);
+  // Sub-stall delays only: the reopened poll loop arms its own long stall
+  // bound, which is not one of the staggered retries being counted here.
+  const delays = page.timeouts.filter((ms) => ms < 3000);
+  assert.equal(delays.length, 2, "each tile still schedules its own staggered retry");
   assert.notEqual(delays[0], delays[1]);
-  assert.deepEqual(
-    ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src === before[id === "hp60c_depth" ? 0 : 1]),
-    [false, false],
-    "every feed reopens, just not all on the same instant",
-  );
+  assert.notEqual(page.tile("hp60c_depth").img.src, before, "the expanded stream reopens");
+  assert.equal(page.tile("hp60c_rgb").img.src, "", "a tile that is not expanded must not gain a socket from a reconnect");
 });
 
 test("GALLERY: a car that reports no cameras renders an empty gallery rather than breaking the page", async () => {
