@@ -34,12 +34,25 @@ class _Inert:
         return lambda *args, **kwargs: None
 
 
+class _ClockTime:
+    def to_msg(self):
+        return None
+
+
+class _Clock:
+    def now(self) -> _ClockTime:
+        return _ClockTime()
+
+
 class Node:
     def __init__(self, name: str) -> None:
         self._name = name
 
     def create_publisher(self, *args) -> _Publisher:
         return _Publisher(*args)
+
+    def get_clock(self) -> _Clock:
+        return _Clock()
 
     def create_subscription(self, *args) -> _Inert:
         return _Inert(*args)
