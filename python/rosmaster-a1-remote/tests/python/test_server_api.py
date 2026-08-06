@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import queue
 import sys
 import threading
 import time
@@ -499,6 +500,172 @@ class KeepAliveTests(ServerTestCase):
         status, raw = self._post_raw("/api/drive", b"{not valid json")
         self.assertEqual(status, 400)
         self.assertFalse(json.loads(raw.decode("utf-8"))["ok"])
+
+
+class LogQueueTests(ServerTestCase):
+    """Field incident: log_message fires on every request, and a rejected
+    drive command logs through CommandFreshness; both used to call
+    print(flush=True) straight from the handler thread. When the container's
+    stdout pipe stalled (log-collector backpressure), the next request to log
+    anything blocked inside that write. log_line() now only ever
+    put_nowait()s onto a bounded queue a background thread drains, so a
+    stalled sink can only ever stall the writer thread, never a handler.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_log_output = server._log_output
+        self._orig_dropped = server._LOG_DROPPED
+        server._LOG_DROPPED = 0
+        # Earlier tests' log lines may still be queued; start from empty so
+        # this test's own count of what filled/dropped is exact.
+        while True:
+            try:
+                server._LOG_QUEUE.get_nowait()
+            except queue.Empty:
+                break
+
+    def tearDown(self):
+        server._log_output = self._orig_log_output
+        server._LOG_DROPPED = self._orig_dropped
+        super().tearDown()
+
+    def test_a_stalled_log_sink_never_blocks_a_handler_thread(self):
+        release = threading.Event()
+        entered = threading.Event()
+        outputs = []
+
+        def controlled_output(line):
+            # The first line the writer thread ever picks up here simulates
+            # the stalled stdout pipe: it blocks until release fires. Every
+            # line after that (post-release) is appended immediately, which
+            # is how the drop marker below gets captured.
+            if not release.is_set():
+                entered.set()
+                release.wait()
+            outputs.append(line)
+
+        server._log_output = controlled_output
+        self.addCleanup(release.set)
+
+        # The writer thread's next dequeue may still be mid-flight against
+        # the pre-patch output function, so a line queued right at the
+        # instant of the swap can slip through before the swap is visible to
+        # it. Retry a throwaway line until one is demonstrably picked up by
+        # controlled_output (entered fires) rather than assume the first one
+        # lands; once any line is in it, the writer is stuck there for good.
+        warmups = 0
+        while not entered.wait(timeout=0.05):
+            warmups += 1
+            server.log_line(f"__warmup_{warmups}__")
+            self.assertLess(warmups, 100, "the writer thread never picked up the patched output function")
+
+        # log_message fires once per request; that line just queues up
+        # behind the writer thread, which is already stuck in
+        # controlled_output on the warmup line above.
+        status, _, _ = self._get("/")
+        self.assertEqual(status, 200)
+
+        # Push well past the queue's ~256 capacity so log_line has to start
+        # dropping rather than blocking.
+        for i in range(300):
+            server.log_line(f"filler {i}")
+
+        # The writer thread is stuck in controlled_output and the queue is
+        # full behind it. A drive POST and a GET / — each logging through
+        # the same stalled path — must still answer promptly.
+        start = time.monotonic()
+        status, _ = self._post_json("/api/drive", {"enabled": False})
+        self.assertEqual(status, 200)
+        status, _, _ = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertLess(
+            time.monotonic() - start,
+            2.0,
+            "a stalled log sink must never block a handler thread",
+        )
+
+        # Unblock the writer and let it fully drain the backlog before
+        # probing, so the marker below is unambiguously the first line
+        # queued after the drops rather than a race with leftover fillers.
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while not server._LOG_QUEUE.empty() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(server._LOG_QUEUE.empty(), "the writer never drained the backlog once unblocked")
+
+        server.log_line("PROBE_AFTER_DROPS")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not any("PROBE_AFTER_DROPS" in line for line in outputs):
+            time.sleep(0.005)
+
+        probe = next((line for line in outputs if "PROBE_AFTER_DROPS" in line), None)
+        self.assertIsNotNone(probe, "the probe line never made it out of the writer thread")
+        self.assertTrue(
+            probe.startswith("LOG_DROPPED n="),
+            f"a line following drops must carry the drop marker so the gap is visible, got: {probe!r}",
+        )
+
+
+class GraphCountCacheTests(ServerTestCase):
+    """Field incident: count_publishers/count_subscribers are unbounded rclpy
+    graph queries with no timeout of their own. The drive and status response
+    paths called them directly — in RosmasterControl.snapshot,
+    _planner_depth_source, _auto_ready, hp60c_snapshot and realsense_snapshot
+    — so a stalled rmw layer hung both POST /api/drive and GET /api/status.
+    They are now sampled once per publish tick and cached; a handler thread
+    only ever reads the cache through a lock, never the graph itself.
+    """
+
+    def test_a_stalled_graph_query_does_not_block_drive_or_status(self):
+        server.control._publish()  # tick once so the cache is primed with real (stub) 0s
+
+        release = threading.Event()
+
+        def blocking(*args, **kwargs):
+            release.wait()
+            return 1
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        conn2 = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        self.addCleanup(release.set)
+        self.addCleanup(conn.close)
+        self.addCleanup(conn2.close)
+        try:
+            with mock.patch.object(server.control, "count_publishers", side_effect=blocking), mock.patch.object(
+                server.control, "count_subscribers", side_effect=blocking
+            ):
+                start = time.monotonic()
+                conn.request(
+                    "POST",
+                    "/api/drive",
+                    body=json.dumps({"enabled": False}).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp = conn.getresponse()
+                drive_body = json.loads(resp.read().decode())
+                self.assertEqual(resp.status, 200)
+
+                conn2.request("GET", "/api/status")
+                resp2 = conn2.getresponse()
+                status_body = json.loads(resp2.read().decode())
+                self.assertEqual(resp2.status, 200)
+
+                self.assertLess(
+                    time.monotonic() - start,
+                    2.0,
+                    "a stalled graph query must never block a handler thread",
+                )
+        finally:
+            release.set()
+
+        # And the promptness did not come from inventing numbers: both
+        # responses carried exactly the cache's last sampled (stub, zero)
+        # values, for both /cmd_vel subscribers and camera publishers.
+        self.assertEqual(drive_body["control"]["cmd_vel_subscribers"], 0)
+        self.assertEqual(status_body["control"]["cmd_vel_subscribers"], 0)
+        self.assertEqual(status_body["hp60c"]["publishers"]["depth"], 0)
+        self.assertEqual(status_body["realsense"]["publishers"]["depth"], 0)
 
 
 class MjpegStreamTests(ServerTestCase):
@@ -982,6 +1149,55 @@ class CommandFreshnessTests(unittest.TestCase):
         self.assertGreaterEqual(len(logged), 1, "a rejection the operator cannot see in the logs is a rejection they cannot debug")
         self.assertLessEqual(len(logged), 3, "198 rejections in one burst must not become 198 log lines")
 
+    def test_a_blocked_log_does_not_wedge_a_concurrent_fresh_check(self):
+        """Field incident: a stale command's rejection log ran print(flush=True)
+        while check() still held self._lock. When the container's stdout pipe
+        stalled (log-collector backpressure), that write never returned, the
+        lock was never released, and a perfectly fresh drive command arriving
+        on a second connection blocked in check() waiting for a lock a log
+        line was holding. The counters and the throttling decision must still
+        happen while the lock is held; only the write itself may wait.
+        """
+        release = threading.Event()
+        entered = threading.Event()
+
+        def blocking_log(line):
+            entered.set()
+            release.wait()
+
+        freshness = server.CommandFreshness(max_age_ms=400.0, log=blocking_log)
+        freshness.check({"client_id": "a", "seq": 1, "age_ms": 5})
+
+        stale = threading.Thread(
+            target=freshness.check, args=({"client_id": "a", "seq": 2, "age_ms": 1500},), daemon=True
+        )
+        stale.start()
+        self.addCleanup(stale.join, timeout=2)
+        self.assertTrue(entered.wait(timeout=2), "the stale rejection never reached the log call")
+
+        fresh_verdict = {}
+        fresh = threading.Thread(
+            target=lambda: fresh_verdict.update(
+                v=freshness.check({"client_id": "a", "seq": 3, "age_ms": 5})
+            ),
+            daemon=True,
+        )
+        started_at = time.monotonic()
+        fresh.start()
+        self.addCleanup(fresh.join, timeout=2)
+        # Registered last so it runs first (addCleanup is LIFO): both threads
+        # are parked on release.wait() and must be freed before anything
+        # joins them, pass or fail.
+        self.addCleanup(release.set)
+        fresh.join(timeout=1.0)
+        elapsed = time.monotonic() - started_at
+
+        self.assertFalse(
+            fresh.is_alive(),
+            f"a fresh check on another connection must not wait on a wedged log call ({elapsed:.2f}s and counting)",
+        )
+        self.assertTrue(fresh_verdict.get("v", {}).get("fresh"))
+
 
 class DriveFreshnessEndpointTests(ServerTestCase):
     def setUp(self):
@@ -1121,6 +1337,11 @@ class DepthSourceTests(ServerTestCase):
         ), mock.patch.object(control, "hp60c_snapshot", return_value=hp60c), mock.patch.object(
             control, "realsense_snapshot", return_value=realsense
         ):
+            # _auto_ready reads the cmd_vel subscriber count off the cache
+            # _sample_graph_counts fills once per publish tick, not off
+            # count_subscribers directly; tick it here, patch still active,
+            # so the patched value actually reaches the cache.
+            control._sample_graph_counts()
             return control._auto_ready()
 
     def test_a_realsense_car_with_no_hp60c_can_engage_autonomy(self):
@@ -1210,6 +1431,7 @@ class DepthSourceTests(ServerTestCase):
             with self.subTest(camera=camera):
                 source = server.select_depth_source(hp60c, realsense)
                 with mock.patch.object(control, "count_subscribers", return_value=1):
+                    control._sample_graph_counts()
                     _, decision = control._compute_auto_command(scan, auto, source, update_state=False)
                 self.assertEqual(decision["depth_source"], camera)
                 self.assertTrue(decision["depth_ok"], decision["reason"])
@@ -1219,6 +1441,7 @@ class DepthSourceTests(ServerTestCase):
         scan = {"updated_at": time.monotonic(), "sectors": {"front": {"near_m": 1.4, "count": 40}}, "gap_samples": []}
         auto = {"speed": 0.4, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.6}
         with mock.patch.object(control, "count_subscribers", return_value=1):
+            control._sample_graph_counts()
             msg, decision = control._compute_auto_command(scan, auto, None, update_state=False)
         self.assertEqual(msg.linear.x, 0.0)
         self.assertIsNone(decision["depth_source"])
@@ -1231,6 +1454,7 @@ class DepthSourceTests(ServerTestCase):
         auto = {"speed": 0.4, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.6}
         source = server.select_depth_source(None, self._realsense(depth=self._usable_depth()))
         with mock.patch.object(control, "count_subscribers", return_value=1):
+            control._sample_graph_counts()
             _, decision = control._compute_auto_command(scan, auto, source, update_state=False)
         self.assertFalse(
             [key for key in decision if key.startswith("hp60c")],
@@ -1308,6 +1532,7 @@ class DepthSourceTests(ServerTestCase):
         scan = {"updated_at": time.monotonic(), "sectors": {"front": {"near_m": 1.4, "count": 40}}, "gap_samples": []}
         auto = {"speed": 0.4, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.6}
         with mock.patch.object(control, "count_subscribers", return_value=1):
+            control._sample_graph_counts()
             msg, decision = control._compute_auto_command(scan, auto, source, update_state=False)
         self.assertFalse(decision["depth_ok"])
         self.assertEqual(msg.linear.x, 0.0)
@@ -1368,6 +1593,13 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         with mock.patch.object(server.time, "monotonic", side_effect=lambda: self.clock), mock.patch.object(
             self.control, "count_subscribers", return_value=1
         ):
+            # _compute_auto_command reads the cmd_vel subscriber count off
+            # the cache _sample_graph_counts fills once per publish tick, not
+            # off count_subscribers directly; tick it here, patch still
+            # active, rather than call _publish() itself, which would also
+            # run this test's own auto-command math a tick early and disturb
+            # the auto_state this class is deliberately driving by hand.
+            self.control._sample_graph_counts()
             yield
 
     def _scan(self, front_m):

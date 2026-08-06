@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import socket
 import ssl
 import threading
@@ -468,6 +469,47 @@ def encode_jpeg(frame: PILImage.Image, quality: int) -> bytes | None:
     return buf.getvalue()
 
 
+# A handler thread must never block on stdout. CommandFreshness used to log a
+# rejected command with print(flush=True) while holding its lock; when the
+# container's stdout pipe stalled (log-collector backpressure), that call
+# never returned, the lock was never released, and every later drive/status
+# request wedged in check() waiting for it. log_line() only ever
+# put_nowait()s onto this bounded queue, drained by the daemon thread below,
+# so a stalled sink can stall the writer, never the caller. A full queue
+# drops the line and counts the drop; the next line that gets through is
+# prefixed with a marker so the gap is visible in the log instead of silent.
+_LOG_QUEUE: "queue.Queue[str]" = queue.Queue(maxsize=256)
+_LOG_STATE_LOCK = threading.Lock()
+_LOG_DROPPED = 0
+
+
+def _log_output(line: str) -> None:
+    """The writer thread's sink. A module attribute, read fresh per line, so
+    a test can swap it for something that blocks without touching print."""
+    print(line, flush=True)
+
+
+def log_line(msg: str) -> None:
+    global _LOG_DROPPED
+    with _LOG_STATE_LOCK:
+        dropped = _LOG_DROPPED
+        line = f"LOG_DROPPED n={dropped} {msg}" if dropped else msg
+        try:
+            _LOG_QUEUE.put_nowait(line)
+        except queue.Full:
+            _LOG_DROPPED = dropped + 1
+            return
+        _LOG_DROPPED = 0
+
+
+def _log_writer() -> None:
+    while True:
+        _log_output(_LOG_QUEUE.get())
+
+
+threading.Thread(target=_log_writer, daemon=True, name="log-writer").start()
+
+
 class RosmasterControl(Node):
     def __init__(self) -> None:
         super().__init__("rosmaster_web_remote")
@@ -518,6 +560,22 @@ class RosmasterControl(Node):
             RosImage, REALSENSE_COLOR_TOPIC, self._on_realsense_color, REALSENSE_QOS
         )
         self._lock = threading.Lock()
+        # count_publishers/count_subscribers are unbounded rclpy graph
+        # queries; the request path used to call them straight from the
+        # handler thread, and a stalled rmw layer hung /api/drive and
+        # /api/status directly. Sampled once per publish tick instead (see
+        # _sample_graph_counts) and cached here so a handler thread only
+        # ever reads a dict under self._lock. Zeros until the first tick
+        # match "nothing discovered yet", the same meaning an unfitted
+        # camera or absent base driver already has.
+        self._graph_publisher_topics = (
+            HP60C_DEPTH_TOPIC,
+            HP60C_RGB_TOPIC,
+            HP60C_POINTS_TOPIC,
+            *REALSENSE_TOPICS.values(),
+        )
+        self._graph_publishers: dict[str, int] = {topic: 0 for topic in self._graph_publisher_topics}
+        self._graph_cmd_vel_subscribers = 0
         self._command = zero_command()
         self._last_published = zero_command()
         self._publish_count = 0
@@ -626,6 +684,39 @@ class RosmasterControl(Node):
             self._auto_state = self._new_auto_state()
         return command
 
+    def _cached_publisher_count(self, topic: str) -> int:
+        """A request thread's only way to ask about the ROS graph.
+
+        count_publishers itself is a request thread's business only through
+        this accessor: it just reads _sample_graph_counts's last result under
+        self._lock, never the graph. See _sample_graph_counts for why.
+        """
+        with self._lock:
+            return self._graph_publishers.get(topic, 0)
+
+    def _cached_cmd_vel_subscribers(self) -> int:
+        with self._lock:
+            return self._graph_cmd_vel_subscribers
+
+    def _sample_graph_counts(self) -> None:
+        """Query the ROS graph off the request path, once per publish tick.
+
+        count_publishers/count_subscribers hit rmw with no timeout of their
+        own. They used to be called inline from snapshot, _auto_ready,
+        _planner_depth_source, hp60c_snapshot and realsense_snapshot, all
+        reachable from POST /api/drive and GET /api/status; a stalled rmw
+        layer hung both straight from the handler thread. The queries happen
+        here, outside self._lock, so a slow graph call delays this tick, not
+        every handler blocked on the lock behind it; only the already-known
+        result is stored under the lock, for _cached_publisher_count and
+        _cached_cmd_vel_subscribers to read.
+        """
+        publishers = {topic: self.count_publishers(topic) for topic in self._graph_publisher_topics}
+        cmd_vel_subscribers = self.count_subscribers("/cmd_vel")
+        with self._lock:
+            self._graph_publishers = publishers
+            self._graph_cmd_vel_subscribers = cmd_vel_subscribers
+
     def snapshot(self) -> dict:
         with self._lock:
             command = dict(self._command)
@@ -637,7 +728,7 @@ class RosmasterControl(Node):
             "publish_count": self._publish_count,
             "last_publish_age_s": round(time.monotonic() - self._last_publish_at, 3) if self._last_publish_at else None,
             "stale_s": round(stale_s, 3) if stale_s is not None else None,
-            "cmd_vel_subscribers": self.count_subscribers("/cmd_vel"),
+            "cmd_vel_subscribers": self._cached_cmd_vel_subscribers(),
             "limits": {
                 "max_linear_x": MAX_LINEAR_X,
                 "max_steering_y": MAX_STEERING_Y,
@@ -691,27 +782,26 @@ class RosmasterControl(Node):
 
         Full snapshots, so publisher counts count as evidence of a fitted
         camera and a driver that has come up but not yet produced a frame is
-        still named in the readiness reason. This costs a handful of ROS graph
-        queries, which is fine on a request thread and is why the planner has
-        its own leaner version rather than calling this one.
+        still named in the readiness reason. The counts themselves are cache
+        reads (see _sample_graph_counts), so this is cheap enough to call from
+        a request thread; the planner still has its own leaner version below,
+        because the image bookkeeping this does is more than it needs.
         """
         return select_depth_source(self.hp60c_snapshot(), self.realsense_snapshot())
 
     def _planner_depth_source(self) -> dict | None:
         """The same question, asked on the thread that publishes /cmd_vel.
 
-        Same registry, same rule, and the two depth topics' publisher counts
-        filled in so the answer matches the one above. Two graph queries per
-        tick, next to the count_subscribers("/cmd_vel") this loop already does
-        every tick, and none of the image work: reading the other four feeds'
-        publishers would buy the planner nothing, since it only ever plans on
-        depth.
+        Same registry, same rule, and the two depth topics' cached publisher
+        counts filled in so the answer matches the one above, with none of
+        the image bookkeeping: reading the other four feeds' publishers would
+        buy the planner nothing, since it only ever plans on depth.
         """
         with self._lock:
             hp60c = self._hp60c_meta_locked()
             realsense = self._realsense_meta_locked()
-        hp60c["publishers"] = {"depth": self.count_publishers(HP60C_DEPTH_TOPIC)}
-        realsense["publishers"] = {"depth": self.count_publishers(REALSENSE_DEPTH_TOPIC)}
+        hp60c["publishers"] = {"depth": self._cached_publisher_count(HP60C_DEPTH_TOPIC)}
+        realsense["publishers"] = {"depth": self._cached_publisher_count(REALSENSE_DEPTH_TOPIC)}
         return select_depth_source(hp60c, realsense)
 
     def hp60c_snapshot(self) -> dict:
@@ -729,9 +819,9 @@ class RosmasterControl(Node):
         }
         hp60c["points_enabled"] = HP60C_POINTS_ENABLED
         hp60c["publishers"] = {
-            "depth": self.count_publishers(HP60C_DEPTH_TOPIC),
-            "rgb": self.count_publishers(HP60C_RGB_TOPIC),
-            "points": self.count_publishers(HP60C_POINTS_TOPIC),
+            "depth": self._cached_publisher_count(HP60C_DEPTH_TOPIC),
+            "rgb": self._cached_publisher_count(HP60C_RGB_TOPIC),
+            "points": self._cached_publisher_count(HP60C_POINTS_TOPIC),
         }
         hp60c["usable_for_navigation"] = bool(
             hp60c["depth"]["ok"]
@@ -758,7 +848,7 @@ class RosmasterControl(Node):
             stream["age_s"] = round(age, 3) if age is not None else None
             stream["ok"] = age is not None and age < REALSENSE_STALE_S and stream["frames"] > 0
         realsense["topics"] = dict(REALSENSE_TOPICS)
-        realsense["publishers"] = {name: self.count_publishers(topic) for name, topic in REALSENSE_TOPICS.items()}
+        realsense["publishers"] = {name: self._cached_publisher_count(topic) for name, topic in REALSENSE_TOPICS.items()}
         realsense["viewers"] = viewers
         realsense["stale_s"] = REALSENSE_STALE_S
         return realsense
@@ -878,7 +968,7 @@ class RosmasterControl(Node):
         scan = self.lidar_snapshot()
         if not scan["ok"]:
             return {"ready": False, "reason": "waiting for fresh lidar"}
-        if self.count_subscribers("/cmd_vel") < 1:
+        if self._cached_cmd_vel_subscribers() < 1:
             return {"ready": False, "reason": "waiting for base driver"}
         source = self.depth_source()
         if source is None:
@@ -1216,10 +1306,9 @@ class RosmasterControl(Node):
                 self._annotate_ros_frame(frame, title, msg.encoding, stats)
                 encoded = self._encode_frame(frame, 78)
         except Exception as exc:  # noqa: BLE001 - a preview is never worth the executor
-            print(
+            log_line(
                 f"REALSENSE_FRAME_FAILED stream={stream} encoding={msg.encoding} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
+                f"{type(exc).__name__}: {exc}"
             )
 
         meta = {
@@ -1438,6 +1527,7 @@ class RosmasterControl(Node):
         }
 
     def _publish(self) -> None:
+        self._sample_graph_counts()
         with self._lock:
             auto_enabled = bool(self._auto["enabled"])
             command = dict(self._command)
@@ -1535,7 +1625,7 @@ class RosmasterControl(Node):
         corridor = None
         if age is None or age > LIDAR_STALE_S or not front_near:
             reason = "waiting for lidar"
-        elif self.count_subscribers("/cmd_vel") < 1:
+        elif self._cached_cmd_vel_subscribers() < 1:
             reason = "waiting for base driver"
         elif depth_camera is None:
             reason = "waiting for a depth camera"
@@ -2381,7 +2471,7 @@ class CommandFreshness:
     def __init__(self, max_age_ms: float = DRIVE_MAX_AGE_MS, log=None) -> None:
         self._lock = threading.Lock()
         self._max_age_ms = float(max_age_ms)
-        self._log = log if log is not None else (lambda line: print(line, flush=True))
+        self._log = log if log is not None else log_line
         self._client = None
         self._last_seq: float | None = None
         self._rejected = {"stale": 0, "out_of_order": 0, "total": 0}
@@ -2406,23 +2496,35 @@ class CommandFreshness:
             return {"fresh": True, "reason": "unversioned"}
 
         client = str(payload.get("client_id", ""))[:64]
+        # Rejection carries a log call, and a rejection made every later
+        # drive/status request block behind this lock while that call sat
+        # waiting on a stalled stdout pipe. rejection is (verdict, line) so
+        # the write can happen after `with` releases the lock below; only
+        # the counters and the throttling decision need to happen inside it.
+        rejection = None
         with self._lock:
             if client != self._client:
                 self._client = client
                 self._last_seq = None
             if seq is not None and self._last_seq is not None and seq <= self._last_seq:
-                return self._reject_locked("out_of_order", "out of order", seq, age)
-            if seq is not None:
-                # Recorded before the age check on purpose. A stale command is
-                # still the newest thing the page has produced, so accepting an
-                # older sibling behind it would put back the very throttle we
-                # are refusing.
-                self._last_seq = seq
-            if age is not None and age > self._max_age_ms:
-                return self._reject_locked("stale", "stale", seq, age)
-        return {"fresh": True, "reason": "fresh"}
+                rejection = self._reject_locked("out_of_order", "out of order", seq, age)
+            else:
+                if seq is not None:
+                    # Recorded before the age check on purpose. A stale command
+                    # is still the newest thing the page has produced, so
+                    # accepting an older sibling behind it would put back the
+                    # very throttle we are refusing.
+                    self._last_seq = seq
+                if age is not None and age > self._max_age_ms:
+                    rejection = self._reject_locked("stale", "stale", seq, age)
+        if rejection is None:
+            return {"fresh": True, "reason": "fresh"}
+        verdict, line = rejection
+        if line is not None:
+            self._log(line)
+        return verdict
 
-    def _reject_locked(self, counter: str, reason: str, seq: float | None, age: float | None) -> dict:
+    def _reject_locked(self, counter: str, reason: str, seq: float | None, age: float | None) -> tuple[dict, str | None]:
         self._rejected[counter] += 1
         self._rejected["total"] += 1
         self._last_reason = reason
@@ -2434,15 +2536,16 @@ class CommandFreshness:
         # logged rather than compared against a monotonic clock that may not
         # have reached the interval yet.
         now = time.monotonic()
+        line = None
         if self._last_log_at is None or now - self._last_log_at >= DRIVE_REJECT_LOG_INTERVAL_S:
             self._last_log_at = now
             dropped = self._since_last_log
             self._since_last_log = 0
-            self._log(
+            line = (
                 f"DRIVE_REJECTED reason={reason} seq={seq} age_ms={age} "
                 f"max_age_ms={self._max_age_ms} in_last_burst={dropped} total={self._rejected['total']}"
             )
-        return {"fresh": False, "reason": reason}
+        return {"fresh": False, "reason": reason}, line
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -2491,7 +2594,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def log_message(self, fmt: str, *args) -> None:
-        print("%s - %s" % (self.address_string(), fmt % args), flush=True)
+        log_line("%s - %s" % (self.address_string(), fmt % args))
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
