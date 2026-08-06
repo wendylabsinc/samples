@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-set -eo pipefail
+# No -e: the supervisor loop at the bottom must survive its child dying,
+# which is the whole point of having it.
+set -o pipefail
+
+if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then
+  echo "Restoring Python stdlib archive"
+  rm -rf /usr/lib/python3.10
+  tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib
+fi
 
 source /opt/ros/humble/setup.bash
 
@@ -33,7 +41,29 @@ if [[ ! -f "${TLS_CERT}" || ! -f "${TLS_KEY}" ]]; then
   fi
 fi
 
-python3 -X faulthandler -u /app/web_remote.py
-status=$?
-echo "rosmaster-a1-web-remote server exited status=${status}" >&2
-exit "${status}"
+# Supervised like the base and lidar services' processes: the runtime's
+# recurring stdlib deletion (or any other fatal error) costs a ~5 s in-place
+# relaunch here instead of a ~40 s container restart, and the exit status and
+# traceback land in this container's log where the NEXT death is diagnosable.
+# The flock serializes restores with any concurrent one; see the base
+# service's entrypoint for the full story.
+restore_stdlib() {
+  if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then
+    (
+      flock 9
+      rm -rf /usr/lib/python3.10
+      tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib
+    ) 9>/tmp/python-stdlib-restore.lock
+  fi
+}
+
+attempt=0
+backoff=5
+while true; do
+  attempt=$((attempt + 1))
+  restore_stdlib
+  python3 -X faulthandler -u /app/web_remote.py
+  echo "WEB_REMOTE_SUPERVISOR exited status=$? attempt=${attempt}; restarting in ${backoff}s" >&2
+  sleep "${backoff}"
+  backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
+done

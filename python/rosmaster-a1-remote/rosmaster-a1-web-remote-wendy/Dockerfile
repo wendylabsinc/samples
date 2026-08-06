@@ -19,6 +19,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
 
+# Package the Python stdlib the same way the base and lidar services do: the
+# Wendy runtime recurrently deletes /usr/lib/python3.10 on the device, and
+# this service was the only one of the three with neither a restore archive
+# nor a supervisor -- so a lazy import landing after a deletion (a PIL
+# plugin, an ssl or encodings submodule) killed the process and cost a ~40 s
+# runtime container restart, felt in the field as the car going deaf
+# mid-drive. The zip is the fallback pure-Python path; the tarball is what
+# the entrypoint's restore_stdlib untars before every (re)launch.
+RUN python3 - <<'PY'
+import os
+import zipfile
+
+stdlib = "/usr/lib/python3.10"
+zip_path = "/usr/lib/python310.zip"
+with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    for root, dirs, files in os.walk(stdlib):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for filename in files:
+            if filename.endswith((".py", ".txt")):
+                path = os.path.join(root, filename)
+                archive.write(path, os.path.relpath(path, stdlib))
+PY
+RUN tar -C /usr/lib -czf /opt/python3.10-stdlib.tar.gz python3.10
+
 WORKDIR /app
 COPY app/server.py /app/web_remote.py
 # Generate the TLS certificate at build time, not at container start.
