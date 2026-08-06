@@ -11,11 +11,12 @@ WendyOS app, `rosmaster-a1`, with four services, on the car's Jetson Orin Nano.
 | Compute | NVIDIA Jetson Orin Nano running WendyOS |
 | Depth camera | Intel RealSense D435i |
 | LiDAR | YDLIDAR T-mini |
-| Controller | Xbox Series pad, over the browser Gamepad API |
+| Controller | Xbox Series pad, connected to WendyOS or through the browser Gamepad API |
 
 ## What it does
 
-- **Manual driving** from an Xbox controller or on-screen joystick, with an
+- **Manual driving** from an Xbox controller connected directly to WendyOS,
+  from a browser-connected controller, or from the on-screen joystick, with an
   arming step so a connected pad cannot move the car by accident.
 - **Four camera tiles at once**: colour, depth, and both raw infrared views from
   the RealSense stereo pair. Any tile expands to full width.
@@ -85,6 +86,19 @@ https://<car-hostname>.local:8443
 Accept the self signed certificate once per machine. Then press a button on the
 controller, press **A** to arm, and drive.
 
+For browser-free control, pair and trust the controller on WendyOS instead:
+
+```bash
+wendy device bluetooth connect <address>
+```
+
+The `web` service reads the resulting evdev device directly and still remains
+the only `/cmd_vel` publisher. The dashboard may be closed, and loss of the
+laptop network does not interrupt this path. A connected direct pad does not
+take control until **A** is pressed. If more than one compatible pad is present,
+the worker fails closed; set `DIRECT_GAMEPAD_ID` to an evdev `uniq` value or a
+`/dev/input/by-id` basename to select one.
+
 **Use the HTTPS port, not plain HTTP.** Browsers only expose the Gamepad API to
 a secure context, so over `http://` the controller is invisible to the page no
 matter how well it is connected. This is the single most common reason the
@@ -109,6 +123,10 @@ silently while a name simply stops resolving.
 | D-pad left/right | Autonomous speed |
 | LB / RB | Steering scale |
 
+On the direct WendyOS path, **X** and **View** are intentionally ignored because
+their browser camera actions do not exist without the page. All drive, stop,
+speed, steering, and Auto Nav controls keep the mapping above.
+
 ### If the controller does nothing
 
 The Controller panel distinguishes the cases. In order of likelihood:
@@ -130,7 +148,12 @@ The Controller panel distinguishes the cases. In order of likelihood:
   command if none arrives within `CMD_TIMEOUT_S`, three seconds by default.
 - **Stop always wins.** B and Menu work while armed and during autonomous mode.
 - **A vanished controller stops the car**, whether the browser fires a
-  disconnect event or the poll loop notices the pad is gone.
+  disconnect event, the poll loop notices the browser pad is gone, or evdev
+  reports a dropped/removed direct device.
+- **Direct ownership is explicit and fail-closed.** Once A acquires it, browser
+  drive/start/auto requests are acknowledged but rejected. STOP remains global.
+  Disconnect, read failure, or stop releases ownership and browser motion stays
+  latched off until an explicit START; reconnecting never resumes motion.
 - **Autonomous mode refuses to engage** without fresh depth, fresh LiDAR and a
   live `/cmd_vel` subscriber, and it names which one it is waiting for.
 - **The recovery manoeuvre is bounded.** When boxed in, the car reverses for at

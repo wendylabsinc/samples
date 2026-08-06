@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpython3.10-stdlib \
     python3 \
     python3-minimal \
+    python3-evdev \
     python3.10-minimal \
     python3-numpy \
     python3-pil \
@@ -45,6 +46,7 @@ RUN tar -C /usr/lib -czf /opt/python3.10-stdlib.tar.gz python3.10
 
 WORKDIR /app
 COPY app/server.py /app/web_remote.py
+COPY app/direct_gamepad.py /app/direct_gamepad.py
 # Generate the TLS certificate at build time, not at container start.
 #
 # Browsers only hand the Gamepad API to a secure context, so the remote has to

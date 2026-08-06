@@ -27,6 +27,8 @@ from sensor_msgs.msg import CompressedImage, Image as RosImage
 from sensor_msgs.msg import Imu, JointState, LaserScan, MagneticField, PointCloud2
 from std_msgs.msg import Float32, String
 
+from direct_gamepad import DirectGamepadWorker
+
 
 PORT = int(os.environ.get("PORT", "8091"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -605,6 +607,13 @@ class RosmasterControl(Node):
         self._graph_sample_failures = 0
         self._command = zero_command()
         self._last_published = zero_command()
+        # Direct evdev ownership is separate from whether a compatible pad is
+        # merely connected. A connected-but-unarmed pad leaves browser control
+        # alone; A sets this flag. Once direct ownership ends, the latch below
+        # rejects browser motion until an explicit /api/start so an already-
+        # armed browser heartbeat cannot undo the fail-closed zero.
+        self._direct_owned = False
+        self._browser_start_required = False
         self._publish_count = 0
         self._last_publish_at = 0.0
         self._scan = self._empty_scan()
@@ -654,6 +663,113 @@ class RosmasterControl(Node):
             self._command = cmd
         return cmd
 
+    def _browser_rejection_locked(self) -> str | None:
+        if self._direct_owned:
+            return "direct_gamepad_active"
+        if self._browser_start_required:
+            return "browser_start_required"
+        return None
+
+    def browser_rejection(self) -> str | None:
+        with self._lock:
+            return self._browser_rejection_locked()
+
+    def browser_update(self, payload: dict) -> tuple[dict | None, str | None]:
+        """Apply a browser command with ownership checked under the same lock.
+
+        The handler also checks early so it can skip freshness accounting for
+        an already-rejected request. This second check closes the race where A
+        acquires direct ownership between that check and the command write.
+        """
+
+        enabled = bool(payload.get("enabled", False))
+        cmd = {
+            "enabled": enabled,
+            "linear_x": finite_float(payload.get("linear_x", 0.0)) if enabled else 0.0,
+            "steering_y": clamp(float(payload.get("steering_y", 0.0)), MAX_STEERING_Y) if enabled else 0.0,
+            "angular_z": clamp(float(payload.get("angular_z", 0.0)), MAX_ANGULAR_Z) if enabled else 0.0,
+            "updated_at": time.monotonic(),
+            "source": "web",
+        }
+        with self._lock:
+            rejection = self._browser_rejection_locked()
+            if rejection:
+                return None, rejection
+            if enabled:
+                self._auto["enabled"] = False
+            self._command = cmd
+        return cmd, None
+
+    def direct_acquire(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._direct_owned = True
+            # Keep this set through ownership and after release. /api/start is
+            # the only browser action that clears it.
+            self._browser_start_required = True
+            self._auto["enabled"] = False
+            self._command = zero_command("direct_gamepad")
+            self._command["updated_at"] = now
+            self._auto_decision = {
+                "action": "direct_gamepad_armed",
+                "linear_x": 0.0,
+                "steering_y": 0.0,
+                "reason": "direct gamepad acquired control",
+            }
+            self._auto_state = self._new_auto_state()
+
+    def direct_update(self, linear_x: float, steering_y: float) -> bool:
+        with self._lock:
+            if not self._direct_owned:
+                return False
+            self._auto["enabled"] = False
+            self._command = {
+                "enabled": True,
+                "linear_x": finite_float(linear_x),
+                "steering_y": clamp(finite_float(steering_y), MAX_STEERING_Y),
+                "angular_z": 0.0,
+                "updated_at": time.monotonic(),
+                "source": "direct_gamepad",
+            }
+        return True
+
+    def direct_set_auto(self, enabled: bool, speed: float) -> bool:
+        with self._lock:
+            if not self._direct_owned:
+                return False
+            now = time.monotonic()
+            self._auto["enabled"] = bool(enabled)
+            self._auto["speed"] = floor_finite(speed, 0.0, AUTO_SPEED)
+            self._auto["updated_at"] = now
+            self._auto_state = self._new_auto_state()
+            self._command = zero_command("direct_gamepad_auto" if enabled else "direct_gamepad")
+            self._command["updated_at"] = now
+        if not enabled:
+            self._publish_zero_burst()
+        return True
+
+    def direct_release(self, reason: str) -> None:
+        with self._lock:
+            self._direct_owned = False
+            self._browser_start_required = True
+            self._auto["enabled"] = False
+            self._command = zero_command(reason)
+            self._command["updated_at"] = time.monotonic()
+            self._auto_decision = {
+                "action": "stopped",
+                "linear_x": 0.0,
+                "steering_y": 0.0,
+                "reason": reason,
+            }
+            self._auto_state = self._new_auto_state()
+        self._publish_zero_burst()
+
+    def direct_stop(self, reason: str = "direct_gamepad_stop") -> None:
+        # Unlike an ordinary disconnect, a physical B/Menu press is a global
+        # stop even while the direct pad is unarmed and browser control owns
+        # the car. Force the browser-start latch in both cases.
+        self.direct_release(reason)
+
     def set_auto(self, payload: dict) -> dict:
         enabled = bool(payload.get("enabled", False))
         speed = floor_finite(payload.get("speed", AUTO_SPEED), 0.0, AUTO_SPEED)
@@ -681,8 +797,41 @@ class RosmasterControl(Node):
             self._publish_zero_burst()
         return self.auto_snapshot()
 
+    def browser_set_auto(self, payload: dict) -> tuple[dict | None, str | None]:
+        enabled = bool(payload.get("enabled", False))
+        speed = floor_finite(payload.get("speed", AUTO_SPEED), 0.0, AUTO_SPEED)
+        stop_distance = clamp_range(float(payload.get("stop_distance", AUTO_STOP_DISTANCE)), 0.20, 1.50)
+        avoid_distance = clamp_range(float(payload.get("avoid_distance", AUTO_AVOID_DISTANCE)), stop_distance + 0.10, 2.50)
+        clear_distance = clamp_range(
+            float(payload.get("clear_distance", AUTO_CLEAR_DISTANCE)),
+            avoid_distance + 0.10,
+            3.50,
+        )
+        with self._lock:
+            rejection = self._browser_rejection_locked()
+            if rejection:
+                return None, rejection
+            self._auto = {
+                "enabled": enabled,
+                "speed": speed,
+                "stop_distance": stop_distance,
+                "avoid_distance": avoid_distance,
+                "clear_distance": clear_distance,
+                "updated_at": time.monotonic(),
+            }
+            self._auto_state = self._new_auto_state()
+            if enabled:
+                self._command = zero_command("auto")
+                self._command["updated_at"] = time.monotonic()
+        if not enabled:
+            self._publish_zero_burst()
+        return self.auto_snapshot(), None
+
     def stop(self) -> None:
         with self._lock:
+            if self._direct_owned:
+                self._browser_start_required = True
+            self._direct_owned = False
             self._auto["enabled"] = False
             self._command = zero_command("stop")
             self._command["updated_at"] = time.monotonic()
@@ -705,6 +854,7 @@ class RosmasterControl(Node):
             "source": "start",
         }
         with self._lock:
+            self._browser_start_required = False
             self._auto["enabled"] = False
             self._command = command
             self._auto_decision = {
@@ -715,6 +865,30 @@ class RosmasterControl(Node):
             }
             self._auto_state = self._new_auto_state()
         return command
+
+    def browser_start(self) -> tuple[dict | None, str | None]:
+        command = {
+            "enabled": True,
+            "linear_x": 0.0,
+            "steering_y": 0.0,
+            "angular_z": 0.0,
+            "updated_at": time.monotonic(),
+            "source": "start",
+        }
+        with self._lock:
+            if self._direct_owned:
+                return None, "direct_gamepad_active"
+            self._browser_start_required = False
+            self._auto["enabled"] = False
+            self._command = command
+            self._auto_decision = {
+                "action": "manual_armed",
+                "linear_x": 0.0,
+                "steering_y": 0.0,
+                "reason": "start requested",
+            }
+            self._auto_state = self._new_auto_state()
+        return command, None
 
     def _cached_publisher_count(self, topic: str) -> int:
         """A request thread's only way to ask about the ROS graph.
@@ -808,6 +982,17 @@ class RosmasterControl(Node):
         with self._lock:
             command = dict(self._command)
             last_published = dict(self._last_published)
+            direct_owned = self._direct_owned
+            browser_start_required = self._browser_start_required
+            auto_enabled = bool(self._auto["enabled"])
+            if direct_owned:
+                active_source = "direct_gamepad_auto" if auto_enabled else "direct_gamepad"
+            elif auto_enabled:
+                active_source = "browser_auto"
+            elif command["enabled"]:
+                active_source = "browser"
+            else:
+                active_source = "none"
         stale_s = time.monotonic() - command["updated_at"] if command["updated_at"] else None
         return {
             "command": command,
@@ -815,6 +1000,9 @@ class RosmasterControl(Node):
             "publish_count": self._publish_count,
             "last_publish_age_s": round(time.monotonic() - self._last_publish_at, 3) if self._last_publish_at else None,
             "stale_s": round(stale_s, 3) if stale_s is not None else None,
+            "active_source": active_source,
+            "direct_gamepad_owned": direct_owned,
+            "browser_start_required": browser_start_required,
             "cmd_vel_subscribers": self._cached_cmd_vel_subscribers(),
             "limits": {
                 "max_linear_x": MAX_LINEAR_X,
@@ -1636,9 +1824,10 @@ class RosmasterControl(Node):
     def _publish(self) -> None:
         with self._lock:
             auto_enabled = bool(self._auto["enabled"])
+            direct_owned = self._direct_owned
             command = dict(self._command)
         if auto_enabled:
-            msg, published = self._auto_command()
+            msg, published = self._auto_command(direct_owned=direct_owned)
         elif not command["enabled"] or time.monotonic() - command["updated_at"] > CMD_TIMEOUT_S:
             msg = Twist()
             published = zero_command("watchdog")
@@ -1654,7 +1843,7 @@ class RosmasterControl(Node):
         with self._lock:
             self._last_published = published
 
-    def _auto_command(self) -> tuple[Twist, dict]:
+    def _auto_command(self, direct_owned: bool = False) -> tuple[Twist, dict]:
         source = self._planner_depth_source()
         with self._lock:
             scan = dict(self._scan)
@@ -1668,7 +1857,7 @@ class RosmasterControl(Node):
             "steering_y": round(msg.linear.y, 4),
             "angular_z": 0.0,
             "updated_at": time.monotonic(),
-            "source": "auto",
+            "source": "direct_gamepad_auto" if direct_owned else "auto",
         }
         decision["linear_x"] = published["linear_x"]
         decision["steering_y"] = published["steering_y"]
@@ -2480,6 +2669,12 @@ class RosmasterControl(Node):
 
 rclpy.init()
 control = RosmasterControl()
+direct_gamepad = DirectGamepadWorker(
+    control,
+    max_steering_y=MAX_STEERING_Y,
+    auto_speed=AUTO_SPEED,
+    log=log_line,
+)
 gamepad_lock = threading.Lock()
 gamepad_state = {
     "ok": False,
@@ -2721,6 +2916,7 @@ class Handler(BaseHTTPRequestHandler):
                     "auto": control.auto_snapshot(),
                     "navigation": control.navigation_snapshot(),
                     "gamepad": gamepad_snapshot(),
+                    "direct_gamepad": direct_gamepad.snapshot(),
                     "commands": command_freshness.snapshot(),
                 }
             )
@@ -2755,11 +2951,39 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/drive":
+            rejection = getattr(control, "browser_rejection", lambda: None)()
+            if rejection:
+                snapshot = control.snapshot()
+                self._send_json({
+                    "ok": True,
+                    "command": snapshot.get("command", {}),
+                    "rejected": True,
+                    "reason": rejection,
+                    "control": snapshot,
+                    "auto": control.auto_snapshot(),
+                })
+                return
             verdict = command_freshness.check(payload)
             # A command we cannot trust is applied as a zero rather than
             # discarded. Discarding it would leave whatever the car was already
             # doing in place, which is the wrong way to resolve the doubt.
-            cmd = control.update(payload if verdict["fresh"] else {"enabled": False})
+            command_payload = payload if verdict["fresh"] else {"enabled": False}
+            browser_update = getattr(control, "browser_update", None)
+            if browser_update is None:
+                cmd, late_rejection = control.update(command_payload), None
+            else:
+                cmd, late_rejection = browser_update(command_payload)
+            if late_rejection:
+                snapshot = control.snapshot()
+                self._send_json({
+                    "ok": True,
+                    "command": snapshot.get("command", {}),
+                    "rejected": True,
+                    "reason": late_rejection,
+                    "control": snapshot,
+                    "auto": control.auto_snapshot(),
+                })
+                return
             self._send_json({
                 "ok": True,
                 "command": cmd,
@@ -2769,13 +2993,59 @@ class Handler(BaseHTTPRequestHandler):
                 "auto": control.auto_snapshot(),
             })
         elif parsed.path == "/api/auto":
-            auto = control.set_auto(payload)
+            rejection = getattr(control, "browser_rejection", lambda: None)()
+            if rejection:
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": rejection,
+                    "auto": control.auto_snapshot(),
+                    "control": control.snapshot(),
+                })
+                return
+            browser_set_auto = getattr(control, "browser_set_auto", None)
+            if browser_set_auto is None:
+                auto, late_rejection = control.set_auto(payload), None
+            else:
+                auto, late_rejection = browser_set_auto(payload)
+            if late_rejection:
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": late_rejection,
+                    "auto": control.auto_snapshot(),
+                    "control": control.snapshot(),
+                })
+                return
             self._send_json({"ok": True, "auto": auto, "control": control.snapshot()})
         elif parsed.path == "/api/stop":
-            control.stop()
+            direct_gamepad.apply_external_stop(control.stop, "browser_stop")
             self._send_json({"ok": True, "control": control.snapshot(), "auto": control.auto_snapshot()})
         elif parsed.path == "/api/start":
-            command = control.start()
+            rejection = getattr(control, "browser_rejection", lambda: None)()
+            if rejection == "direct_gamepad_active":
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": rejection,
+                    "control": control.snapshot(),
+                    "auto": control.auto_snapshot(),
+                })
+                return
+            browser_start = getattr(control, "browser_start", None)
+            if browser_start is None:
+                command, late_rejection = control.start(), None
+            else:
+                command, late_rejection = browser_start()
+            if late_rejection:
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": late_rejection,
+                    "control": control.snapshot(),
+                    "auto": control.auto_snapshot(),
+                })
+                return
             self._send_json({"ok": True, "command": command, "control": control.snapshot(), "auto": control.auto_snapshot()})
         elif parsed.path == "/api/gamepad":
             self._send_json({"ok": True, "gamepad": update_gamepad_state(payload)})
@@ -2992,6 +3262,7 @@ def serve_https() -> None:
 
 
 def main() -> int:
+    direct_gamepad.start()
     threading.Thread(target=spin_ros, daemon=True).start()
     threading.Thread(target=serve_https, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
@@ -2999,6 +3270,7 @@ def main() -> int:
     try:
         server.serve_forever()
     finally:
+        direct_gamepad.shutdown()
         control.stop()
         control.destroy_node()
         rclpy.shutdown()

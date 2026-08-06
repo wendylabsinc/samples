@@ -104,6 +104,14 @@ class ServerTestCase(unittest.TestCase):
         server.control._realsense = server.control._empty_realsense()
         server.control._viewers.clear()
         server.control._frame_polls.clear()
+        # Direct-control release intentionally leaves this latch set until a
+        # browser START. Tests share the singleton, so reset both arbitration
+        # fields explicitly rather than letting one safety test poison the
+        # unrelated endpoint test that follows it alphabetically.
+        with server.control._lock:
+            server.control._direct_owned = False
+            server.control._browser_start_required = False
+        server.direct_gamepad.note_external_stop("test_reset")
 
     def _connection(self):
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -218,6 +226,110 @@ class DriveEndpointTests(ServerTestCase):
         status, body = self._post_json("/api/drive", {"enabled": False})
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
+
+
+class DirectGamepadArbitrationTests(ServerTestCase):
+    def test_connected_but_unarmed_does_not_block_browser_control(self):
+        # Connection state belongs to the worker; only direct_acquire changes
+        # the control arbiter. With no acquisition, the ordinary browser path
+        # remains live.
+        self.assertIsNone(server.control.browser_rejection())
+        status, body = self._post_json(
+            "/api/drive",
+            {"enabled": True, "linear_x": 0.4, "steering_y": 0.0},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(body["rejected"])
+        self.assertEqual(server.control.snapshot()["active_source"], "browser")
+
+    def test_direct_owner_rejects_browser_drive_start_and_auto_with_http_200(self):
+        server.control.direct_acquire()
+        server.control.direct_update(1.0, 0.04)
+
+        requests = [
+            ("/api/drive", {"enabled": True, "linear_x": -1.0}),
+            ("/api/start", {}),
+            ("/api/auto", {"enabled": True}),
+        ]
+        for path, payload in requests:
+            with self.subTest(path=path):
+                status, body = self._post_json(path, payload)
+                self.assertEqual(status, 200)
+                self.assertTrue(body["rejected"])
+                self.assertEqual(body["reason"], "direct_gamepad_active")
+
+        command = server.control.snapshot()["command"]
+        self.assertEqual(command["source"], "direct_gamepad")
+        self.assertEqual(command["linear_x"], 1.0)
+
+    def test_direct_acquisition_between_handler_check_and_write_still_wins(self):
+        def acquire_after_early_check():
+            server.control.direct_acquire()
+            return None
+
+        with mock.patch.object(
+            server.control,
+            "browser_rejection",
+            side_effect=acquire_after_early_check,
+        ):
+            status, body = self._post_json(
+                "/api/drive",
+                {"enabled": True, "linear_x": 0.9, "steering_y": 0.0},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(body["rejected"])
+        self.assertEqual(body["reason"], "direct_gamepad_active")
+        self.assertEqual(server.control.snapshot()["command"]["source"], "direct_gamepad")
+        self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.0)
+
+    def test_browser_stop_overrides_direct_owner_and_releases_it(self):
+        server.control.direct_acquire()
+        server.control.direct_update(1.2, 0.06)
+        status, body = self._post_json("/api/stop", {})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["control"]["direct_gamepad_owned"])
+        self.assertEqual(body["control"]["command"]["linear_x"], 0.0)
+        self.assertEqual(body["control"]["active_source"], "none")
+        self.assertTrue(body["control"]["browser_start_required"])
+
+    def test_release_latches_browser_motion_until_explicit_start(self):
+        server.control.direct_acquire()
+        server.control.direct_update(0.8, 0.02)
+        server.control.direct_release("device_removed")
+
+        status, body = self._post_json("/api/drive", {"enabled": True, "linear_x": 0.9})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["rejected"])
+        self.assertEqual(body["reason"], "browser_start_required")
+        self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.0)
+
+        status, body = self._post_json("/api/auto", {"enabled": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["rejected"])
+        self.assertEqual(body["reason"], "browser_start_required")
+
+        status, body = self._post_json("/api/start", {})
+        self.assertEqual(status, 200)
+        self.assertNotIn("rejected", body)
+        self.assertFalse(body["control"]["browser_start_required"])
+
+        status, body = self._post_json("/api/drive", {"enabled": True, "linear_x": 0.3})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["rejected"])
+        self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.3)
+
+    def test_controller_stop_overrides_browser_even_before_direct_arm(self):
+        server.control.update({"enabled": True, "linear_x": 0.7})
+        server.control.direct_stop("direct_gamepad_stop")
+        snapshot = server.control.snapshot()
+        self.assertEqual(snapshot["command"]["linear_x"], 0.0)
+        self.assertTrue(snapshot["browser_start_required"])
+
+    def test_direct_auto_reports_the_actual_command_source(self):
+        server.control.direct_acquire()
+        server.control.direct_set_auto(True, 1.0)
+        self.assertEqual(server.control.snapshot()["active_source"], "direct_gamepad_auto")
 
 
 class StopEndpointTests(ServerTestCase):
@@ -397,12 +509,19 @@ class StatusEndpointTests(ServerTestCase):
             "auto",
             "navigation",
             "gamepad",
+            "direct_gamepad",
             "commands",
         ):
             self.assertIn(key, payload)
         self.assertEqual(payload["control"]["limits"]["max_steering_y"], server.MAX_STEERING_Y)
         self.assertEqual(payload["control"]["limits"]["max_angular_z"], server.MAX_ANGULAR_Z)
         self.assertEqual(payload["control"]["limits"]["max_linear_x"], server.MAX_LINEAR_X)
+        self.assertIn("active_source", payload["control"])
+        self.assertIn("worker_ok", payload["direct_gamepad"])
+        self.assertIn("stable_id", payload["direct_gamepad"])
+        self.assertIn("last_event_age_s", payload["direct_gamepad"])
+        # The browser telemetry contract stays separate and unchanged.
+        self.assertIn("ok", payload["gamepad"])
 
     def test_status_reports_the_command_enabled_flag_the_stop_confirmation_reads(self):
         """control.command.enabled is load bearing for the browser.

@@ -188,6 +188,45 @@ test("BUG M6: outside Auto Nav the Command readout still shows this page's own c
   assert.equal(page.el("commandValue").textContent, "0.40 / 0.00");
 });
 
+test("WIRING: the dashboard shows a direct controller and its active command source", async () => {
+  const page = await freshPage();
+  page.fake.status.direct_gamepad = {
+    worker_ok: true,
+    connected: true,
+    compatible: true,
+    owned: true,
+    stable_id: "usb-xbox-event-joystick",
+    name: "Xbox Wireless Controller",
+    reason: "direct_gamepad_active",
+  };
+  page.fake.status.control.active_source = "direct_gamepad";
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.equal(page.el("directGamepadValue").textContent, "Active Xbox Wireless Controller");
+  assert.equal(page.el("sourceValue").textContent, "direct gamepad");
+});
+
+test("WIRING: ambiguous direct controllers are shown as fail-closed, not ready", async () => {
+  const page = await freshPage();
+  page.fake.status.direct_gamepad = {
+    worker_ok: true,
+    connected: false,
+    compatible: true,
+    compatible_devices: 2,
+    owned: false,
+    stable_id: "",
+    name: "",
+    reason: "multiple_compatible_gamepads",
+  };
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.equal(page.el("directGamepadValue").textContent, "multiple compatible gamepads");
+});
+
 // Part 2: the wiring the mutation run walked through =========================
 
 test("WIRING: a hardStop frame never lets the held throttle reach the motors", async () => {

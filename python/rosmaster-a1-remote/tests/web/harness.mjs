@@ -117,6 +117,7 @@ function defaultStatus() {
     control: {
       command: { enabled: false, linear_x: 0, steering_y: 0, angular_z: 0 },
       last_published: { linear_x: 0, steering_y: 0, angular_z: 0 },
+      active_source: "none",
       cmd_vel_subscribers: 1,
       limits: { max_linear_x: 0.65, max_steering_y: 0.12, max_angular_z: 1.0, cmd_timeout_s: 0.5 },
     },
@@ -129,6 +130,15 @@ function defaultStatus() {
     // reports the same shape with a different name in it.
     navigation: { ready: true, depth_source: "hp60c", depth_ok: true },
     gamepad: { ok: false },
+    direct_gamepad: {
+      worker_ok: true,
+      connected: false,
+      compatible: false,
+      owned: false,
+      stable_id: "",
+      name: "",
+      reason: "waiting_for_compatible_gamepad",
+    },
     commands: { max_age_ms: 400, rejected: { stale: 0, out_of_order: 0, total: 0 } },
   };
 }

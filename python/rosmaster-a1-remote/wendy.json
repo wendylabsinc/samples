@@ -12,7 +12,6 @@
         { "type": "serial", "device": "ttyUSB1" },
         { "type": "serial", "device": "ttyUSB2" },
         { "type": "camera" },
-        { "type": "input" },
         { "type": "audio" }
       ],
       "frameworks": {
@@ -45,7 +44,8 @@
     "web": {
       "context": "rosmaster-a1-web-remote-wendy",
       "entitlements": [
-        { "type": "network", "mode": "host" }
+        { "type": "network", "mode": "host" },
+        { "type": "input" }
       ],
       "readiness": {
         "tcpSocket": { "port": 8091 },

@@ -129,6 +129,8 @@ const els = {
   autoReadyValue: document.getElementById("autoReadyValue"),
   autoValue: document.getElementById("autoValue"),
   gamepadValue: document.getElementById("gamepadValue"),
+  directGamepadValue: document.getElementById("directGamepadValue"),
+  sourceValue: document.getElementById("sourceValue"),
   lidarStats: document.getElementById("lidarStats"),
   lidarCanvas: document.getElementById("lidarCanvas"),
   frontValue: document.getElementById("frontValue"),
@@ -1306,6 +1308,7 @@ async function refreshStatus() {
     const lidar = status.lidar || {};
     const auto = status.auto || {};
     const navigation = status.navigation || {};
+    const directGamepad = status.direct_gamepad || {};
     const sectors = lidar.sectors || {};
     state.limits.maxLinearX = limits.max_linear_x || state.limits.maxLinearX;
     state.limits.maxSteeringY = limits.max_steering_y || state.limits.maxSteeringY;
@@ -1342,6 +1345,14 @@ async function refreshStatus() {
     els.autoReadyValue.textContent = navigation.ready ? "Ready" : navigation.reason || "Not ready";
     els.driverValue.textContent = `${control.cmd_vel_subscribers || 0} subs`;
     els.watchdogValue.textContent = `${(limits.cmd_timeout_s || 0.5).toFixed(2)} s`;
+    if (directGamepad.owned) {
+      els.directGamepadValue.textContent = `Active ${directGamepad.name || directGamepad.stable_id || directGamepad.id || "pad"}`;
+    } else if (directGamepad.connected && directGamepad.compatible && directGamepad.reason === "connected_unarmed") {
+      els.directGamepadValue.textContent = `Ready ${directGamepad.name || directGamepad.stable_id || directGamepad.id || "pad"}`;
+    } else {
+      els.directGamepadValue.textContent = String(directGamepad.reason || "waiting").replaceAll("_", " ");
+    }
+    els.sourceValue.textContent = String(control.active_source || "none").replaceAll("_", " ");
     els.lidarStats.textContent = lidar.ok ? `${lidar.finite_ranges || 0} pts` : "waiting";
     els.frontValue.textContent = meters(sectors.front && sectors.front.near_m);
     els.leftValue.textContent = meters(sectors.left && sectors.left.near_m);
