@@ -1,0 +1,10 @@
+{
+    "appId": "sh.wendy.examples.pipewire-audio",
+    "version": "1.0.0",
+    "language": "python",
+    "entitlements": [
+        {
+            "type": "audio"
+        }
+    ]
+}
