@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import os
 import queue
 import sys
 import threading
@@ -37,6 +38,19 @@ APP_DIR = REPO_ROOT / "rosmaster-a1-web-remote-wendy" / "app"
 for _path in (str(STUBS_DIR), str(APP_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
+
+# server.py's background graph-count sampler thread ticks on a real timer
+# (GRAPH_COUNT_SAMPLE_INTERVAL_S), independent of anything a test does. Left
+# at its production default, a tick landing inside a test's
+# mock.patch.object(control, "count_publishers"/"count_subscribers", ...)
+# window would sample the mocked value into the shared cache behind the
+# test's back -- a real, if rare, source of flakiness, since every test
+# shares the one control singleton and its one cache. Tests prime the cache
+# explicitly via _sample_graph_counts()/_sample_graph_counts_tick() wherever
+# they need a particular value in it, so the background sampler only needs
+# to not interfere; set before import server so the one instance the module
+# constructs at import time is built with it.
+os.environ.setdefault("GRAPH_COUNT_SAMPLE_INTERVAL_S", "3600")
 
 import server  # noqa: E402  (import must follow the sys.path setup above)
 
@@ -710,6 +724,41 @@ class GraphCountCacheTests(ServerTestCase):
                         f"{'auto' if auto_enabled else 'manual'} mode ({elapsed:.2f}s and counting)",
                     )
         server.control._auto["enabled"] = False
+
+    def test_a_raising_graph_query_does_not_kill_the_sampler_thread(self):
+        """Review finding: _sample_graph_counts_loop was a bare `while True`
+        around the graph query with no exception guard. One RuntimeError out
+        of count_publishers -- exactly the shape a wedged rmw layer can raise
+        instead of just hanging -- would have killed this daemon thread
+        permanently: the cache freezes at its last values forever, and the
+        only signal is an unmonitored traceback via threading.excepthook.
+        Drives the tick method directly, rather than racing the real
+        thread's sleep interval, so this is deterministic.
+        """
+        control = server.control
+        control._graph_sample_failures = 0
+        logged = []
+        with mock.patch.object(server, "log_line", side_effect=logged.append):
+            with mock.patch.object(control, "count_publishers", side_effect=RuntimeError("rmw wedged")):
+                control._sample_graph_counts_tick()  # must not raise/propagate
+            self.assertEqual(control._graph_sample_failures, 1)
+            self.assertTrue(
+                any(line.startswith("GRAPH_COUNT_SAMPLE_FAILED") for line in logged),
+                "a failing sampler tick must say so once, not stay silent",
+            )
+
+            # The graph recovers on the next tick (count_publishers is no
+            # longer mocked here); the cache must follow it, and the thread
+            # -- proven alive by having a next tick at all -- must not have
+            # been silently killed by the exception above.
+            logged.clear()
+            control._sample_graph_counts_tick()
+        self.assertEqual(control._graph_sample_failures, 0)
+        self.assertTrue(
+            any(line.startswith("GRAPH_COUNT_SAMPLE_RECOVERED") for line in logged),
+            "recovering from a failed tick must say so",
+        )
+        self.assertEqual(control._cached_publisher_count(server.HP60C_DEPTH_TOPIC), 0)
 
 
 class MjpegStreamTests(ServerTestCase):

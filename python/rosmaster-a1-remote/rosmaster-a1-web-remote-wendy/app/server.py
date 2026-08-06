@@ -583,6 +583,12 @@ class RosmasterControl(Node):
         )
         self._graph_publishers: dict[str, int] = {topic: 0 for topic in self._graph_publisher_topics}
         self._graph_cmd_vel_subscribers = 0
+        # Consecutive failed ticks in _sample_graph_counts_tick, so the loop
+        # can log once when it starts failing and once when it recovers
+        # rather than once per tick -- the same throttling instinct
+        # CommandFreshness's DRIVE_REJECTED log applies to a bad link's
+        # rejection bursts, applied here to a bad rmw layer's failure bursts.
+        self._graph_sample_failures = 0
         self._command = zero_command()
         self._last_published = zero_command()
         self._publish_count = 0
@@ -727,6 +733,37 @@ class RosmasterControl(Node):
             self._graph_publishers = publishers
             self._graph_cmd_vel_subscribers = cmd_vel_subscribers
 
+    def _sample_graph_counts_tick(self) -> None:
+        """One sampler tick: query, store, and survive whatever the graph does.
+
+        Split out from _sample_graph_counts_loop so a test can drive exactly
+        one tick deterministically -- including one that raises -- without
+        racing the real thread or its sleep interval.
+
+        A raising count_publishers/count_subscribers is the same rmw failure
+        this whole file is being hardened against, just surfacing as an
+        exception instead of a hang. An uncaught one here would kill this
+        daemon thread silently (a bare exception in a thread target is only
+        ever reported to threading.excepthook, which nothing here monitors),
+        freezing the cache at its last values forever with no visible sign
+        anything had gone wrong. Caught instead, so the thread keeps ticking
+        and the cache recovers on its own the moment the graph does. Logged
+        once when it starts failing and once when it recovers with a count in
+        between, not once per tick, so a stuck rmw layer does not bury the
+        log the way DRIVE_REJECTED's throttling exists to prevent for a bad
+        link's rejection bursts.
+        """
+        try:
+            self._sample_graph_counts()
+        except Exception as exc:  # noqa: BLE001 - this thread must never die
+            self._graph_sample_failures += 1
+            if self._graph_sample_failures == 1:
+                log_line(f"GRAPH_COUNT_SAMPLE_FAILED {type(exc).__name__}: {exc}")
+        else:
+            if self._graph_sample_failures:
+                log_line(f"GRAPH_COUNT_SAMPLE_RECOVERED after {self._graph_sample_failures} failed tick(s)")
+            self._graph_sample_failures = 0
+
     def _sample_graph_counts_loop(self) -> None:
         """Refresh the graph-count cache on its own thread, forever.
 
@@ -739,12 +776,14 @@ class RosmasterControl(Node):
         operator. count_publishers/count_subscribers are exactly the
         unbounded rmw calls this whole file is being hardened against, so
         calling them from the executor would have reproduced that failure
-        from a new cause. A dedicated daemon thread means a stalled graph
-        query only leaves the cache stale -- it can no longer touch the
-        publish tick, a sensor callback, or a handler thread.
+        from a new cause. A dedicated daemon thread means a stalled or
+        raising graph query only leaves the cache stale -- it can no longer
+        touch the publish tick, a sensor callback, or a handler thread, and
+        (see _sample_graph_counts_tick) it can no longer take this thread
+        down either.
         """
         while True:
-            self._sample_graph_counts()
+            self._sample_graph_counts_tick()
             time.sleep(GRAPH_COUNT_SAMPLE_INTERVAL_S)
 
     def snapshot(self) -> dict:
