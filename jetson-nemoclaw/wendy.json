@@ -1,0 +1,14 @@
+{
+  "appId": "sh.wendy.samples.nemoclaw",
+  "version": "0.1.0",
+  "platform": "linux",
+  "entitlements": [
+    { "type": "build" },
+    { "type": "admin" },
+    { "type": "gpu" },
+    { "type": "network", "mode": "host" },
+    { "type": "persist", "name": "nemoclaw-home", "path": "/root" },
+    { "type": "persist", "name": "nemoclaw-docker", "path": "/var/lib/docker" },
+    { "type": "persist", "name": "nemoclaw-workspace", "path": "/workspace" }
+  ]
+}
