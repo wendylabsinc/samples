@@ -208,6 +208,47 @@ test("WIRING: the dashboard shows a direct controller and its active command sou
   assert.equal(page.el("sourceValue").textContent, "direct gamepad");
 });
 
+test("WIRING: an owned direct controller feeds the diagnostics panels from its live block", async () => {
+  const page = await freshPage();
+  page.fake.status.direct_gamepad = {
+    worker_ok: true,
+    connected: true,
+    compatible: true,
+    owned: true,
+    stable_id: "28:ea:0b:ef:b6:51",
+    name: "Xbox Wireless Controller",
+    reason: "direct_gamepad_active",
+    live: {
+      steer: -0.25,
+      forward: 1,
+      reverse: 0,
+      pressed: ["a", "rb"],
+      linear_x: 1.5,
+      steering_y: -0.084,
+      command_age_s: 0.04,
+    },
+  };
+  page.fake.status.control.active_source = "direct_gamepad";
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.match(page.el("padAxes").textContent, /forward 1\.00/);
+  assert.equal(page.el("padButtons").textContent, "a rb");
+  assert.match(page.el("padDrive").textContent, /linear_x 1\.50/);
+  assert.match(page.el("padResponse").textContent, /ago/);
+});
+
+test("WIRING: without direct live data the diagnostics panels keep their browser texts", async () => {
+  const page = await freshPage();
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.equal(page.el("padAxes").textContent, "none");
+  assert.equal(page.el("padDrive").textContent, "none sent yet");
+  assert.equal(page.el("padResponse").textContent, "never");
+});
+
 test("WIRING: ambiguous direct controllers are shown as fail-closed, not ready", async () => {
   const page = await freshPage();
   page.fake.status.direct_gamepad = {

@@ -33,6 +33,7 @@ const state = {
   padSelectionLevel: "warn",
   padAxesText: "none",
   padButtonsText: "none",
+  directPanel: null,
   padSourceText: "none",
   // The WebHID fallback's whole state. It is a fallback and not a replacement:
   // nothing here is consulted while navigator.getGamepads lists a pad, and the
@@ -923,13 +924,14 @@ function renderControllerPanel() {
   renderHidPanel();
 
   els.padSource.textContent = state.padSourceText;
-  els.padAxes.textContent = state.padAxesText;
-  els.padButtons.textContent = state.padButtonsText;
+  const direct = state.directPanel;
+  els.padAxes.textContent = direct ? direct.axesText : state.padAxesText;
+  els.padButtons.textContent = direct ? direct.buttonsText : state.padButtonsText;
   els.padLog.textContent = state.gamepadLog.length
     ? state.gamepadLog.map(gamepadLogLine).join("\n")
     : "No controller actions yet.";
-  els.padDrive.textContent = drivePayloadText(state.lastDrivePayload);
-  els.padResponse.textContent = agoText(state.lastDriveOkAt, Date.now());
+  els.padDrive.textContent = direct ? direct.driveText : drivePayloadText(state.lastDrivePayload);
+  els.padResponse.textContent = direct ? direct.responseText : agoText(state.lastDriveOkAt, Date.now());
 }
 
 // The WebHID fallback =======================================================
@@ -1345,6 +1347,8 @@ async function refreshStatus() {
     els.autoReadyValue.textContent = navigation.ready ? "Ready" : navigation.reason || "Not ready";
     els.driverValue.textContent = `${control.cmd_vel_subscribers || 0} subs`;
     els.watchdogValue.textContent = `${(limits.cmd_timeout_s || 0.5).toFixed(2)} s`;
+    state.directPanel = directPanelModel(directGamepad, state.padLines.length);
+    renderControllerPanel();
     if (directGamepad.owned) {
       els.directGamepadValue.textContent = `Active ${directGamepad.name || directGamepad.stable_id || directGamepad.id || "pad"}`;
     } else if (directGamepad.connected && directGamepad.compatible && directGamepad.reason === "connected_unarmed") {

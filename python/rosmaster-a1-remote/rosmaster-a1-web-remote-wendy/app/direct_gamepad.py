@@ -51,6 +51,26 @@ class Codes:
     BTN_DPAD_RIGHT = 0x223
 
 
+# Operator-facing labels for the diagnostics panel. BTN_NORTH is the physical
+# X button and BTN_WEST the physical Y on both transports this module has been
+# captured against (wired xpad and fw-5.23 hid-microsoft over Bluetooth).
+BUTTON_NAMES = {
+    Codes.BTN_SOUTH: "a",
+    Codes.BTN_EAST: "b",
+    Codes.BTN_NORTH: "x",
+    Codes.BTN_WEST: "y",
+    Codes.BTN_TL: "lb",
+    Codes.BTN_TR: "rb",
+    Codes.BTN_TL2: "lt",
+    Codes.BTN_TR2: "rt",
+    Codes.BTN_SELECT: "view",
+    Codes.BTN_START: "menu",
+    Codes.BTN_DPAD_UP: "dpad_up",
+    Codes.BTN_DPAD_DOWN: "dpad_down",
+    Codes.BTN_DPAD_LEFT: "dpad_left",
+    Codes.BTN_DPAD_RIGHT: "dpad_right",
+}
+
 DIRECT_SPEED_DEFAULT = 1.50
 DIRECT_SPEED_STEP = 0.05
 DIRECT_SPEED_MIN = 0.0
@@ -255,6 +275,7 @@ class DirectGamepadWorker:
         self._candidate: Candidate | None = None
         self._pressed: set[int] = set()
         self._motion_codes: frozenset[int] = frozenset({Codes.ABS_X})
+        self._last_command: tuple[float, float, float] | None = None
         self._axis_values: dict[int, float] = {}
         self._hat_values = {Codes.ABS_HAT0X: 0, Codes.ABS_HAT0Y: 0}
         self._motion_dirty = False
@@ -333,7 +354,29 @@ class DirectGamepadWorker:
                 }
             )
             last_event_at = float(snapshot.pop("last_event_at", 0.0))
+            live = None
+            command_at = 0.0
+            candidate = self._candidate
+            if candidate is not None:
+                inputs = self._drive_inputs_locked(candidate)
+                if inputs is not None:
+                    steer, forward, reverse = inputs
+                    command = self._last_command
+                    command_at = command[2] if command else 0.0
+                    live = {
+                        "steer": round(steer, 3),
+                        "forward": round(forward, 3),
+                        "reverse": round(reverse, 3),
+                        "pressed": sorted(
+                            BUTTON_NAMES[code] for code in self._pressed if code in BUTTON_NAMES
+                        ),
+                        "linear_x": round(command[0], 3) if command else None,
+                        "steering_y": round(command[1], 3) if command else None,
+                    }
         snapshot["last_event_age_s"] = round(self._clock() - last_event_at, 3) if last_event_at else None
+        if live is not None:
+            live["command_age_s"] = round(self._clock() - command_at, 3) if command_at else None
+        snapshot["live"] = live
         return snapshot
 
     def note_external_stop(self, reason: str = "browser_stop") -> None:
@@ -542,6 +585,7 @@ class DirectGamepadWorker:
             self._selection_allowed = True
             self._motion_dirty = False
             self._motion_codes = frozenset({Codes.ABS_X}) | set(trigger_axis_codes(candidate.axes) or ())
+            self._last_command = None
             self._status.update(
                 {
                     "connected": True,
@@ -689,34 +733,45 @@ class DirectGamepadWorker:
         if apply:
             self._apply_drive()
 
+    def _drive_inputs_locked(self, candidate: Candidate) -> tuple[float, float, float] | None:
+        """(steer, forward, reverse) from current axis/button state; lock held."""
+        steer_axis = candidate.axes.get(Codes.ABS_X)
+        if steer_axis is None:
+            return None
+        steer = normalize_centered(self._axis_values.get(Codes.ABS_X, steer_axis.value), steer_axis)
+        triggers = trigger_axis_codes(candidate.axes)
+        if triggers is not None:
+            forward_code, reverse_code = triggers
+            reverse = normalize_trigger(
+                self._axis_values.get(reverse_code, candidate.axes[reverse_code].value),
+                candidate.axes[reverse_code],
+            )
+            forward = normalize_trigger(
+                self._axis_values.get(forward_code, candidate.axes[forward_code].value),
+                candidate.axes[forward_code],
+            )
+        else:
+            reverse = 1.0 if Codes.BTN_TL2 in self._pressed else 0.0
+            forward = 1.0 if Codes.BTN_TR2 in self._pressed else 0.0
+        return steer, forward, reverse
+
     def _apply_drive(self) -> None:
         with self._lock:
             candidate = self._candidate
             if candidate is None or not self._owned or self._auto_enabled:
                 return
-            steer_axis = candidate.axes.get(Codes.ABS_X)
-            if steer_axis is None:
+            inputs = self._drive_inputs_locked(candidate)
+            if inputs is None:
                 return
-            steer = normalize_centered(self._axis_values.get(Codes.ABS_X, steer_axis.value), steer_axis)
-            triggers = trigger_axis_codes(candidate.axes)
-            if triggers is not None:
-                forward_code, reverse_code = triggers
-                reverse = normalize_trigger(
-                    self._axis_values.get(reverse_code, candidate.axes[reverse_code].value),
-                    candidate.axes[reverse_code],
-                )
-                forward = normalize_trigger(
-                    self._axis_values.get(forward_code, candidate.axes[forward_code].value),
-                    candidate.axes[forward_code],
-                )
-            else:
-                reverse = 1.0 if Codes.BTN_TL2 in self._pressed else 0.0
-                forward = 1.0 if Codes.BTN_TR2 in self._pressed else 0.0
+            steer, forward, reverse = inputs
             linear_x = (forward - reverse) * self._speed
             steering_y = -steer * self._max_steering_y * (self._steering_percent / 100.0)
         accepted = self._controller.direct_update(linear_x, steering_y)
         if accepted is False:
             self._fail_closed("ownership_lost", disconnect=False)
+            return
+        with self._lock:
+            self._last_command = (linear_x, steering_y, self._clock())
 
     def _controller_stop(self, reason: str) -> None:
         with self._lock:

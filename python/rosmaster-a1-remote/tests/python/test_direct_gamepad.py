@@ -262,6 +262,25 @@ class BluetoothProfileTests(unittest.TestCase):
         self.sync()
         self.assertAlmostEqual(self.last_linear(), -1.5)
 
+    def test_snapshot_exposes_live_inputs_and_last_command(self):
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_GAS, 1023)
+        self.sync()
+        live = self.worker.snapshot()["live"]
+        self.assertAlmostEqual(live["forward"], 1.0)
+        self.assertAlmostEqual(live["reverse"], 0.0)
+        self.assertAlmostEqual(live["steer"], 0.0)
+        self.assertIn("a", live["pressed"])
+        self.assertAlmostEqual(live["linear_x"], 1.5)
+        self.assertAlmostEqual(live["steering_y"], 0.0)
+        self.assertEqual(live["command_age_s"], 0.0)
+
+    def test_snapshot_live_is_none_before_a_pad_is_selected(self):
+        worker = gamepad.DirectGamepadWorker(
+            FakeControl(), backend=FakeBackend(), clock=lambda: 100.0, log=lambda _: None
+        )
+        self.assertIsNone(worker.snapshot()["live"])
+
     def test_right_stick_no_longer_reads_as_a_trigger(self):
         self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
         # Stick pushed straight down moves only ABS_RZ: the pre-profile bug

@@ -13,6 +13,7 @@ const {
   computeDisconnectStep,
   computeMissingPadStep,
   controlModeText,
+  directPanelModel,
   cameraFeedState,
   feedReconnectDelayMs,
   nextExpandedFeed,
@@ -896,4 +897,59 @@ test("gamepadClamp is the one clamp both static files share", () => {
   assert.equal(gamepadClamp(5, 0, 1), 1);
   assert.equal(gamepadClamp(-5, 0, 1), 0);
   assert.equal(gamepadClamp(0.5, 0, 1), 0.5);
+});
+
+// Direct-mode diagnostics ===================================================
+//
+// When the car reads the controller itself, the browser has no pad and sends
+// no drive posts, so the diagnostics panels would sit on "none" forever.
+// directPanelModel turns the worker's live block from /api/status into the
+// panel texts, and decides when direct data should win over a browser pad.
+
+function liveBlock(overrides = {}) {
+  return {
+    steer: -0.25,
+    forward: 1,
+    reverse: 0,
+    pressed: ["a", "rb"],
+    linear_x: 1.5,
+    steering_y: -0.084,
+    command_age_s: 0.04,
+    ...overrides,
+  };
+}
+
+test("directPanelModel formats live direct-mode diagnostics", () => {
+  const model = directPanelModel({ connected: true, owned: true, live: liveBlock() }, 0);
+  assert.match(model.axesText, /steer -0\.25/);
+  assert.match(model.axesText, /forward 1\.00/);
+  assert.match(model.axesText, /reverse 0\.00/);
+  assert.equal(model.buttonsText, "a rb");
+  assert.match(model.driveText, /linear_x 1\.50/);
+  assert.match(model.driveText, /steering_y -0\.08/);
+  assert.match(model.responseText, /0\.0s ago/);
+});
+
+test("directPanelModel yields to a browser pad only while direct is unowned", () => {
+  const unowned = { connected: true, owned: false, live: liveBlock() };
+  assert.equal(directPanelModel(unowned, 1), null);
+  assert.notEqual(directPanelModel(unowned, 0), null);
+  const owned = { connected: true, owned: true, live: liveBlock() };
+  assert.notEqual(directPanelModel(owned, 1), null);
+});
+
+test("directPanelModel is null without live data or a connection", () => {
+  assert.equal(directPanelModel({ connected: true, owned: true }, 0), null);
+  assert.equal(directPanelModel({ connected: false, owned: false, live: liveBlock() }, 0), null);
+  assert.equal(directPanelModel(undefined, 0), null);
+});
+
+test("directPanelModel reports idle hands and a command not yet sent", () => {
+  const model = directPanelModel(
+    { connected: true, owned: false, live: liveBlock({ pressed: [], linear_x: null, steering_y: null, command_age_s: null }) },
+    0,
+  );
+  assert.equal(model.buttonsText, "none");
+  assert.equal(model.driveText, "none sent yet");
+  assert.equal(model.responseText, "never");
 });
