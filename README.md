@@ -175,6 +175,21 @@ npm start
 ```
 </details>
 
+## NVIDIA Jetson
+
+### `jetson-nemoclaw`
+Run NVIDIA's NemoClaw agentic AI stack on a Jetson, fully local: NVIDIA Nemotron on the
+device GPU, the Jetson Agent Skills that shipped with JetPack 7.2, and Model Context
+Protocol tools that let the agent operate the device it runs on.
+
+```bash
+cd jetson-nemoclaw
+wendy run --device <your-device>.local
+```
+
+Read [`jetson-nemoclaw/SECURITY.md`](jetson-nemoclaw/SECURITY.md) first: this sample
+requests the `admin` and `build` entitlements, which are deliberately powerful.
+
 ## Building for ARM (Jetson / Raspberry Pi)
 
 All Dockerfiles support multi-architecture builds. `wendy run` handles this automatically, but you can manually test it on your developer local machine with:
