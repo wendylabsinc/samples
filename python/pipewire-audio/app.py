@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 
 SAMPLE_RATE = 44100
@@ -103,7 +104,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tone = os.path.join(tmp, "tone.wav")
         write_tone(tone)
-        return play(tone)
+        rc = play(tone)
+
+    # Idle instead of exiting. The runtime restarts an app that exits, so
+    # returning here replays the tone every few seconds forever.
+    print("=== done — idling (stop the app to exit) ===", flush=True)
+    while True:
+        time.sleep(3600)
+
+    return rc
 
 
 if __name__ == "__main__":

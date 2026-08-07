@@ -46,3 +46,6 @@ prefix:
 
 The app needs only the `audio` entitlement. Pairing is handled by the
 Wendy CLI, so no `bluetooth` entitlement is required just to play sound.
+
+The app plays once and then idles. It does not exit: the runtime restarts
+an exited app, which would replay the tone on a loop.
