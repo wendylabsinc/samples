@@ -118,9 +118,27 @@ def analog_axes():
     }
 
 
-def candidate(device=None, *, uniq="pad-uniq", by_ids=("usb-xbox-event-joystick",), digital=False):
+def ble_axes():
+    """Axis map of an Xbox controller on hid-microsoft over Bluetooth (fw 5.23).
+
+    The trigger codes move to ABS_GAS/ABS_BRAKE while ABS_Z/ABS_RZ are reused
+    for the right stick, resting at its 0..65535 centre — the exact shape that
+    made stick-down read as a pressed trigger before the profile split.
+    """
+    return {
+        gamepad.Codes.ABS_X: absinfo(32768, 0, 65535, 4095),
+        gamepad.Codes.ABS_Z: absinfo(32768, 0, 65535, 4095),
+        gamepad.Codes.ABS_RZ: absinfo(32768, 0, 65535, 4095),
+        gamepad.Codes.ABS_GAS: absinfo(0, 0, 1023, 8),
+        gamepad.Codes.ABS_BRAKE: absinfo(0, 0, 1023, 8),
+        gamepad.Codes.ABS_HAT0X: absinfo(0, -1, 1),
+        gamepad.Codes.ABS_HAT0Y: absinfo(0, -1, 1),
+    }
+
+
+def candidate(device=None, *, uniq="pad-uniq", by_ids=("usb-xbox-event-joystick",), digital=False, ble=False):
     keys = set(STANDARD_KEYS)
-    axes = analog_axes()
+    axes = ble_axes() if ble else analog_axes()
     if digital:
         keys.update({gamepad.Codes.BTN_TL2, gamepad.Codes.BTN_TR2})
         axes.pop(gamepad.Codes.ABS_Z)
@@ -200,6 +218,57 @@ class CapabilityAndSelectionTests(unittest.TestCase):
         self.assertEqual([item.stable_id for item in found], ["hotplugged"])
         self.assertTrue(keyboard.closed)
         found[0].device.close()
+
+
+class BluetoothProfileTests(unittest.TestCase):
+    """The wired and Bluetooth transports must drive identically."""
+
+    def setUp(self):
+        self.control = FakeControl()
+        self.worker = gamepad.DirectGamepadWorker(
+            self.control,
+            backend=FakeBackend(),
+            clock=lambda: 100.0,
+            log=lambda _: None,
+        )
+        self.worker._prepare_candidate(candidate(ble=True))
+
+    def event(self, event_type, code, value):
+        self.worker.process_event(Event(event_type, code, value))
+
+    def sync(self):
+        self.event(gamepad.Codes.EV_SYN, gamepad.Codes.SYN_REPORT, 0)
+
+    def last_linear(self):
+        return [call for call in self.control.calls if call[0] == "update"][-1][1]
+
+    def test_gas_and_brake_satisfy_compatibility_without_legacy_trigger_codes(self):
+        axes = ble_axes()
+        axes.pop(gamepad.Codes.ABS_Z)
+        axes.pop(gamepad.Codes.ABS_RZ)
+        self.assertEqual(
+            gamepad.compatibility_reason(frozenset(STANDARD_KEYS), axes),
+            "compatible",
+        )
+
+    def test_gas_drives_forward_and_brake_reverse(self):
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_GAS, 1023)
+        self.sync()
+        self.assertAlmostEqual(self.last_linear(), 1.5)
+
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_GAS, 0)
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_BRAKE, 1023)
+        self.sync()
+        self.assertAlmostEqual(self.last_linear(), -1.5)
+
+    def test_right_stick_no_longer_reads_as_a_trigger(self):
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
+        # Stick pushed straight down moves only ABS_RZ: the pre-profile bug
+        # read exactly this as a squeezed RT and drove the car forward.
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_RZ, 65535)
+        self.worker._heartbeat_tick()
+        self.assertAlmostEqual(self.last_linear(), 0.0)
 
 
 class WorkerEventTests(unittest.TestCase):

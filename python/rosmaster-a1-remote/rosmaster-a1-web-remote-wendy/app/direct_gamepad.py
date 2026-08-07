@@ -30,6 +30,8 @@ class Codes:
     ABS_X = 0x00
     ABS_Z = 0x02
     ABS_RZ = 0x05
+    ABS_GAS = 0x09
+    ABS_BRAKE = 0x0A
     ABS_HAT0X = 0x10
     ABS_HAT0Y = 0x11
 
@@ -163,15 +165,29 @@ def _capability_parts(device: object) -> tuple[frozenset[int], dict[int, AxisRan
     return key_codes, axes
 
 
+def trigger_axis_codes(axes: dict[int, AxisRange]) -> tuple[int, int] | None:
+    """(forward, reverse) analog trigger codes for this device, or None.
+
+    The wired xpad driver reports the triggers as ABS_RZ/ABS_Z; Bluetooth
+    hid-microsoft moves them to ABS_GAS/ABS_BRAKE and reuses ABS_Z/ABS_RZ for
+    the right stick, so GAS/BRAKE must win whenever both pairs are advertised
+    or stick-down reads as a squeezed trigger.
+    """
+    if Codes.ABS_GAS in axes and Codes.ABS_BRAKE in axes:
+        return (Codes.ABS_GAS, Codes.ABS_BRAKE)
+    if Codes.ABS_RZ in axes and Codes.ABS_Z in axes:
+        return (Codes.ABS_RZ, Codes.ABS_Z)
+    return None
+
+
 def compatibility_reason(key_codes: frozenset[int], axes: dict[int, AxisRange]) -> str:
     required_buttons = {Codes.BTN_SOUTH, Codes.BTN_EAST, Codes.BTN_NORTH}
     if not required_buttons.issubset(key_codes):
         return "missing_standard_action_buttons"
     if Codes.ABS_X not in axes:
         return "missing_left_steering_axis"
-    analog_triggers = Codes.ABS_Z in axes and Codes.ABS_RZ in axes
     digital_triggers = Codes.BTN_TL2 in key_codes and Codes.BTN_TR2 in key_codes
-    if not analog_triggers and not digital_triggers:
+    if trigger_axis_codes(axes) is None and not digital_triggers:
         return "missing_forward_reverse_triggers"
     return "compatible"
 
@@ -238,6 +254,7 @@ class DirectGamepadWorker:
 
         self._candidate: Candidate | None = None
         self._pressed: set[int] = set()
+        self._motion_codes: frozenset[int] = frozenset({Codes.ABS_X})
         self._axis_values: dict[int, float] = {}
         self._hat_values = {Codes.ABS_HAT0X: 0, Codes.ABS_HAT0Y: 0}
         self._motion_dirty = False
@@ -524,6 +541,7 @@ class DirectGamepadWorker:
             self._auto_enabled = False
             self._selection_allowed = True
             self._motion_dirty = False
+            self._motion_codes = frozenset({Codes.ABS_X}) | set(trigger_axis_codes(candidate.axes) or ())
             self._status.update(
                 {
                     "connected": True,
@@ -574,7 +592,7 @@ class DirectGamepadWorker:
             previous_hat = self._hat_values.get(code, 0)
             if code in self._hat_values:
                 self._hat_values[code] = value
-            if code in {Codes.ABS_X, Codes.ABS_Z, Codes.ABS_RZ}:
+            if code in self._motion_codes:
                 self._motion_dirty = True
 
         if code == Codes.ABS_HAT0Y and value != previous_hat and value != 0:
@@ -680,14 +698,16 @@ class DirectGamepadWorker:
             if steer_axis is None:
                 return
             steer = normalize_centered(self._axis_values.get(Codes.ABS_X, steer_axis.value), steer_axis)
-            if Codes.ABS_Z in candidate.axes and Codes.ABS_RZ in candidate.axes:
+            triggers = trigger_axis_codes(candidate.axes)
+            if triggers is not None:
+                forward_code, reverse_code = triggers
                 reverse = normalize_trigger(
-                    self._axis_values.get(Codes.ABS_Z, candidate.axes[Codes.ABS_Z].value),
-                    candidate.axes[Codes.ABS_Z],
+                    self._axis_values.get(reverse_code, candidate.axes[reverse_code].value),
+                    candidate.axes[reverse_code],
                 )
                 forward = normalize_trigger(
-                    self._axis_values.get(Codes.ABS_RZ, candidate.axes[Codes.ABS_RZ].value),
-                    candidate.axes[Codes.ABS_RZ],
+                    self._axis_values.get(forward_code, candidate.axes[forward_code].value),
+                    candidate.axes[forward_code],
                 )
             else:
                 reverse = 1.0 if Codes.BTN_TL2 in self._pressed else 0.0
