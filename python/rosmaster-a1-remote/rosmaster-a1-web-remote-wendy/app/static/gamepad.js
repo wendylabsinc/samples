@@ -414,6 +414,11 @@ function directPanelModel(directGamepad, browserPadCount) {
         ? "none sent yet"
         : `linear_x ${live.linear_x.toFixed(2)} steering_y ${live.steering_y.toFixed(2)}`,
     responseText: live.command_age_s == null ? "never" : `accepted ${live.command_age_s.toFixed(1)}s ago`,
+    logText: (live.actions || []).length
+      ? live.actions
+          .map((entry) => `${entry.age_s.toFixed(1)}s ago  ${entry.action}${entry.detail ? `  ${entry.detail}` : ""}`)
+          .join("\n")
+      : "No controller actions yet.",
   };
 }
 

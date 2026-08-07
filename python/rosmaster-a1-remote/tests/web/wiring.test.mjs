@@ -226,6 +226,7 @@ test("WIRING: an owned direct controller feeds the diagnostics panels from its l
       linear_x: 1.5,
       steering_y: -0.084,
       command_age_s: 0.04,
+      actions: [{ action: "armed", detail: "", age_s: 3.1 }],
     },
   };
   page.fake.status.control.active_source = "direct_gamepad";
@@ -237,6 +238,7 @@ test("WIRING: an owned direct controller feeds the diagnostics panels from its l
   assert.equal(page.el("padButtons").textContent, "a rb");
   assert.match(page.el("padDrive").textContent, /linear_x 1\.50/);
   assert.match(page.el("padResponse").textContent, /ago/);
+  assert.match(page.el("padLog").textContent, /3\.1s ago\s+armed/);
 });
 
 test("WIRING: without direct live data the diagnostics panels keep their browser texts", async () => {

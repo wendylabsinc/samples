@@ -953,3 +953,28 @@ test("directPanelModel reports idle hands and a command not yet sent", () => {
   assert.equal(model.driveText, "none sent yet");
   assert.equal(model.responseText, "never");
 });
+
+test("directPanelModel renders worker actions newest first into the log", () => {
+  const model = directPanelModel(
+    {
+      connected: true,
+      owned: true,
+      live: liveBlock({
+        actions: [
+          { action: "stopped", detail: "direct_gamepad_stop", age_s: 1.2 },
+          { action: "armed", detail: "", age_s: 30.5 },
+        ],
+      }),
+    },
+    0,
+  );
+  const lines = model.logText.split("\n");
+  assert.match(lines[0], /1\.2s ago\s+stopped/);
+  assert.match(lines[0], /direct_gamepad_stop/);
+  assert.match(lines[1], /30\.5s ago\s+armed/);
+});
+
+test("directPanelModel reports an empty action log honestly", () => {
+  const model = directPanelModel({ connected: true, owned: true, live: liveBlock({ actions: [] }) }, 0);
+  assert.equal(model.logText, "No controller actions yet.");
+});

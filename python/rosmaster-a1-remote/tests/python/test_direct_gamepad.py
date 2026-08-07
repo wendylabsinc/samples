@@ -275,6 +275,22 @@ class BluetoothProfileTests(unittest.TestCase):
         self.assertAlmostEqual(live["steering_y"], 0.0)
         self.assertEqual(live["command_age_s"], 0.0)
 
+    def test_snapshot_reports_dpad_holds_as_pressed(self):
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_HAT0Y, -1)
+        self.sync()
+        self.assertIn("dpad_up", self.worker.snapshot()["live"]["pressed"])
+
+    def test_snapshot_carries_recent_actions_newest_first_with_ages(self):
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 0)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_DPAD_UP, 1)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_EAST, 1)
+        actions = self.worker.snapshot()["live"]["actions"]
+        self.assertEqual([entry["action"] for entry in actions[:3]],
+                         ["stopped", "manual_speed", "armed"])
+        self.assertEqual(actions[0]["detail"], "direct_gamepad_stop")
+        self.assertEqual(actions[0]["age_s"], 0.0)
+
     def test_snapshot_live_is_none_before_a_pad_is_selected(self):
         worker = gamepad.DirectGamepadWorker(
             FakeControl(), backend=FakeBackend(), clock=lambda: 100.0, log=lambda _: None

@@ -81,6 +81,7 @@ DIRECT_STEERING_MIN_PERCENT = 10
 DIRECT_STEERING_MAX_PERCENT = 100
 DIRECT_SCAN_INTERVAL_S = 0.5
 DIRECT_HEARTBEAT_INTERVAL_S = 0.1
+DIRECT_ACTION_LOG_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -276,6 +277,7 @@ class DirectGamepadWorker:
         self._pressed: set[int] = set()
         self._motion_codes: frozenset[int] = frozenset({Codes.ABS_X})
         self._last_command: tuple[float, float, float] | None = None
+        self._actions: list[dict] = []
         self._axis_values: dict[int, float] = {}
         self._hat_values = {Codes.ABS_HAT0X: 0, Codes.ABS_HAT0Y: 0}
         self._motion_dirty = False
@@ -363,19 +365,32 @@ class DirectGamepadWorker:
                     steer, forward, reverse = inputs
                     command = self._last_command
                     command_at = command[2] if command else 0.0
+                    pressed = {BUTTON_NAMES[code] for code in self._pressed if code in BUTTON_NAMES}
+                    # The dpad on this hardware is a hat axis, not key events,
+                    # but the operator holding it deserves the same readout.
+                    hat_x = self._hat_values.get(Codes.ABS_HAT0X, 0)
+                    hat_y = self._hat_values.get(Codes.ABS_HAT0Y, 0)
+                    if hat_y:
+                        pressed.add("dpad_up" if hat_y < 0 else "dpad_down")
+                    if hat_x:
+                        pressed.add("dpad_right" if hat_x > 0 else "dpad_left")
                     live = {
                         "steer": round(steer, 3),
                         "forward": round(forward, 3),
                         "reverse": round(reverse, 3),
-                        "pressed": sorted(
-                            BUTTON_NAMES[code] for code in self._pressed if code in BUTTON_NAMES
-                        ),
+                        "pressed": sorted(pressed),
                         "linear_x": round(command[0], 3) if command else None,
                         "steering_y": round(command[1], 3) if command else None,
+                        "actions": [dict(entry) for entry in reversed(self._actions)],
                     }
         snapshot["last_event_age_s"] = round(self._clock() - last_event_at, 3) if last_event_at else None
         if live is not None:
             live["command_age_s"] = round(self._clock() - command_at, 3) if command_at else None
+            now = self._clock()
+            live["actions"] = [
+                {"action": entry["action"], "detail": entry["detail"], "age_s": round(now - entry["at"], 3)}
+                for entry in live["actions"]
+            ]
         snapshot["live"] = live
         return snapshot
 
@@ -674,6 +689,11 @@ class DirectGamepadWorker:
         # BTN_WEST (X) and BTN_SELECT (View) intentionally do nothing on the
         # direct path. Their browser-only camera actions have no meaning here.
 
+    def _note_action(self, action: str, detail: str = "") -> None:
+        """Append to the operator-facing action log; caller holds the lock."""
+        self._actions.append({"action": action, "detail": detail, "at": self._clock()})
+        del self._actions[:-DIRECT_ACTION_LOG_LIMIT]
+
     def _arm(self) -> None:
         with self._lock:
             if not self._status["connected"] or not self._selection_allowed or self._owned:
@@ -683,6 +703,7 @@ class DirectGamepadWorker:
             self._owned = True
             self._auto_enabled = False
             self._status["reason"] = "direct_gamepad_active"
+            self._note_action("armed")
         self._apply_drive()
 
     def _toggle_auto(self) -> None:
@@ -693,6 +714,7 @@ class DirectGamepadWorker:
             enabled = self._auto_enabled
             speed = self._auto_speed
             self._status["reason"] = "direct_gamepad_auto" if enabled else "direct_gamepad_active"
+            self._note_action("auto_on" if enabled else "auto_off", f"{speed:.2f}")
         self._controller.direct_set_auto(enabled, speed)
         if not enabled:
             self._apply_drive()
@@ -700,6 +722,7 @@ class DirectGamepadWorker:
     def _nudge_manual_speed(self, delta: float) -> None:
         with self._lock:
             self._speed = round(clamp(self._speed + delta, DIRECT_SPEED_MIN, DIRECT_SPEED_MAX), 2)
+            self._note_action("manual_speed", f"{self._speed:.2f}")
             owned = self._owned and not self._auto_enabled
         if owned:
             self._apply_drive()
@@ -707,6 +730,7 @@ class DirectGamepadWorker:
     def _nudge_auto_speed(self, delta: float) -> None:
         with self._lock:
             self._auto_speed = round(clamp(self._auto_speed + delta, DIRECT_SPEED_MIN, DIRECT_SPEED_MAX), 2)
+            self._note_action("auto_speed", f"{self._auto_speed:.2f}")
             update = self._owned and self._auto_enabled
             speed = self._auto_speed
         if update:
@@ -721,6 +745,7 @@ class DirectGamepadWorker:
                     DIRECT_STEERING_MAX_PERCENT,
                 )
             )
+            self._note_action("steering_trim", f"{self._steering_percent}%")
             owned = self._owned and not self._auto_enabled
         if owned:
             self._apply_drive()
@@ -780,6 +805,7 @@ class DirectGamepadWorker:
             self._auto_enabled = False
             self._motion_dirty = False
             self._status["reason"] = reason
+            self._note_action("stopped", reason)
         self._controller.direct_stop(reason)
 
     def _fail_closed(self, reason: str, *, disconnect: bool) -> None:
@@ -794,5 +820,6 @@ class DirectGamepadWorker:
                 self._status["connected"] = False
                 self._selection_allowed = False
             self._status["reason"] = reason
+            self._note_action("fail_closed", reason)
         if release:
             self._controller.direct_release(reason)

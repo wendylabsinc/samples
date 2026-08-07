@@ -927,9 +927,11 @@ function renderControllerPanel() {
   const direct = state.directPanel;
   els.padAxes.textContent = direct ? direct.axesText : state.padAxesText;
   els.padButtons.textContent = direct ? direct.buttonsText : state.padButtonsText;
-  els.padLog.textContent = state.gamepadLog.length
-    ? state.gamepadLog.map(gamepadLogLine).join("\n")
-    : "No controller actions yet.";
+  els.padLog.textContent = direct
+    ? direct.logText
+    : state.gamepadLog.length
+      ? state.gamepadLog.map(gamepadLogLine).join("\n")
+      : "No controller actions yet.";
   els.padDrive.textContent = direct ? direct.driveText : drivePayloadText(state.lastDrivePayload);
   els.padResponse.textContent = direct ? direct.responseText : agoText(state.lastDriveOkAt, Date.now());
 }
