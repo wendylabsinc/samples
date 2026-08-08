@@ -15,8 +15,16 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
        ca-certificates curl git jq python3 python3-venv zstd binutils \
        iptables iproute2 procps util-linux sudo asciinema tmux \
+       openssh-client lsof \
        netcat-openbsd \
   && rm -rf /var/lib/apt/lists/*
+
+# openssh-client is REQUIRED, not optional: OpenShell implements its dashboard port
+# forward as an SSH tunnel (`ssh -o ProxyCommand="openshell ssh-proxy ..."`). Without the
+# ssh binary the forward dies with "No such file or directory (os error 2)", onboarding
+# times out waiting for the forward to register, and the sandbox is rolled back. NVIDIA's
+# tested hosts all ship ssh, so their docs never mention it. lsof is used by the same
+# forward code to check port ownership.
 
 # Node 22 from NodeSource: the Ubuntu archive is older than NemoClaw requires.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \

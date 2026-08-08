@@ -79,11 +79,44 @@ else
   echo "warning: docker did not become ready; NemoClaw onboarding will fail" >&2
 fi
 
+# With host networking this app shares the device's port space, so OpenShell's defaults
+# (gateway 8080, dashboard 18789) collide with whatever else the device runs. NemoClaw
+# reads NEMOCLAW_GATEWAY_PORT and NEMOCLAW_DASHBOARD_PORT at module load, so every
+# invocation needs them exported, not just `onboard`.
+pick_port() {
+  _p=$1; _end=$((_p + 200))
+  while [ "$_p" -lt "$_end" ]; do
+    if ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${_p}\$"; then
+      echo "$_p"; return 0
+    fi
+    _p=$((_p + 1))
+  done
+  echo "$1"
+}
+export NEMOCLAW_GATEWAY_PORT="${NEMOCLAW_GATEWAY_PORT:-$(pick_port 18080)}"
+export NEMOCLAW_DASHBOARD_PORT="${NEMOCLAW_DASHBOARD_PORT:-$(pick_port 18890)}"
+export NEMOCLAW_OLLAMA_PROXY_PORT="${NEMOCLAW_OLLAMA_PROXY_PORT:-$(pick_port 11435)}"
+# NemoClaw auto-picks the largest installed model, which frequently fails its completion
+# probe on an edge device. Pin one that fits, overridable by the operator.
+export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-qwen2.5:3b}"
+GW_PORT="$NEMOCLAW_GATEWAY_PORT"; UI_PORT="$NEMOCLAW_DASHBOARD_PORT"
+say "port selection (host networking shares the device's ports)"
+echo "gateway=$GW_PORT dashboard=$UI_PORT"
+
+# A previous run can leave a user-defined bridge claiming the same subnet as docker0.
+# Both routes then exist, the stale one is linkdown, and every nested container loses all
+# egress: it cannot even reach its own gateway. Prune before the daemon settles.
+say "clearing stale docker networks (overlapping subnets black-hole nested traffic)"
+docker network prune -f >/dev/null 2>&1 || true
+for br in $(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | grep '^br-'); do
+  docker network ls -q --filter "id=${br#br-}" | grep -q . || { ip link del "$br" 2>/dev/null && echo "removed stale bridge $br"; }
+done
+
 say "nested container networking smoke test"
-if docker run --rm alpine:latest sh -c 'wget -q -O- -T5 https://registry-1.docker.io/v2/ >/dev/null 2>&1 || true; echo networking-ok' 2>&1 | tail -2; then
-  echo "PASS  a nested container started and ran"
+if docker run --rm busybox sh -c 'nslookup registry.npmjs.org >/dev/null 2>&1' 2>/dev/null; then
+  echo "PASS  nested container has working DNS and egress"
 else
-  echo "FAIL  nested container could not start"
+  echo "FAIL  nested container cannot resolve DNS; onboarding preflight will refuse"
 fi
 
 # ---------------------------------------------------------------- NemoClaw
@@ -91,9 +124,16 @@ fi
 # the exec-capable image layer, so this is a copy rather than a mount or a symlink.
 if [ -f /workspace/state/nchome.tar.gz ] && [ ! -d /opt/nchome/.nemoclaw ]; then
   mkdir -p /opt/nchome
-  tar -xzf /workspace/state/nchome.tar.gz -C /opt/nchome \
-    && echo "restored NemoClaw state from the persist volume" \
-    && touch "$STATE/installed"
+  tar -xzf /workspace/state/nchome.tar.gz -C /opt/nchome 2>/dev/null
+  # Trust the snapshot only if it actually contains a usable binary. An earlier version
+  # set the installed marker from the tarball alone and then skipped a needed reinstall.
+  if [ -x /opt/nchome/.local/bin/nemoclaw ]; then
+    echo "restored NemoClaw state from the persist volume"
+    touch "$STATE/installed"
+  else
+    echo "snapshot restored but nemoclaw binary missing; reinstalling"
+    rm -f "$STATE/installed"
+  fi
 fi
 
 say "filesystem exec flags (the tsc: Permission denied theory)"
@@ -158,10 +198,12 @@ if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q 
   NEMOCLAW_PROVIDER="${NEMOCLAW_PROVIDER:-ollama}" \
   NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}" \
   NEMOCLAW_SANDBOX_NAME="$SANDBOX" \
+  NEMOCLAW_MODEL="$NEMOCLAW_MODEL" \
   OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
-  CHAT_UI_URL="${CHAT_UI_URL:-http://127.0.0.1:18789}" \
+  CHAT_UI_URL="http://127.0.0.1:$UI_PORT" \
+  NEMOCLAW_GATEWAY_PORT="$GW_PORT" \
     nemoclaw onboard --non-interactive --no-gpu --fresh --name "$SANDBOX" \
-      --control-ui-port "${CONTROL_UI_PORT:-18999}" 2>&1 | tail -25
+      --control-ui-port "$UI_PORT" 2>&1 | tail -30
 
   say "openshell gateway log (the real error behind a failed forward)"
   find "$HOME/.local/state/nemoclaw" -name 'openshell-gateway.log' -exec tail -40 {} \; 2>/dev/null \
@@ -211,6 +253,15 @@ if ! nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
         && OLLAMA_HOST="http://$GW:11434"
     fi
     export OLLAMA_HOST
+  fi
+  # NemoClaw probes the model with a real completion. A model server can answer /api/tags
+  # while /api/generate hangs (a known wedged-Ollama state), and onboarding then aborts
+  # with "model unavailable". Warm the model so the probe succeeds.
+  if [ -n "${NEMOCLAW_MODEL:-}" ]; then
+    curl -s --max-time 120 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/generate" \
+      -d "{\"model\":\"$NEMOCLAW_MODEL\",\"prompt\":\"hi\",\"stream\":false}" >/dev/null 2>&1 \
+      && echo "PASS  model $NEMOCLAW_MODEL answered a completion probe" \
+      || echo "WARN  model $NEMOCLAW_MODEL did not answer /api/generate; onboarding will abort"
   fi
   if curl -fsS --max-time 5 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
     echo "PASS  model server reachable at ${OLLAMA_HOST:-http://127.0.0.1:11434}"
