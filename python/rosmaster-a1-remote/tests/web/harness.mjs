@@ -111,12 +111,13 @@ function defaultStatus() {
     // what this hardware has: the HP60C driver publishes depth and rgb and no
     // infrared or stereo image at all.
     cameras: [
-      { id: "hp60c_depth", label: "Depth", path: "/stream_hp60c_depth.mjpg", ok: true, age_s: 0.06 },
-      { id: "hp60c_rgb", label: "RGB", path: "/stream_hp60c_rgb.mjpg", ok: true, age_s: 0.09 },
+      { id: "hp60c_depth", label: "Depth", path: "/stream_hp60c_depth.mjpg", frame: "/frame_hp60c_depth.jpg", ok: true, age_s: 0.06 },
+      { id: "hp60c_rgb", label: "RGB", path: "/stream_hp60c_rgb.mjpg", frame: "/frame_hp60c_rgb.jpg", ok: true, age_s: 0.09 },
     ],
     control: {
       command: { enabled: false, linear_x: 0, steering_y: 0, angular_z: 0 },
       last_published: { linear_x: 0, steering_y: 0, angular_z: 0 },
+      active_source: "none",
       cmd_vel_subscribers: 1,
       limits: { max_linear_x: 0.65, max_steering_y: 0.12, max_angular_z: 1.0, cmd_timeout_s: 0.5 },
     },
@@ -129,6 +130,15 @@ function defaultStatus() {
     // reports the same shape with a different name in it.
     navigation: { ready: true, depth_source: "hp60c", depth_ok: true },
     gamepad: { ok: false },
+    direct_gamepad: {
+      worker_ok: true,
+      connected: false,
+      compatible: false,
+      owned: false,
+      stable_id: "",
+      name: "",
+      reason: "waiting_for_compatible_gamepad",
+    },
     commands: { max_age_ms: 400, rejected: { stale: 0, out_of_order: 0, total: 0 } },
   };
 }
@@ -195,6 +205,10 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
     held: new Set(),
     responses: new Map(),
   };
+  // Each entry tracks one still-open held request so an abort can settle it
+  // out of turn: resolve() is what releaseHeld() calls, and settled guards
+  // against a request being resolved by one path and then reached by the
+  // other (release after an abort already fired, or vice versa).
   const heldResponses = [];
 
   const document = {
@@ -257,7 +271,23 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
       : fake.responses.has(path) ? fake.responses.get(path) : { ok: true };
     const response = { ok: true, status: 200, json: () => Promise.resolve(payload) };
     if (fake.held.has(path)) {
-      return new Promise((resolve) => heldResponses.push(() => resolve(response)));
+      return new Promise((resolve, reject) => {
+        const entry = { settled: false, resolve: () => resolve(response) };
+        heldResponses.push(entry);
+        // A real fetch given an AbortSignal rejects the moment that signal
+        // fires, hung or not. Mirroring that here is what lets a test drive
+        // the page's own timeout path (expireFetchTimeouts, below) instead of
+        // a fetch that is held staying held forever no matter what app.js does.
+        const signal = init && init.signal;
+        if (!signal) return;
+        signal.addEventListener("abort", () => {
+          if (entry.settled) return;
+          entry.settled = true;
+          const at = heldResponses.indexOf(entry);
+          if (at >= 0) heldResponses.splice(at, 1);
+          reject(signal.reason || new Error("The operation was aborted."));
+        });
+      });
     }
     return Promise.resolve(response);
   }
@@ -268,7 +298,21 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
   // requested delay is recorded before the callback runs, which is how a test
   // sees that two tiles asked to reconnect at different moments rather than
   // together.
+  //
+  // A fetch timeout is the one setTimeout in this file that must NOT resolve
+  // that way: FETCH_TIMEOUT_MS (4000 ms) exists precisely so a still-open
+  // request stays open for a while, and every other delay in app.js and
+  // gamepad.js (the 150 ms stop retry, the ~1000-2200 ms feed reconnect) sits
+  // well under it. So any requested delay at or above FETCH_TIMEOUT_THRESHOLD_MS
+  // is treated as a fetch timeout: it does not fire on its own, the way a real
+  // 4-second timer would not fire during a test that runs in milliseconds.
+  // expireFetchTimeouts() below is what a test uses to say the deadline
+  // arrived. Everything shorter keeps firing immediately, unchanged, so every
+  // existing delay-based test keeps working exactly as it did before.
+  const FETCH_TIMEOUT_THRESHOLD_MS = 3000;
   const timeouts = [];
+  let nextTimerId = 1;
+  const fetchTimeoutTimers = new Map();
   const sandbox = {
     console,
     document,
@@ -279,8 +323,23 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
     requestAnimationFrame: () => 0,
     setInterval: () => 0,
     clearInterval: () => {},
-    setTimeout: (fn, ms) => { timeouts.push(Number(ms) || 0); queueMicrotask(fn); return 0; },
-    clearTimeout: () => {},
+    // AbortController is a Node/Web global, not a node:vm builtin, so a
+    // fresh vm context has no constructor for it unless one is handed in. The
+    // host realm's own class is used as-is: nothing here does a cross-realm
+    // instanceof check on it, only new AbortController() and .signal/.abort().
+    AbortController,
+    setTimeout: (fn, ms) => {
+      const delay = Number(ms) || 0;
+      timeouts.push(delay);
+      if (delay >= FETCH_TIMEOUT_THRESHOLD_MS) {
+        const id = nextTimerId++;
+        fetchTimeoutTimers.set(id, fn);
+        return id;
+      }
+      queueMicrotask(fn);
+      return 0;
+    },
+    clearTimeout: (id) => { fetchTimeoutTimers.delete(id); },
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(read("gamepad.js"), context, { filename: "gamepad.js" });
@@ -316,7 +375,22 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
     hasHidListener(type) { return (hidListeners.get(type) || []).length > 0; },
     releaseHeld() {
       const pending = heldResponses.splice(0, heldResponses.length);
-      for (const resolve of pending) resolve();
+      for (const entry of pending) {
+        entry.settled = true;
+        entry.resolve();
+      }
+      return pending.length;
+    },
+    // expireFetchTimeouts simulates FETCH_TIMEOUT_MS actually elapsing: it
+    // fires every fetch-timeout setTimeout callback registered so far (see
+    // FETCH_TIMEOUT_THRESHOLD_MS above), which is what turns a still-held
+    // fetch into the same AbortController-driven rejection a real hung
+    // request would produce after 4 real seconds. Callbacks already cleared
+    // by the page's own clearTimeout are gone from the map and do not fire.
+    expireFetchTimeouts() {
+      const pending = [...fetchTimeoutTimers.values()];
+      fetchTimeoutTimers.clear();
+      for (const fn of pending) fn();
       return pending.length;
     },
     fireWindow(type, event) {

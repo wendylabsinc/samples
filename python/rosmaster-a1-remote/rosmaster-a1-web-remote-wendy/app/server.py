@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import socket
 import ssl
+import sys
 import threading
 import time
 from io import BytesIO
@@ -25,6 +27,8 @@ from sensor_msgs.msg import CompressedImage, Image as RosImage
 from sensor_msgs.msg import Imu, JointState, LaserScan, MagneticField, PointCloud2
 from std_msgs.msg import Float32, String
 
+from direct_gamepad import DirectGamepadWorker
+
 
 PORT = int(os.environ.get("PORT", "8091"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -41,6 +45,13 @@ CMD_TIMEOUT_S = float(os.environ.get("CMD_TIMEOUT_S", "3.0"))
 DRIVE_MAX_AGE_MS = float(os.environ.get("DRIVE_MAX_AGE_MS", "400"))
 DRIVE_REJECT_LOG_INTERVAL_S = float(os.environ.get("DRIVE_REJECT_LOG_INTERVAL_S", "1.0"))
 PUBLISH_HZ = float(os.environ.get("PUBLISH_HZ", "20"))
+# count_publishers/count_subscribers are unbounded rclpy graph queries. This
+# is deliberately far slower than PUBLISH_HZ: the cache only needs to be
+# fresh enough for a status panel and a readiness check, and sampling it on
+# its own thread rather than in the /cmd_vel publish tick is the whole point
+# (see _sample_graph_counts_loop) -- a slow tick here costs a stale reading,
+# never a stalled command.
+GRAPH_COUNT_SAMPLE_INTERVAL_S = float(os.environ.get("GRAPH_COUNT_SAMPLE_INTERVAL_S", "0.5"))
 MAX_LINEAR_X = float(os.environ.get("MAX_LINEAR_X", "1000.00"))
 MAX_STEERING_Y = float(os.environ.get("MAX_STEERING_Y", "0.12"))
 MAX_ANGULAR_Z = float(os.environ.get("MAX_ANGULAR_Z", "1.0"))
@@ -143,6 +154,11 @@ CAMERA_STREAM_IDLE_TIMEOUT_S = float(os.environ.get("CAMERA_STREAM_IDLE_TIMEOUT_
 # encoding are rationed, never the sensing.
 PREVIEW_MAX_FPS = float(os.environ.get("PREVIEW_MAX_FPS", "6.0"))
 PREVIEW_MIN_INTERVAL_S = 1.0 / PREVIEW_MAX_FPS if PREVIEW_MAX_FPS > 0 else 0.0
+# How long one GET /frame_*.jpg counts as "someone is watching" for the
+# encoder gate. The page polls its expanded tile several times a second, so
+# a live viewer renews this continuously; a closed tab lapses within a couple
+# of seconds and encoding stops, same as an MJPEG viewer disconnecting.
+POLL_VIEWER_TTL_S = float(os.environ.get("POLL_VIEWER_TTL_S", "2.0"))
 # No depth feed is named here. Which depth camera this car carries is decided
 # at runtime, and naming one in a static list is exactly the bug that left Auto
 # Nav refusing to engage on a car whose HP60C had been replaced by a RealSense.
@@ -305,6 +321,13 @@ CAMERA_FEEDS = (
 )
 
 CAMERA_STREAM_PATHS = {feed["path"]: (feed["camera"], feed["stream"]) for feed in CAMERA_FEEDS}
+# One finite JPEG per GET, the polling alternative to the MJPEG streams
+# above. Safari never reliably releases the connection behind an MJPEG <img>;
+# each stream churn leaked one until its six-per-host cap was full and every
+# control fetch hung behind parked sockets. A frame request completes, so the
+# page polls these over its ordinary keep-alive pool instead.
+CAMERA_FRAME_PATHS = {f"/frame_{feed['id']}.jpg": (feed["camera"], feed["stream"]) for feed in CAMERA_FEEDS}
+CAMERA_FRAME_PATH_BY_ID = {feed["id"]: f"/frame_{feed['id']}.jpg" for feed in CAMERA_FEEDS}
 
 # The depth cameras autonomy is allowed to plan on ==========================
 #
@@ -404,6 +427,7 @@ def camera_feeds(hp60c: dict | None = None, realsense: dict | None = None) -> li
                 "id": spec["id"],
                 "label": spec["label"],
                 "path": spec["path"],
+                "frame": CAMERA_FRAME_PATH_BY_ID[spec["id"]],
                 "ok": bool(stream.get("ok")),
                 "age_s": stream.get("age_s"),
             }
@@ -468,6 +492,47 @@ def encode_jpeg(frame: PILImage.Image, quality: int) -> bytes | None:
     return buf.getvalue()
 
 
+# A handler thread must never block on stdout. CommandFreshness used to log a
+# rejected command with print(flush=True) while holding its lock; when the
+# container's stdout pipe stalled (log-collector backpressure), that call
+# never returned, the lock was never released, and every later drive/status
+# request wedged in check() waiting for it. log_line() only ever
+# put_nowait()s onto this bounded queue, drained by the daemon thread below,
+# so a stalled sink can stall the writer, never the caller. A full queue
+# drops the line and counts the drop; the next line that gets through is
+# prefixed with a marker so the gap is visible in the log instead of silent.
+_LOG_QUEUE: "queue.Queue[str]" = queue.Queue(maxsize=256)
+_LOG_STATE_LOCK = threading.Lock()
+_LOG_DROPPED = 0
+
+
+def _log_output(line: str) -> None:
+    """The writer thread's sink. A module attribute, read fresh per line, so
+    a test can swap it for something that blocks without touching print."""
+    print(line, flush=True)
+
+
+def log_line(msg: str) -> None:
+    global _LOG_DROPPED
+    with _LOG_STATE_LOCK:
+        dropped = _LOG_DROPPED
+        line = f"LOG_DROPPED n={dropped} {msg}" if dropped else msg
+        try:
+            _LOG_QUEUE.put_nowait(line)
+        except queue.Full:
+            _LOG_DROPPED = dropped + 1
+            return
+        _LOG_DROPPED = 0
+
+
+def _log_writer() -> None:
+    while True:
+        _log_output(_LOG_QUEUE.get())
+
+
+threading.Thread(target=_log_writer, daemon=True, name="log-writer").start()
+
+
 class RosmasterControl(Node):
     def __init__(self) -> None:
         super().__init__("rosmaster_web_remote")
@@ -518,8 +583,37 @@ class RosmasterControl(Node):
             RosImage, REALSENSE_COLOR_TOPIC, self._on_realsense_color, REALSENSE_QOS
         )
         self._lock = threading.Lock()
+        # count_publishers/count_subscribers are unbounded rclpy graph
+        # queries; the request path used to call them straight from the
+        # handler thread, and a stalled rmw layer hung /api/drive and
+        # /api/status directly. Sampled instead on their own thread (see
+        # _sample_graph_counts_loop, started below) and cached here so a
+        # handler thread only ever reads a dict under self._lock. Zeros until
+        # the first sample match "nothing discovered yet", the same meaning
+        # an unfitted camera or absent base driver already has.
+        self._graph_publisher_topics = (
+            HP60C_DEPTH_TOPIC,
+            HP60C_RGB_TOPIC,
+            HP60C_POINTS_TOPIC,
+            *REALSENSE_TOPICS.values(),
+        )
+        self._graph_publishers: dict[str, int] = {topic: 0 for topic in self._graph_publisher_topics}
+        self._graph_cmd_vel_subscribers = 0
+        # Consecutive failed ticks in _sample_graph_counts_tick, so the loop
+        # can log once when it starts failing and once when it recovers
+        # rather than once per tick -- the same throttling instinct
+        # CommandFreshness's DRIVE_REJECTED log applies to a bad link's
+        # rejection bursts, applied here to a bad rmw layer's failure bursts.
+        self._graph_sample_failures = 0
         self._command = zero_command()
         self._last_published = zero_command()
+        # Direct evdev ownership is separate from whether a compatible pad is
+        # merely connected. A connected-but-unarmed pad leaves browser control
+        # alone; A sets this flag. Once direct ownership ends, the latch below
+        # rejects browser motion until an explicit /api/start so an already-
+        # armed browser heartbeat cannot undo the fail-closed zero.
+        self._direct_owned = False
+        self._browser_start_required = False
         self._publish_count = 0
         self._last_publish_at = 0.0
         self._scan = self._empty_scan()
@@ -530,6 +624,10 @@ class RosmasterControl(Node):
         self._viewers: dict[str, int] = {}
         # Last time each feed drew a preview, keyed "camera:stream".
         self._preview_last: dict[str, float] = {}
+        # Last time each feed was polled via /frame_*.jpg, keyed
+        # "camera:stream". A recent poll counts as viewership for the
+        # encoder gate, the way an open MJPEG response does.
+        self._frame_polls: dict[str, float] = {}
         self._sensors = self._empty_sensors()
         self._auto = {
             "enabled": False,
@@ -547,6 +645,7 @@ class RosmasterControl(Node):
         }
         self._auto_state = self._new_auto_state()
         self.create_timer(1.0 / PUBLISH_HZ, self._publish)
+        threading.Thread(target=self._sample_graph_counts_loop, daemon=True, name="graph-count-sampler").start()
 
     def update(self, payload: dict) -> dict:
         enabled = bool(payload.get("enabled", False))
@@ -563,6 +662,113 @@ class RosmasterControl(Node):
                 self._auto["enabled"] = False
             self._command = cmd
         return cmd
+
+    def _browser_rejection_locked(self) -> str | None:
+        if self._direct_owned:
+            return "direct_gamepad_active"
+        if self._browser_start_required:
+            return "browser_start_required"
+        return None
+
+    def browser_rejection(self) -> str | None:
+        with self._lock:
+            return self._browser_rejection_locked()
+
+    def browser_update(self, payload: dict) -> tuple[dict | None, str | None]:
+        """Apply a browser command with ownership checked under the same lock.
+
+        The handler also checks early so it can skip freshness accounting for
+        an already-rejected request. This second check closes the race where A
+        acquires direct ownership between that check and the command write.
+        """
+
+        enabled = bool(payload.get("enabled", False))
+        cmd = {
+            "enabled": enabled,
+            "linear_x": finite_float(payload.get("linear_x", 0.0)) if enabled else 0.0,
+            "steering_y": clamp(float(payload.get("steering_y", 0.0)), MAX_STEERING_Y) if enabled else 0.0,
+            "angular_z": clamp(float(payload.get("angular_z", 0.0)), MAX_ANGULAR_Z) if enabled else 0.0,
+            "updated_at": time.monotonic(),
+            "source": "web",
+        }
+        with self._lock:
+            rejection = self._browser_rejection_locked()
+            if rejection:
+                return None, rejection
+            if enabled:
+                self._auto["enabled"] = False
+            self._command = cmd
+        return cmd, None
+
+    def direct_acquire(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._direct_owned = True
+            # Keep this set through ownership and after release. /api/start is
+            # the only browser action that clears it.
+            self._browser_start_required = True
+            self._auto["enabled"] = False
+            self._command = zero_command("direct_gamepad")
+            self._command["updated_at"] = now
+            self._auto_decision = {
+                "action": "direct_gamepad_armed",
+                "linear_x": 0.0,
+                "steering_y": 0.0,
+                "reason": "direct gamepad acquired control",
+            }
+            self._auto_state = self._new_auto_state()
+
+    def direct_update(self, linear_x: float, steering_y: float) -> bool:
+        with self._lock:
+            if not self._direct_owned:
+                return False
+            self._auto["enabled"] = False
+            self._command = {
+                "enabled": True,
+                "linear_x": finite_float(linear_x),
+                "steering_y": clamp(finite_float(steering_y), MAX_STEERING_Y),
+                "angular_z": 0.0,
+                "updated_at": time.monotonic(),
+                "source": "direct_gamepad",
+            }
+        return True
+
+    def direct_set_auto(self, enabled: bool, speed: float) -> bool:
+        with self._lock:
+            if not self._direct_owned:
+                return False
+            now = time.monotonic()
+            self._auto["enabled"] = bool(enabled)
+            self._auto["speed"] = floor_finite(speed, 0.0, AUTO_SPEED)
+            self._auto["updated_at"] = now
+            self._auto_state = self._new_auto_state()
+            self._command = zero_command("direct_gamepad_auto" if enabled else "direct_gamepad")
+            self._command["updated_at"] = now
+        if not enabled:
+            self._publish_zero_burst()
+        return True
+
+    def direct_release(self, reason: str) -> None:
+        with self._lock:
+            self._direct_owned = False
+            self._browser_start_required = True
+            self._auto["enabled"] = False
+            self._command = zero_command(reason)
+            self._command["updated_at"] = time.monotonic()
+            self._auto_decision = {
+                "action": "stopped",
+                "linear_x": 0.0,
+                "steering_y": 0.0,
+                "reason": reason,
+            }
+            self._auto_state = self._new_auto_state()
+        self._publish_zero_burst()
+
+    def direct_stop(self, reason: str = "direct_gamepad_stop") -> None:
+        # Unlike an ordinary disconnect, a physical B/Menu press is a global
+        # stop even while the direct pad is unarmed and browser control owns
+        # the car. Force the browser-start latch in both cases.
+        self.direct_release(reason)
 
     def set_auto(self, payload: dict) -> dict:
         enabled = bool(payload.get("enabled", False))
@@ -591,8 +797,41 @@ class RosmasterControl(Node):
             self._publish_zero_burst()
         return self.auto_snapshot()
 
+    def browser_set_auto(self, payload: dict) -> tuple[dict | None, str | None]:
+        enabled = bool(payload.get("enabled", False))
+        speed = floor_finite(payload.get("speed", AUTO_SPEED), 0.0, AUTO_SPEED)
+        stop_distance = clamp_range(float(payload.get("stop_distance", AUTO_STOP_DISTANCE)), 0.20, 1.50)
+        avoid_distance = clamp_range(float(payload.get("avoid_distance", AUTO_AVOID_DISTANCE)), stop_distance + 0.10, 2.50)
+        clear_distance = clamp_range(
+            float(payload.get("clear_distance", AUTO_CLEAR_DISTANCE)),
+            avoid_distance + 0.10,
+            3.50,
+        )
+        with self._lock:
+            rejection = self._browser_rejection_locked()
+            if rejection:
+                return None, rejection
+            self._auto = {
+                "enabled": enabled,
+                "speed": speed,
+                "stop_distance": stop_distance,
+                "avoid_distance": avoid_distance,
+                "clear_distance": clear_distance,
+                "updated_at": time.monotonic(),
+            }
+            self._auto_state = self._new_auto_state()
+            if enabled:
+                self._command = zero_command("auto")
+                self._command["updated_at"] = time.monotonic()
+        if not enabled:
+            self._publish_zero_burst()
+        return self.auto_snapshot(), None
+
     def stop(self) -> None:
         with self._lock:
+            if self._direct_owned:
+                self._browser_start_required = True
+            self._direct_owned = False
             self._auto["enabled"] = False
             self._command = zero_command("stop")
             self._command["updated_at"] = time.monotonic()
@@ -615,6 +854,7 @@ class RosmasterControl(Node):
             "source": "start",
         }
         with self._lock:
+            self._browser_start_required = False
             self._auto["enabled"] = False
             self._command = command
             self._auto_decision = {
@@ -626,10 +866,133 @@ class RosmasterControl(Node):
             self._auto_state = self._new_auto_state()
         return command
 
+    def browser_start(self) -> tuple[dict | None, str | None]:
+        command = {
+            "enabled": True,
+            "linear_x": 0.0,
+            "steering_y": 0.0,
+            "angular_z": 0.0,
+            "updated_at": time.monotonic(),
+            "source": "start",
+        }
+        with self._lock:
+            if self._direct_owned:
+                return None, "direct_gamepad_active"
+            self._browser_start_required = False
+            self._auto["enabled"] = False
+            self._command = command
+            self._auto_decision = {
+                "action": "manual_armed",
+                "linear_x": 0.0,
+                "steering_y": 0.0,
+                "reason": "start requested",
+            }
+            self._auto_state = self._new_auto_state()
+        return command, None
+
+    def _cached_publisher_count(self, topic: str) -> int:
+        """A request thread's only way to ask about the ROS graph.
+
+        count_publishers itself is a request thread's business only through
+        this accessor: it just reads _sample_graph_counts's last result under
+        self._lock, never the graph. See _sample_graph_counts for why.
+        """
+        with self._lock:
+            return self._graph_publishers.get(topic, 0)
+
+    def _cached_cmd_vel_subscribers(self) -> int:
+        with self._lock:
+            return self._graph_cmd_vel_subscribers
+
+    def _sample_graph_counts(self) -> None:
+        """Query the ROS graph and refresh the cache. One call, one round trip.
+
+        count_publishers/count_subscribers hit rmw with no timeout of their
+        own. They used to be called inline from snapshot, _auto_ready,
+        _planner_depth_source, hp60c_snapshot and realsense_snapshot, all
+        reachable from POST /api/drive and GET /api/status; a stalled rmw
+        layer hung both straight from the handler thread. The queries happen
+        here, outside self._lock, so a slow graph call delays only whoever
+        called this, not every handler blocked on the lock behind it; only
+        the already-known result is stored under the lock, for
+        _cached_publisher_count and _cached_cmd_vel_subscribers to read.
+        Kept as its own method, separate from the loop below, so a test can
+        prime the cache deterministically without waiting on a timer.
+        """
+        publishers = {topic: self.count_publishers(topic) for topic in self._graph_publisher_topics}
+        cmd_vel_subscribers = self.count_subscribers("/cmd_vel")
+        with self._lock:
+            self._graph_publishers = publishers
+            self._graph_cmd_vel_subscribers = cmd_vel_subscribers
+
+    def _sample_graph_counts_tick(self) -> None:
+        """One sampler tick: query, store, and survive whatever the graph does.
+
+        Split out from _sample_graph_counts_loop so a test can drive exactly
+        one tick deterministically -- including one that raises -- without
+        racing the real thread or its sleep interval.
+
+        A raising count_publishers/count_subscribers is the same rmw failure
+        this whole file is being hardened against, just surfacing as an
+        exception instead of a hang. An uncaught one here would kill this
+        daemon thread silently (a bare exception in a thread target is only
+        ever reported to threading.excepthook, which nothing here monitors),
+        freezing the cache at its last values forever with no visible sign
+        anything had gone wrong. Caught instead, so the thread keeps ticking
+        and the cache recovers on its own the moment the graph does. Logged
+        once when it starts failing and once when it recovers with a count in
+        between, not once per tick, so a stuck rmw layer does not bury the
+        log the way DRIVE_REJECTED's throttling exists to prevent for a bad
+        link's rejection bursts.
+        """
+        try:
+            self._sample_graph_counts()
+        except Exception as exc:  # noqa: BLE001 - this thread must never die
+            self._graph_sample_failures += 1
+            if self._graph_sample_failures == 1:
+                log_line(f"GRAPH_COUNT_SAMPLE_FAILED {type(exc).__name__}: {exc}")
+        else:
+            if self._graph_sample_failures:
+                log_line(f"GRAPH_COUNT_SAMPLE_RECOVERED after {self._graph_sample_failures} failed tick(s)")
+            self._graph_sample_failures = 0
+
+    def _sample_graph_counts_loop(self) -> None:
+        """Refresh the graph-count cache on its own thread, forever.
+
+        This used to run at the top of _publish(), the callback the 20 Hz
+        /cmd_vel timer ticks -- the single executor thread that also runs
+        every subscription callback. PREVIEW_MAX_FPS above documents what
+        happens when that thread is made to wait: a saturated executor once
+        starved the command timer, the base bridge stopped hearing from us,
+        its watchdog zeroed the motors, and the car stopped answering the
+        operator. count_publishers/count_subscribers are exactly the
+        unbounded rmw calls this whole file is being hardened against, so
+        calling them from the executor would have reproduced that failure
+        from a new cause. A dedicated daemon thread means a stalled or
+        raising graph query only leaves the cache stale -- it can no longer
+        touch the publish tick, a sensor callback, or a handler thread, and
+        (see _sample_graph_counts_tick) it can no longer take this thread
+        down either.
+        """
+        while True:
+            self._sample_graph_counts_tick()
+            time.sleep(GRAPH_COUNT_SAMPLE_INTERVAL_S)
+
     def snapshot(self) -> dict:
         with self._lock:
             command = dict(self._command)
             last_published = dict(self._last_published)
+            direct_owned = self._direct_owned
+            browser_start_required = self._browser_start_required
+            auto_enabled = bool(self._auto["enabled"])
+            if direct_owned:
+                active_source = "direct_gamepad_auto" if auto_enabled else "direct_gamepad"
+            elif auto_enabled:
+                active_source = "browser_auto"
+            elif command["enabled"]:
+                active_source = "browser"
+            else:
+                active_source = "none"
         stale_s = time.monotonic() - command["updated_at"] if command["updated_at"] else None
         return {
             "command": command,
@@ -637,7 +1000,10 @@ class RosmasterControl(Node):
             "publish_count": self._publish_count,
             "last_publish_age_s": round(time.monotonic() - self._last_publish_at, 3) if self._last_publish_at else None,
             "stale_s": round(stale_s, 3) if stale_s is not None else None,
-            "cmd_vel_subscribers": self.count_subscribers("/cmd_vel"),
+            "active_source": active_source,
+            "direct_gamepad_owned": direct_owned,
+            "browser_start_required": browser_start_required,
+            "cmd_vel_subscribers": self._cached_cmd_vel_subscribers(),
             "limits": {
                 "max_linear_x": MAX_LINEAR_X,
                 "max_steering_y": MAX_STEERING_Y,
@@ -691,27 +1057,26 @@ class RosmasterControl(Node):
 
         Full snapshots, so publisher counts count as evidence of a fitted
         camera and a driver that has come up but not yet produced a frame is
-        still named in the readiness reason. This costs a handful of ROS graph
-        queries, which is fine on a request thread and is why the planner has
-        its own leaner version rather than calling this one.
+        still named in the readiness reason. The counts themselves are cache
+        reads (see _sample_graph_counts), so this is cheap enough to call from
+        a request thread; the planner still has its own leaner version below,
+        because the image bookkeeping this does is more than it needs.
         """
         return select_depth_source(self.hp60c_snapshot(), self.realsense_snapshot())
 
     def _planner_depth_source(self) -> dict | None:
         """The same question, asked on the thread that publishes /cmd_vel.
 
-        Same registry, same rule, and the two depth topics' publisher counts
-        filled in so the answer matches the one above. Two graph queries per
-        tick, next to the count_subscribers("/cmd_vel") this loop already does
-        every tick, and none of the image work: reading the other four feeds'
-        publishers would buy the planner nothing, since it only ever plans on
-        depth.
+        Same registry, same rule, and the two depth topics' cached publisher
+        counts filled in so the answer matches the one above, with none of
+        the image bookkeeping: reading the other four feeds' publishers would
+        buy the planner nothing, since it only ever plans on depth.
         """
         with self._lock:
             hp60c = self._hp60c_meta_locked()
             realsense = self._realsense_meta_locked()
-        hp60c["publishers"] = {"depth": self.count_publishers(HP60C_DEPTH_TOPIC)}
-        realsense["publishers"] = {"depth": self.count_publishers(REALSENSE_DEPTH_TOPIC)}
+        hp60c["publishers"] = {"depth": self._cached_publisher_count(HP60C_DEPTH_TOPIC)}
+        realsense["publishers"] = {"depth": self._cached_publisher_count(REALSENSE_DEPTH_TOPIC)}
         return select_depth_source(hp60c, realsense)
 
     def hp60c_snapshot(self) -> dict:
@@ -729,9 +1094,9 @@ class RosmasterControl(Node):
         }
         hp60c["points_enabled"] = HP60C_POINTS_ENABLED
         hp60c["publishers"] = {
-            "depth": self.count_publishers(HP60C_DEPTH_TOPIC),
-            "rgb": self.count_publishers(HP60C_RGB_TOPIC),
-            "points": self.count_publishers(HP60C_POINTS_TOPIC),
+            "depth": self._cached_publisher_count(HP60C_DEPTH_TOPIC),
+            "rgb": self._cached_publisher_count(HP60C_RGB_TOPIC),
+            "points": self._cached_publisher_count(HP60C_POINTS_TOPIC),
         }
         hp60c["usable_for_navigation"] = bool(
             hp60c["depth"]["ok"]
@@ -758,7 +1123,7 @@ class RosmasterControl(Node):
             stream["age_s"] = round(age, 3) if age is not None else None
             stream["ok"] = age is not None and age < REALSENSE_STALE_S and stream["frames"] > 0
         realsense["topics"] = dict(REALSENSE_TOPICS)
-        realsense["publishers"] = {name: self.count_publishers(topic) for name, topic in REALSENSE_TOPICS.items()}
+        realsense["publishers"] = {name: self._cached_publisher_count(topic) for name, topic in REALSENSE_TOPICS.items()}
         realsense["viewers"] = viewers
         realsense["stale_s"] = REALSENSE_STALE_S
         return realsense
@@ -793,7 +1158,27 @@ class RosmasterControl(Node):
                     self._realsense[slot] = None
 
     def _has_viewer_locked(self, camera: str, stream: str) -> bool:
-        return self._viewers.get(f"{camera}:{stream}", 0) > 0
+        key = f"{camera}:{stream}"
+        if self._viewers.get(key, 0) > 0:
+            return True
+        return time.monotonic() - self._frame_polls.get(key, 0.0) < POLL_VIEWER_TTL_S
+
+    def poll_camera_frame(self, camera: str, stream: str) -> bytes | None:
+        """One frame for one GET, and the GET itself is the viewership.
+
+        The first poll after a lapse returns None on purpose: the lease had
+        expired, so whatever JPEG is cached predates anyone watching and
+        would be replayed as if it were live. That poll reopens the lease,
+        the next ROS callback encodes, and the following poll is served.
+        """
+        key = f"{camera}:{stream}"
+        now = time.monotonic()
+        with self._lock:
+            lease_live = now - self._frame_polls.get(key, 0.0) < POLL_VIEWER_TTL_S
+            self._frame_polls[key] = now
+        if not lease_live:
+            return None
+        return self.camera_frame(camera, stream)
 
     def _preview_due_locked(self, key: str) -> bool:
         """True when this feed is allowed to draw another preview.
@@ -878,7 +1263,7 @@ class RosmasterControl(Node):
         scan = self.lidar_snapshot()
         if not scan["ok"]:
             return {"ready": False, "reason": "waiting for fresh lidar"}
-        if self.count_subscribers("/cmd_vel") < 1:
+        if self._cached_cmd_vel_subscribers() < 1:
             return {"ready": False, "reason": "waiting for base driver"}
         source = self.depth_source()
         if source is None:
@@ -1216,10 +1601,9 @@ class RosmasterControl(Node):
                 self._annotate_ros_frame(frame, title, msg.encoding, stats)
                 encoded = self._encode_frame(frame, 78)
         except Exception as exc:  # noqa: BLE001 - a preview is never worth the executor
-            print(
+            log_line(
                 f"REALSENSE_FRAME_FAILED stream={stream} encoding={msg.encoding} "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
+                f"{type(exc).__name__}: {exc}"
             )
 
         meta = {
@@ -1440,9 +1824,10 @@ class RosmasterControl(Node):
     def _publish(self) -> None:
         with self._lock:
             auto_enabled = bool(self._auto["enabled"])
+            direct_owned = self._direct_owned
             command = dict(self._command)
         if auto_enabled:
-            msg, published = self._auto_command()
+            msg, published = self._auto_command(direct_owned=direct_owned)
         elif not command["enabled"] or time.monotonic() - command["updated_at"] > CMD_TIMEOUT_S:
             msg = Twist()
             published = zero_command("watchdog")
@@ -1458,7 +1843,7 @@ class RosmasterControl(Node):
         with self._lock:
             self._last_published = published
 
-    def _auto_command(self) -> tuple[Twist, dict]:
+    def _auto_command(self, direct_owned: bool = False) -> tuple[Twist, dict]:
         source = self._planner_depth_source()
         with self._lock:
             scan = dict(self._scan)
@@ -1472,7 +1857,7 @@ class RosmasterControl(Node):
             "steering_y": round(msg.linear.y, 4),
             "angular_z": 0.0,
             "updated_at": time.monotonic(),
-            "source": "auto",
+            "source": "direct_gamepad_auto" if direct_owned else "auto",
         }
         decision["linear_x"] = published["linear_x"]
         decision["steering_y"] = published["steering_y"]
@@ -1535,7 +1920,7 @@ class RosmasterControl(Node):
         corridor = None
         if age is None or age > LIDAR_STALE_S or not front_near:
             reason = "waiting for lidar"
-        elif self.count_subscribers("/cmd_vel") < 1:
+        elif self._cached_cmd_vel_subscribers() < 1:
             reason = "waiting for base driver"
         elif depth_camera is None:
             reason = "waiting for a depth camera"
@@ -2284,6 +2669,12 @@ class RosmasterControl(Node):
 
 rclpy.init()
 control = RosmasterControl()
+direct_gamepad = DirectGamepadWorker(
+    control,
+    max_steering_y=MAX_STEERING_Y,
+    auto_speed=AUTO_SPEED,
+    log=log_line,
+)
 gamepad_lock = threading.Lock()
 gamepad_state = {
     "ok": False,
@@ -2381,7 +2772,7 @@ class CommandFreshness:
     def __init__(self, max_age_ms: float = DRIVE_MAX_AGE_MS, log=None) -> None:
         self._lock = threading.Lock()
         self._max_age_ms = float(max_age_ms)
-        self._log = log if log is not None else (lambda line: print(line, flush=True))
+        self._log = log if log is not None else log_line
         self._client = None
         self._last_seq: float | None = None
         self._rejected = {"stale": 0, "out_of_order": 0, "total": 0}
@@ -2406,23 +2797,35 @@ class CommandFreshness:
             return {"fresh": True, "reason": "unversioned"}
 
         client = str(payload.get("client_id", ""))[:64]
+        # Rejection carries a log call, and a rejection made every later
+        # drive/status request block behind this lock while that call sat
+        # waiting on a stalled stdout pipe. rejection is (verdict, line) so
+        # the write can happen after `with` releases the lock below; only
+        # the counters and the throttling decision need to happen inside it.
+        rejection = None
         with self._lock:
             if client != self._client:
                 self._client = client
                 self._last_seq = None
             if seq is not None and self._last_seq is not None and seq <= self._last_seq:
-                return self._reject_locked("out_of_order", "out of order", seq, age)
-            if seq is not None:
-                # Recorded before the age check on purpose. A stale command is
-                # still the newest thing the page has produced, so accepting an
-                # older sibling behind it would put back the very throttle we
-                # are refusing.
-                self._last_seq = seq
-            if age is not None and age > self._max_age_ms:
-                return self._reject_locked("stale", "stale", seq, age)
-        return {"fresh": True, "reason": "fresh"}
+                rejection = self._reject_locked("out_of_order", "out of order", seq, age)
+            else:
+                if seq is not None:
+                    # Recorded before the age check on purpose. A stale command
+                    # is still the newest thing the page has produced, so
+                    # accepting an older sibling behind it would put back the
+                    # very throttle we are refusing.
+                    self._last_seq = seq
+                if age is not None and age > self._max_age_ms:
+                    rejection = self._reject_locked("stale", "stale", seq, age)
+        if rejection is None:
+            return {"fresh": True, "reason": "fresh"}
+        verdict, line = rejection
+        if line is not None:
+            self._log(line)
+        return verdict
 
-    def _reject_locked(self, counter: str, reason: str, seq: float | None, age: float | None) -> dict:
+    def _reject_locked(self, counter: str, reason: str, seq: float | None, age: float | None) -> tuple[dict, str | None]:
         self._rejected[counter] += 1
         self._rejected["total"] += 1
         self._last_reason = reason
@@ -2434,15 +2837,16 @@ class CommandFreshness:
         # logged rather than compared against a monotonic clock that may not
         # have reached the interval yet.
         now = time.monotonic()
+        line = None
         if self._last_log_at is None or now - self._last_log_at >= DRIVE_REJECT_LOG_INTERVAL_S:
             self._last_log_at = now
             dropped = self._since_last_log
             self._since_last_log = 0
-            self._log(
+            line = (
                 f"DRIVE_REJECTED reason={reason} seq={seq} age_ms={age} "
                 f"max_age_ms={self._max_age_ms} in_last_burst={dropped} total={self._rejected['total']}"
             )
-        return {"fresh": False, "reason": reason}
+        return {"fresh": False, "reason": reason}, line
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -2491,7 +2895,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def log_message(self, fmt: str, *args) -> None:
-        print("%s - %s" % (self.address_string(), fmt % args), flush=True)
+        log_line("%s - %s" % (self.address_string(), fmt % args))
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -2512,11 +2916,14 @@ class Handler(BaseHTTPRequestHandler):
                     "auto": control.auto_snapshot(),
                     "navigation": control.navigation_snapshot(),
                     "gamepad": gamepad_snapshot(),
+                    "direct_gamepad": direct_gamepad.snapshot(),
                     "commands": command_freshness.snapshot(),
                 }
             )
         elif parsed.path == "/api/gamepad":
             self._send_json({"ok": True, "gamepad": gamepad_snapshot()})
+        elif parsed.path in CAMERA_FRAME_PATHS:
+            self._send_camera_frame(*CAMERA_FRAME_PATHS[parsed.path])
         elif parsed.path in CAMERA_STREAM_PATHS:
             # Routed from the registry rather than a hand written branch per
             # feed, so a feed added to CAMERA_FEEDS is served as well as
@@ -2544,11 +2951,39 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/drive":
+            rejection = getattr(control, "browser_rejection", lambda: None)()
+            if rejection:
+                snapshot = control.snapshot()
+                self._send_json({
+                    "ok": True,
+                    "command": snapshot.get("command", {}),
+                    "rejected": True,
+                    "reason": rejection,
+                    "control": snapshot,
+                    "auto": control.auto_snapshot(),
+                })
+                return
             verdict = command_freshness.check(payload)
             # A command we cannot trust is applied as a zero rather than
             # discarded. Discarding it would leave whatever the car was already
             # doing in place, which is the wrong way to resolve the doubt.
-            cmd = control.update(payload if verdict["fresh"] else {"enabled": False})
+            command_payload = payload if verdict["fresh"] else {"enabled": False}
+            browser_update = getattr(control, "browser_update", None)
+            if browser_update is None:
+                cmd, late_rejection = control.update(command_payload), None
+            else:
+                cmd, late_rejection = browser_update(command_payload)
+            if late_rejection:
+                snapshot = control.snapshot()
+                self._send_json({
+                    "ok": True,
+                    "command": snapshot.get("command", {}),
+                    "rejected": True,
+                    "reason": late_rejection,
+                    "control": snapshot,
+                    "auto": control.auto_snapshot(),
+                })
+                return
             self._send_json({
                 "ok": True,
                 "command": cmd,
@@ -2558,13 +2993,59 @@ class Handler(BaseHTTPRequestHandler):
                 "auto": control.auto_snapshot(),
             })
         elif parsed.path == "/api/auto":
-            auto = control.set_auto(payload)
+            rejection = getattr(control, "browser_rejection", lambda: None)()
+            if rejection:
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": rejection,
+                    "auto": control.auto_snapshot(),
+                    "control": control.snapshot(),
+                })
+                return
+            browser_set_auto = getattr(control, "browser_set_auto", None)
+            if browser_set_auto is None:
+                auto, late_rejection = control.set_auto(payload), None
+            else:
+                auto, late_rejection = browser_set_auto(payload)
+            if late_rejection:
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": late_rejection,
+                    "auto": control.auto_snapshot(),
+                    "control": control.snapshot(),
+                })
+                return
             self._send_json({"ok": True, "auto": auto, "control": control.snapshot()})
         elif parsed.path == "/api/stop":
-            control.stop()
+            direct_gamepad.apply_external_stop(control.stop, "browser_stop")
             self._send_json({"ok": True, "control": control.snapshot(), "auto": control.auto_snapshot()})
         elif parsed.path == "/api/start":
-            command = control.start()
+            rejection = getattr(control, "browser_rejection", lambda: None)()
+            if rejection == "direct_gamepad_active":
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": rejection,
+                    "control": control.snapshot(),
+                    "auto": control.auto_snapshot(),
+                })
+                return
+            browser_start = getattr(control, "browser_start", None)
+            if browser_start is None:
+                command, late_rejection = control.start(), None
+            else:
+                command, late_rejection = browser_start()
+            if late_rejection:
+                self._send_json({
+                    "ok": True,
+                    "rejected": True,
+                    "reason": late_rejection,
+                    "control": control.snapshot(),
+                    "auto": control.auto_snapshot(),
+                })
+                return
             self._send_json({"ok": True, "command": command, "control": control.snapshot(), "auto": control.auto_snapshot()})
         elif parsed.path == "/api/gamepad":
             self._send_json({"ok": True, "gamepad": update_gamepad_state(payload)})
@@ -2611,6 +3092,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_camera_frame(self, camera: str, stream: str) -> None:
+        """The latest JPEG for one feed, as a response that ends.
+
+        Unlike _stream_camera below, this holds no thread and no connection:
+        Content-Length is sent, the body completes, and the keep-alive
+        connection is immediately reusable for drive and status traffic.
+        404 simply means "no frame yet" -- the page polls, so the next
+        request answers once the lease has let the encoder run.
+        """
+        jpg = control.poll_camera_frame(camera, stream)
+        if jpg is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpg)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(jpg)
 
     def _stream_camera(self, camera: str, stream: str) -> None:
         """Serve one feed as MJPEG for as long as it has something to send.
@@ -2674,6 +3175,64 @@ class Handler(BaseHTTPRequestHandler):
         return "application/octet-stream"
 
 
+class TLSHandler(Handler):
+    """Handler whose TLS handshake runs on this connection's own thread.
+
+    The listening socket must never be the thing ssl wraps: that puts every
+    client's handshake inside accept() on the one serve_forever thread, and a
+    client that connects and then says nothing -- Safari parks speculative
+    preconnects exactly like that -- blocks every other HTTPS connection for
+    as long as it stays silent. Observed live on the car: with the operator's
+    Safari open, a curl to :8443 could not complete a TCP handshake while
+    :8091 answered normally, and the page showed every fetch that needed a
+    new connection dying at its timeout while fetches on connections it
+    already had stayed healthy. Wrapping here, in setup(), makes a stalled
+    peer cost one thread for `timeout` seconds and nobody else anything.
+    """
+
+    def setup(self) -> None:
+        # The class timeout bounds the handshake: a preconnect that never
+        # speaks is closed after 10 s instead of holding the thread forever.
+        self.request.settimeout(self.timeout)
+        self.request = self.server.tls_context.wrap_socket(self.request, server_side=True)
+        super().setup()
+
+    def finish(self) -> None:
+        # wrap_socket detaches the socket object the server machinery holds,
+        # so its close_request() no longer closes the fd; do it here.
+        try:
+            super().finish()
+        finally:
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+
+
+class TLSServer(ThreadingHTTPServer):
+    # The socketserver default backlog is 5. A browser reconnecting a page's
+    # worth of sockets after a blip bursts past that, and a full backlog
+    # turns into SYNs answered with nothing, which reads as the car being
+    # off the network.
+    request_queue_size = 64
+
+    def __init__(self, server_address, handler_class, tls_context: ssl.SSLContext) -> None:
+        super().__init__(server_address, handler_class)
+        self.tls_context = tls_context
+
+    def handle_error(self, request, client_address) -> None:
+        # Failed handshakes are routine: dropped preconnects, port scans,
+        # HTTP spoken to the TLS port. One quiet line, not a traceback each.
+        exc = sys.exc_info()[1]
+        log_line(f"TLS_CONN_ERROR client={client_address[0]} {type(exc).__name__}: {exc}")
+
+
+def build_https_server(cert: str, key: str, host: str = "0.0.0.0", port: int | None = None) -> TLSServer:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    return TLSServer((host, HTTPS_PORT if port is None else port), TLSHandler, context)
+
+
 def serve_https() -> None:
     """Serve the same app over TLS, so the browser will expose the gamepad.
 
@@ -2695,10 +3254,7 @@ def serve_https() -> None:
         print(f"WEB_REMOTE_TLS_SKIPPED cert={cert} missing", flush=True)
         return
     try:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(cert, key)
-        server = ThreadingHTTPServer(("0.0.0.0", HTTPS_PORT), Handler)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server = build_https_server(cert, key)
         print(f"WEB_REMOTE_READY_TLS port={HTTPS_PORT}", flush=True)
         server.serve_forever()
     except Exception as exc:  # noqa: BLE001 - TLS is a bonus, never fatal
@@ -2706,6 +3262,7 @@ def serve_https() -> None:
 
 
 def main() -> int:
+    direct_gamepad.start()
     threading.Thread(target=spin_ros, daemon=True).start()
     threading.Thread(target=serve_https, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
@@ -2713,6 +3270,7 @@ def main() -> int:
     try:
         server.serve_forever()
     finally:
+        direct_gamepad.shutdown()
         control.stop()
         control.destroy_node()
         rclpy.shutdown()

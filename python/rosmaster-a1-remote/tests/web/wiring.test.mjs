@@ -188,6 +188,88 @@ test("BUG M6: outside Auto Nav the Command readout still shows this page's own c
   assert.equal(page.el("commandValue").textContent, "0.40 / 0.00");
 });
 
+test("WIRING: the dashboard shows a direct controller and its active command source", async () => {
+  const page = await freshPage();
+  page.fake.status.direct_gamepad = {
+    worker_ok: true,
+    connected: true,
+    compatible: true,
+    owned: true,
+    stable_id: "usb-xbox-event-joystick",
+    name: "Xbox Wireless Controller",
+    reason: "direct_gamepad_active",
+  };
+  page.fake.status.control.active_source = "direct_gamepad";
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.equal(page.el("directGamepadValue").textContent, "Active Xbox Wireless Controller");
+  assert.equal(page.el("sourceValue").textContent, "direct gamepad");
+});
+
+test("WIRING: an owned direct controller feeds the diagnostics panels from its live block", async () => {
+  const page = await freshPage();
+  page.fake.status.direct_gamepad = {
+    worker_ok: true,
+    connected: true,
+    compatible: true,
+    owned: true,
+    stable_id: "28:ea:0b:ef:b6:51",
+    name: "Xbox Wireless Controller",
+    reason: "direct_gamepad_active",
+    live: {
+      steer: -0.25,
+      forward: 1,
+      reverse: 0,
+      pressed: ["a", "rb"],
+      linear_x: 1.5,
+      steering_y: -0.084,
+      command_age_s: 0.04,
+      actions: [{ action: "armed", detail: "", age_s: 3.1 }],
+    },
+  };
+  page.fake.status.control.active_source = "direct_gamepad";
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.match(page.el("padAxes").textContent, /forward 1\.00/);
+  assert.equal(page.el("padButtons").textContent, "a rb");
+  assert.match(page.el("padDrive").textContent, /linear_x 1\.50/);
+  assert.match(page.el("padResponse").textContent, /ago/);
+  assert.match(page.el("padLog").textContent, /3\.1s ago\s+armed/);
+});
+
+test("WIRING: without direct live data the diagnostics panels keep their browser texts", async () => {
+  const page = await freshPage();
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.equal(page.el("padAxes").textContent, "none");
+  assert.equal(page.el("padDrive").textContent, "none sent yet");
+  assert.equal(page.el("padResponse").textContent, "never");
+});
+
+test("WIRING: ambiguous direct controllers are shown as fail-closed, not ready", async () => {
+  const page = await freshPage();
+  page.fake.status.direct_gamepad = {
+    worker_ok: true,
+    connected: false,
+    compatible: true,
+    compatible_devices: 2,
+    owned: false,
+    stable_id: "",
+    name: "",
+    reason: "multiple_compatible_gamepads",
+  };
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.equal(page.el("directGamepadValue").textContent, "multiple compatible gamepads");
+});
+
 // Part 2: the wiring the mutation run walked through =========================
 
 test("WIRING: a hardStop frame never lets the held throttle reach the motors", async () => {
@@ -605,7 +687,10 @@ test("GALLERY: one tile per feed the car reports, in the order it reports them",
   const page = await freshPage();
   assert.deepEqual(feedsOf(page), ["hp60c_depth", "hp60c_rgb"]);
   assert.equal(page.tile("hp60c_depth").label.textContent, "Depth");
-  assert.match(page.tile("hp60c_rgb").img.src, /stream_hp60c_rgb\.mjpg/);
+  // One stream at a time: the first feed auto-expands and streams; the other
+  // tile exists but rents no socket (see tests/web/feeds.test.mjs for why).
+  assert.match(page.tile("hp60c_depth").img.src, /frame_hp60c_depth\.jpg/);
+  assert.equal(page.tile("hp60c_rgb").img.src, "");
 });
 
 test("GALLERY: a feed the car does not report gets no tile at all", async () => {
@@ -634,7 +719,7 @@ test("GALLERY: a feed added to the registry later appears with no change to the 
   await page.settle();
 
   assert.deepEqual(feedsOf(page), ["hp60c_depth", "hp60c_rgb", "hp60c_ir"]);
-  assert.match(page.tile("hp60c_ir").img.src, /stream_hp60c_ir\.mjpg/);
+  assert.equal(page.tile("hp60c_ir").img.src, "", "a new tile appears disconnected; only the expanded feed streams");
 });
 
 test("GALLERY: a stale feed is marked on screen rather than left as a silently frozen frame", async () => {
@@ -735,17 +820,19 @@ test("GALLERY: X cycles which feed is expanded and then back to the gallery", as
   const page = await freshPage();
   page.run("state.gamepadEnabled = true;");
 
-  padFrame(page, { 2: { pressed: true } });
-  padFrame(page, {});
-  assert.equal(page.state.expandedFeed, "hp60c_depth");
-
+  // The page now opens with the first feed already expanded, so the cycle
+  // starts one step in: rgb, then the gallery, then depth again.
   padFrame(page, { 2: { pressed: true } });
   padFrame(page, {});
   assert.equal(page.state.expandedFeed, "hp60c_rgb");
 
   padFrame(page, { 2: { pressed: true } });
-  await page.settle();
+  padFrame(page, {});
   assert.equal(page.state.expandedFeed, null, "the pad needs a way out of an expanded feed, not only a way in");
+
+  padFrame(page, { 2: { pressed: true } });
+  await page.settle();
+  assert.equal(page.state.expandedFeed, "hp60c_depth");
 });
 
 test("GALLERY: an expanded feed that vanishes from the registry falls back to the gallery", async () => {
@@ -768,7 +855,9 @@ test("GALLERY: two tiles failing together do not retry together", async () => {
   page.tile("hp60c_rgb").img.dispatch("error", {});
   await page.settle();
 
-  const delays = page.timeouts;
+  // The expanded tile's poll loop also arms a long stall bound per frame;
+  // only the sub-stall delays are the retries this test reasons about.
+  const delays = page.timeouts.filter((ms) => ms < 3000);
   assert.equal(delays.length, 2, "each tile schedules its own retry");
   assert.notEqual(delays[0], delays[1], "several MJPEG reconnects on the same instant is the burst that starved the server");
   assert.ok(Math.min(...delays) >= 1000, "the one second wait before a retry is kept");
@@ -793,40 +882,39 @@ test("GALLERY: an errored tile really does reopen its stream", async () => {
   await page.settle();
 
   assert.notEqual(page.tile("hp60c_depth").img.src, before);
-  assert.match(page.tile("hp60c_depth").img.src, /stream_hp60c_depth\.mjpg/);
+  assert.match(page.tile("hp60c_depth").img.src, /frame_hp60c_depth\.jpg/);
 });
 
-test("GALLERY: the periodic refresh moves one tile at a time, round robin", async () => {
+test("GALLERY: the periodic refresh touches only the expanded feed's stream", async () => {
   const page = await freshPage();
   const before = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
 
   page.run("reconnectNextFeed()");
   const afterFirst = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
-  assert.notEqual(afterFirst[0], before[0]);
-  assert.equal(afterFirst[1], before[1], "the periodic refresh must not reopen every stream at once");
+  assert.notEqual(afterFirst[0], before[0], "the expanded feed's stream is refreshed on its turn");
+  assert.equal(afterFirst[1], "", "a disconnected tile stays disconnected");
 
   page.run("reconnectNextFeed()");
   const afterSecond = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
-  assert.equal(afterSecond[0], afterFirst[0]);
-  assert.notEqual(afterSecond[1], afterFirst[1]);
+  assert.equal(afterSecond[0], afterFirst[0], "the non-expanded tile's turn is a no-op, not a reopen");
+  assert.equal(afterSecond[1], "");
 });
 
-test("GALLERY: the View button reconnects every tile, staggered", async () => {
+test("GALLERY: the View button reopens the expanded stream and leaves the rest disconnected", async () => {
   const page = await freshPage();
   page.clearCalls();
-  const before = ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src);
+  const before = page.tile("hp60c_depth").img.src;
 
   page.run("applyGamepadAction({ type: 'reconnectCamera' })");
   await page.settle();
 
-  const delays = page.timeouts;
-  assert.equal(delays.length, 2);
+  // Sub-stall delays only: the reopened poll loop arms its own long stall
+  // bound, which is not one of the staggered retries being counted here.
+  const delays = page.timeouts.filter((ms) => ms < 3000);
+  assert.equal(delays.length, 2, "each tile still schedules its own staggered retry");
   assert.notEqual(delays[0], delays[1]);
-  assert.deepEqual(
-    ["hp60c_depth", "hp60c_rgb"].map((id) => page.tile(id).img.src === before[id === "hp60c_depth" ? 0 : 1]),
-    [false, false],
-    "every feed reopens, just not all on the same instant",
-  );
+  assert.notEqual(page.tile("hp60c_depth").img.src, before, "the expanded stream reopens");
+  assert.equal(page.tile("hp60c_rgb").img.src, "", "a tile that is not expanded must not gain a socket from a reconnect");
 });
 
 test("GALLERY: a car that reports no cameras renders an empty gallery rather than breaking the page", async () => {
@@ -946,4 +1034,131 @@ test("TRANSPORT: a second throttle does queue behind the first, rather than pili
   const manualSpeed = Number(page.el("speedInput").value);
   assert.ok(Math.abs(drive[1].body.linear_x - 0.25 * manualSpeed) < 1e-9,
     "the queued send must carry the newest stick position, not a stale one");
+});
+
+// Part 3: bounded fetches ====================================================
+//
+// The server wedged on the car once and every fetch on this page waited on it
+// forever, because nothing had a timeout. A hang never rejects, so none of the
+// existing catch/finally paths ever ran: driveInFlight above stayed stuck true
+// and every gamepad command after the one hung POST was silently dropped, the
+// status poll stacked a new connection every 750 ms tick with nothing to stop
+// it, and the only failure indicator (setConnection(false, ...)) never fired
+// because it only runs on a rejection. These tests hold a fetch open the way
+// the wedged server did and prove the page recovers instead of bricking.
+
+test("RESILIENCE: a hung drive POST times out, so the guard it left behind does not block the next command", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/drive");
+  page.run("state.armed = true; state.left = { x: 0, y: -1 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 1, "the throttle is on the wire and not yet answered");
+
+  // Simulate FETCH_TIMEOUT_MS actually elapsing on a server that never answers.
+  page.expireFetchTimeouts();
+  await page.settle();
+
+  // driveInFlight must be false again: a second non-zero command, which would
+  // otherwise queue behind an outstanding request forever, has to go out
+  // immediately rather than being silently dropped like every command after
+  // the one hung POST in the field.
+  page.run("state.left = { x: 0, y: -0.5 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 2,
+    "a timed-out drive must self-heal, not drop every command that follows it");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a throttle queued behind a drive that then times out still goes out, not lost with it", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/drive");
+  page.run("state.armed = true; state.left = { x: 0, y: -1 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 1);
+
+  // A second, different throttle arrives while the first is still in flight,
+  // so it queues rather than piling a second connection on top of the first.
+  page.run("state.left = { x: 0, y: -0.5 }; sendDriveIfNeeded();");
+  await page.settle();
+  assert.equal(page.posts("/api/drive").length, 1, "still queued, the first request has not answered");
+
+  // The first request times out instead of ever answering. The finally in
+  // sendDrive that clears driveQueued and re-fires it must run all the same,
+  // the same way it already does when a held request is released normally
+  // (see the TRANSPORT test above); a timeout must not be a second way for a
+  // queued command to be dropped on the floor.
+  page.expireFetchTimeouts();
+  await page.settle();
+
+  const drive = page.posts("/api/drive");
+  assert.equal(drive.length, 2, "the queued throttle must still go out once the guard clears");
+  const manualSpeed = Number(page.el("speedInput").value);
+  assert.ok(Math.abs(drive[1].body.linear_x - 0.5 * manualSpeed) < 1e-9,
+    "and it must carry the value that was queued, not a stale one");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a hung status fetch is not re-issued by the next poll tick", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/status");
+
+  page.run("refreshStatus()");
+  await page.settle();
+  const gets = () => page.calls.filter((call) => call.path === "/api/status" && call.method === "GET");
+  assert.equal(gets().length, 1, "the first poll's fetch is on the wire");
+
+  // The 750 ms setInterval tick calls refreshStatus() again; the in-flight
+  // guard must find the previous fetch still outstanding and skip it rather
+  // than stacking a second connection on top of it, the way the wedged
+  // server's poll did in the field.
+  page.run("refreshStatus()");
+  await page.settle();
+  assert.equal(gets().length, 1, "a tick while the previous poll is still outstanding must not stack a request");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a hung /api/gamepad post is not re-issued while one is outstanding", async () => {
+  const page = await freshPage();
+  page.fake.held.add("/api/gamepad");
+
+  page.run("state.gamepadLastReportAt = -1000;");
+  padFrame(page, { 0: { pressed: true } });
+  await page.settle();
+  assert.equal(page.posts("/api/gamepad").length, 1, "the first report is on the wire");
+
+  // Force past the 100 ms throttle again so it is the in-flight guard under
+  // test here, not the throttle, that stops the second post.
+  page.run("state.gamepadLastReportAt = -1000;");
+  padFrame(page, { 0: { pressed: true } });
+  await page.settle();
+  assert.equal(page.posts("/api/gamepad").length, 1, "a post already outstanding must not be stacked");
+
+  page.expireFetchTimeouts();
+  await page.settle();
+});
+
+test("RESILIENCE: a status fetch that times out flips the connection indicator offline, the path a rejection already took", async () => {
+  const page = await freshPage();
+  assert.equal(page.state.lastStatusOk, true, "the initial poll in freshPage() already succeeded");
+  page.fake.held.add("/api/status");
+
+  page.run("refreshStatus()");
+  await page.settle();
+  assert.equal(page.state.lastStatusOk, true, "still waiting on the hung fetch, nothing has failed yet");
+
+  // A hang never rejects on its own, which is exactly why the operator saw no
+  // failure indicator in the field: setConnection(false, ...) only runs from
+  // a catch. The timeout is what turns the hang into a rejection.
+  page.expireFetchTimeouts();
+  await page.settle();
+
+  assert.equal(page.el("statusDot").className, "dot bad");
+  assert.equal(page.el("statusText").textContent, "Remote offline");
+  assert.equal(page.state.lastStatusOk, false);
 });

@@ -23,6 +23,16 @@ from Rosmaster_Lib import Rosmaster
 # because raising it achieves anything.
 MAX_VX = float(os.environ.get("ROSMASTER_MAX_VX", "1.8"))
 
+# The base-side dead-man. The web service already publishes /cmd_vel at 20 Hz
+# even when idle, so in normal operation this never fires: it exists for the
+# day the publisher itself disappears. That day happened -- the web container
+# restarted mid-throttle, /cmd_vel went silent, and the board held the last
+# motion command it had been given while the car drove on with nobody able to
+# stop it. One second of silence from a 20 Hz stream means the stream is gone,
+# not late. Tunable within limits, but capped: a safety bound an environment
+# variable can undo is not a safety bound.
+DEADMAN_TIMEOUT_S = min(max(float(os.environ.get("ROSMASTER_DEADMAN_S", "1.0")), 0.2), 5.0)
+
 def finite(value, fallback=0.0):
     try:
         value = float(value)
@@ -55,7 +65,20 @@ class RosmasterBaseBridge(Node):
         self.frame_counts = {}
         self.version = None
         self.last_command = Twist()
-        self.last_command_time = 0.0
+        # Seeded with now, not 0.0: a bridge that has never heard a command
+        # should not open by declaring the operator missing. The dead-man
+        # engages only after commands have actually been absent for the
+        # timeout, and _open_bot's zero write covers the window before the
+        # first command arrives.
+        self.last_command_time = time.time()
+        self.deadman_active = False
+        # Motion as parsed from the board's own speed report frames
+        # (FUNC_REPORT_SPEED in read_loop), for the CMD_WRITE log. The vendor
+        # library's get_motion_data() only returns caches its receive thread
+        # fills, and this bridge runs its own read loop instead of that
+        # thread, so asking the library always returned zeros.
+        self.last_motion = None
+        self.last_motion_time = 0.0
 
         self.create_subscription(Twist, "/cmd_vel", self.on_cmd_vel, 10)
         self.status_pub = self.create_publisher(String, "/base_bridge/status", 10)
@@ -68,6 +91,7 @@ class RosmasterBaseBridge(Node):
 
         self.create_timer(1.0, self.publish_status)
         self.create_timer(5.0, self.request_version)
+        self.create_timer(0.1, self.check_deadman)
         threading.Thread(target=self.connect_loop, daemon=True).start()
 
     def candidate_ports(self):
@@ -77,6 +101,8 @@ class RosmasterBaseBridge(Node):
             "/dev/myserial",
             "/dev/ttyUSB1",
             "/dev/ttyUSB2",
+            # ttyUSB0 is deliberately omitted: it's the LiDAR's usual slot (see
+            # the entrypoint comment for the port-ownership policy).
         ]
         seen = set()
         for candidate in candidates:
@@ -91,25 +117,7 @@ class RosmasterBaseBridge(Node):
                 continue
             for port in self.candidate_ports():
                 try:
-                    self.get_logger().info(f"opening Rosmaster serial port {port}")
-                    bot = Rosmaster(com=port, debug=False)
-                    with self.write_lock:
-                        bot.set_car_type(9)
-                        bot.set_auto_report_state(True)
-                    try:
-                        bot.ser.reset_input_buffer()
-                    except Exception:
-                        pass
-                    with self.lock:
-                        self.bot = bot
-                        self.port = port
-                        self.connected = True
-                        self.last_error = None
-                        self.last_frame_time = 0.0
-                        self.frame_counts = {}
-                        self.version = None
-                    threading.Thread(target=self.read_loop, args=(bot, port), daemon=True).start()
-                    self.get_logger().info(f"Rosmaster serial connected on {port}")
+                    self._open_bot(port)
                     break
                 except Exception as exc:
                     with self.lock:
@@ -117,11 +125,67 @@ class RosmasterBaseBridge(Node):
                     self.get_logger().warning(f"Rosmaster serial open failed on {port}: {exc}")
             time.sleep(2.0)
 
+    def _open_bot(self, port):
+        self.get_logger().info(f"opening Rosmaster serial port {port}")
+        bot = Rosmaster(com=port, debug=False)
+        with self.write_lock:
+            bot.set_car_type(9)
+            bot.set_auto_report_state(True)
+            # A (re)connect is the moment to countermand whatever the board
+            # was last told. The board holds its last motion command through a
+            # serial dropout, and the CH340 adapter has been seen dropping off
+            # the USB bus mid-drive: without this zero the car that "lost
+            # connection" keeps driving until something happens to reconnect
+            # and say otherwise. This is that something.
+            bot.set_car_motion(0, 0, 0)
+        try:
+            bot.ser.reset_input_buffer()
+        except Exception:
+            pass
+        with self.lock:
+            self.bot = bot
+            self.port = port
+            self.connected = True
+            self.last_error = None
+            self.last_frame_time = 0.0
+            self.frame_counts = {}
+            self.version = None
+        threading.Thread(target=self.read_loop, args=(bot, port), daemon=True).start()
+        self.get_logger().info(f"Rosmaster serial connected on {port}")
+
+    def check_deadman(self):
+        with self.lock:
+            bot = self.bot if self.connected else None
+            age = time.time() - self.last_command_time
+            engaged = self.deadman_active
+        if bot is None or age <= DEADMAN_TIMEOUT_S:
+            return
+        if not engaged:
+            with self.lock:
+                self.deadman_active = True
+            self.get_logger().warning(
+                f"DEADMAN engaged: no /cmd_vel for {age:.2f}s (limit {DEADMAN_TIMEOUT_S}s); zeroing motors"
+            )
+        # Zero on every tick while engaged, not once: a single write can be
+        # lost to the same serial trouble that made the commands stop.
+        try:
+            with self.write_lock:
+                bot.set_car_motion(0, 0, 0)
+        except Exception as exc:
+            with self.lock:
+                self.connected = False
+                self.last_error = f"deadman write failed: {exc}"
+            self.get_logger().warning(f"deadman write failed: {exc}")
+
     def on_cmd_vel(self, msg):
         with self.lock:
             self.last_command = msg
             self.last_command_time = time.time()
+            released = self.deadman_active
+            self.deadman_active = False
             bot = self.bot if self.connected else None
+        if released:
+            self.get_logger().info("DEADMAN released: /cmd_vel resumed")
         if bot is None:
             return
         # This clamp, not the speed slider, is the throttle ceiling. Raising it
@@ -142,10 +206,13 @@ class RosmasterBaseBridge(Node):
                 now = time.time()
                 if now - getattr(self, "_last_cmd_log", 0.0) >= 0.5:
                     self._last_cmd_log = now
-                    try:
-                        measured = bot.get_motion_data()
-                    except Exception as exc:  # noqa: BLE001
-                        measured = f"unavailable: {exc}"
+                    # From our own parsed speed frames, never the vendor
+                    # library: get_motion_data() reads caches only its
+                    # receive thread fills, and we run read_loop instead of
+                    # that thread, so it reported zeros forever -- exactly
+                    # the false "car not moving" reading this log was added
+                    # to rule out.
+                    measured = self._measured_motion() or "no speed frames yet"
                     self.get_logger().info(
                         "CMD_WRITE " + json.dumps({
                             "sent": {"vx": vx, "steering": steering, "angular": angular},
@@ -173,12 +240,21 @@ class RosmasterBaseBridge(Node):
                 "last_command_age_s": round(time.time() - self.last_command_time, 3)
                 if self.last_command_time
                 else None,
+                "deadman_active": self.deadman_active,
             }
         msg = String()
         msg.data = json.dumps(payload, sort_keys=True)
         self.status_pub.publish(msg)
         if version is not None:
             self.publish_edition(version)
+
+    def _measured_motion(self):
+        with self.lock:
+            if self.last_motion is None:
+                return None
+            motion = dict(self.last_motion)
+            motion["age_s"] = round(time.time() - self.last_motion_time, 3)
+        return motion
 
     def request_version(self):
         with self.lock:
@@ -248,6 +324,9 @@ class RosmasterBaseBridge(Node):
             vy = struct.unpack("h", data[2:4])[0] / 1000.0
             vz = struct.unpack("h", data[4:6])[0] / 1000.0
             volts = data[6] / 10.0
+            with self.lock:
+                self.last_motion = {"vx": vx, "vy": vy, "vz": vz}
+                self.last_motion_time = time.time()
             twist = Twist()
             twist.linear.x = vx
             twist.linear.y = vy

@@ -395,6 +395,33 @@ function controlModeText(uiState) {
   return "Disarmed";
 }
 
+// directPanelModel turns the direct worker's live block from /api/status into
+// the diagnostics panel texts. In direct mode the browser holds no pad and
+// posts no drives, so without this the panels would sit on "none" while the
+// car is actively being driven. A browser pad keeps the panels only while
+// direct control is unowned: once the on-car worker owns the drive, its data
+// is the truth the operator needs.
+function directPanelModel(directGamepad, browserPadCount) {
+  const view = directGamepad || {};
+  const live = view.live;
+  if (!live || !view.connected) return null;
+  if (!view.owned && browserPadCount > 0) return null;
+  return {
+    axesText: `steer ${live.steer.toFixed(2)}  forward ${live.forward.toFixed(2)}  reverse ${live.reverse.toFixed(2)}`,
+    buttonsText: live.pressed && live.pressed.length ? live.pressed.join(" ") : "none",
+    driveText:
+      live.linear_x == null
+        ? "none sent yet"
+        : `linear_x ${live.linear_x.toFixed(2)} steering_y ${live.steering_y.toFixed(2)}`,
+    responseText: live.command_age_s == null ? "never" : `accepted ${live.command_age_s.toFixed(1)}s ago`,
+    logText: (live.actions || []).length
+      ? live.actions
+          .map((entry) => `${entry.age_s.toFixed(1)}s ago  ${entry.action}${entry.detail ? `  ${entry.detail}` : ""}`)
+          .join("\n")
+      : "No controller actions yet.",
+  };
+}
+
 // nextControlState is the single place that decides armed/auto/gamepadEnabled
 // for a mode change. Every branch carries gamepadEnabled through untouched:
 // no mode change may switch off the pad, because the pad is how the operator
@@ -1128,6 +1155,7 @@ if (typeof module !== 'undefined' && module.exports) {
     computeDisconnectStep,
     computeMissingPadStep,
     controlModeText,
+    directPanelModel,
     gamepadClamp,
     nextControlState,
     planStatusStopFollowUp,

@@ -19,6 +19,9 @@ const state = {
   cameraFeeds: [],
   feedIds: [],
   expandedFeed: null,
+  // True while the control-channel circuit breaker holds every camera stream
+  // closed so the connection pool serves driving first. See suspendFeeds.
+  feedsSuspended: false,
   left: { x: 0, y: 0 },
   // Everything the Controller panel paints. It is kept on state rather than
   // read off the DOM so a test can assert on what the page decided, and it is
@@ -30,6 +33,7 @@ const state = {
   padSelectionLevel: "warn",
   padAxesText: "none",
   padButtonsText: "none",
+  directPanel: null,
   padSourceText: "none",
   // The WebHID fallback's whole state. It is a fallback and not a replacement:
   // nothing here is consulted while navigator.getGamepads lists a pad, and the
@@ -126,6 +130,8 @@ const els = {
   autoReadyValue: document.getElementById("autoReadyValue"),
   autoValue: document.getElementById("autoValue"),
   gamepadValue: document.getElementById("gamepadValue"),
+  directGamepadValue: document.getElementById("directGamepadValue"),
+  sourceValue: document.getElementById("sourceValue"),
   lidarStats: document.getElementById("lidarStats"),
   lidarCanvas: document.getElementById("lidarCanvas"),
   frontValue: document.getElementById("frontValue"),
@@ -204,14 +210,44 @@ function scaledCommand() {
   };
 }
 
+// FETCH_TIMEOUT_MS bounds every fetch this page makes. The server wedged on
+// the car once, and nothing here had a timeout: every fetch waited on it
+// forever. A hang never rejects, so none of the existing catch/finally paths
+// ever ran to notice: driveInFlight below stayed stuck true and silently
+// dropped every gamepad command after the one hung POST, the status poll
+// stacked a new connection every 750 ms tick, and setConnection(false, ...)
+// never fired because it only runs from a rejection. Worse, this hardware
+// keeps four MJPEG streams open at all times, which already holds four of
+// Chrome's six per-origin sockets; wedged fetches piling up on the rest is
+// what made even a page refresh queue forever. 4000 ms sits comfortably above
+// the drive POST's 1212 ms 90th-percentile latency (server.py's
+// CommandFreshness docstring) and comfortably below where an operator gives
+// up and reloads.
+const FETCH_TIMEOUT_MS = 4000;
+
 async function postJson(path, payload) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload || {}),
-  });
-  if (!response.ok) throw new Error(`${path} ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`${path} ${response.status}`);
+    // Every POST here is control traffic on the origin the streams share, so
+    // its outcome feeds the circuit breaker (see suspendFeeds).
+    noteControlSuccess();
+    return response.json();
+  } catch (error) {
+    noteControlFailure();
+    throw error;
+  } finally {
+    // Cleared on every outcome, timeout included, so a request that answers
+    // just under the wire never leaves a stray abort() scheduled behind it.
+    clearTimeout(timer);
+  }
 }
 
 // The drive sender ==========================================================
@@ -555,16 +591,77 @@ const cameraTiles = new Map();
 
 // A monotonic cache buster, seeded from the wall clock so a reload cannot
 // reuse the previous page's URLs. A counter rather than Date.now() at the call
-// site because two reconnects inside the same millisecond would otherwise
-// produce the same URL, and the browser may then not reopen the stream at all.
+// site because two requests inside the same millisecond would otherwise
+// produce the same URL, and the browser may then not issue one at all.
 let feedStreamSerial = Date.now();
 
 // Which tile the periodic refresh reaches next.
 let periodicFeedIndex = -1;
 
-function feedStreamUrl(feed) {
+// The expanded tile POLLS single JPEG frames; it never opens an MJPEG
+// stream. Safari does not reliably release the connection behind an MJPEG
+// <img>: each stream churn left one ESTABLISHED connection parked in its
+// networking process until the six-per-host cap was full, at which point
+// every drive, gamepad and status fetch hung behind sockets nothing would
+// ever free -- six parked connections in lsof, observed live 2026-08-06,
+// while the car answered every other client. A frame request completes, so
+// it borrows a keep-alive connection for tens of milliseconds and hands it
+// back; there is nothing left for a browser to hold wrong.
+const FRAME_INTERVAL_MS = 150;
+const FRAME_STALL_MS = 5000;
+
+function feedFrameUrl(feed) {
   feedStreamSerial += 1;
-  return `${feed.path}?r=${feedStreamSerial}`;
+  // Older servers advertise no frame path; derive it so a new page against
+  // an old car degrades to a 404 per poll rather than a dead tile.
+  return `${feed.frame || `/frame_${feed.id}.jpg`}?r=${feedStreamSerial}`;
+}
+
+// advanceFrame issues one frame request and arms the stall bound for it. The
+// seq counter is the loop's ownership token: whoever bumps it owns the loop,
+// and every scheduled continuation quietly dies if the seq has moved on.
+function advanceFrame(tile) {
+  tile.frameSeq = (tile.frameSeq || 0) + 1;
+  const seq = tile.frameSeq;
+  tile.img.src = feedFrameUrl(tile.feed);
+  setTimeout(() => {
+    if (tile.frameSeq !== seq || tile.frameSettled === seq) return;
+    if (state.feedsSuspended || state.expandedFeed !== tile.feed.id) return;
+    // Neither load nor error ever arrived: the request is hung. A hung
+    // frame must not end the poll loop -- ask again.
+    advanceFrame(tile);
+  }, FRAME_STALL_MS);
+}
+
+function scheduleNextFrame(tile) {
+  const seq = tile.frameSeq;
+  setTimeout(() => {
+    if (tile.frameSeq !== seq) return;
+    if (state.feedsSuspended || state.expandedFeed !== tile.feed.id) return;
+    advanceFrame(tile);
+  }, FRAME_INTERVAL_MS);
+}
+
+function buildTileImg(feed) {
+  const img = document.createElement("img");
+  img.classList.add("tile-image");
+  img.alt = `${feed.label || feed.id} camera feed`;
+  img.addEventListener("load", () => {
+    const tile = cameraTiles.get(feed.id);
+    if (!tile || tile.img !== img) return;
+    tile.frameSettled = tile.frameSeq;
+    scheduleNextFrame(tile);
+  });
+  // Errors ride the existing reconnect machinery: one pending retry per
+  // tile, staggered per tile index, funnelling back into reconnectFeed.
+  // This also covers the 404 a frame poll gets before the car has encoded
+  // its first JPEG for a freshly opened lease.
+  img.addEventListener("error", () => {
+    const tile = cameraTiles.get(feed.id);
+    if (tile && tile.img === img) tile.frameSettled = tile.frameSeq;
+    scheduleFeedReconnect(feed.id);
+  });
+  return img;
 }
 
 function createCameraTile(feed, index) {
@@ -578,22 +675,24 @@ function createCameraTile(feed, index) {
   status.classList.add("tile-state");
   bar.appendChild(label);
   bar.appendChild(status);
-  const img = document.createElement("img");
-  img.classList.add("tile-image");
-  img.alt = `${feed.label || feed.id} camera feed`;
+  const img = buildTileImg(feed);
   root.appendChild(bar);
   root.appendChild(img);
 
+  // No src here: a tile connects only when it becomes the expanded feed.
+  // Four permanent streams once rented four of the browser's six per-origin
+  // sockets and left drive, gamepad and status to fight over two, which on a
+  // slow link collapsed into the page going silent mid-drive. One stream at
+  // a time is the budget.
   const tile = { root, img, label, state: status, feed, index, reconnectPending: false };
   root.addEventListener("click", () => toggleExpandedFeed(feed.id));
-  img.addEventListener("error", () => scheduleFeedReconnect(feed.id));
-  img.src = feedStreamUrl(feed);
   return tile;
 }
 
 function renderCameraGallery(feeds) {
   const list = Array.isArray(feeds) ? feeds.filter((feed) => feed && feed.id && feed.path) : [];
   const wanted = new Set(list.map((feed) => feed.id));
+  const firstRender = cameraTiles.size === 0 && list.length > 0;
   for (const [id, tile] of [...cameraTiles]) {
     if (wanted.has(id)) continue;
     els.cameraGallery.removeChild(tile.root);
@@ -620,6 +719,11 @@ function renderCameraGallery(feeds) {
   // An expanded view of a feed that is no longer reported is a blank screen,
   // so the gallery takes back over.
   if (state.expandedFeed && !wanted.has(state.expandedFeed)) state.expandedFeed = null;
+  // The first feed the car reports is expanded on arrival, so the page opens
+  // with its one allowed stream live rather than a wall of dark tiles. Only
+  // on the first render: an operator who later collapses to the gallery has
+  // chosen no stream, and the next poll must not overrule them.
+  if (firstRender && !state.expandedFeed) setExpandedFeed(list[0].id);
   renderGalleryLayout();
 }
 
@@ -635,10 +739,19 @@ function renderGalleryLayout() {
     : "no feeds reported";
 }
 
-// setExpandedFeed is the only writer of state.expandedFeed. An id with no tile
+// setExpandedFeed is the only writer of state.expandedFeed, and with it the
+// only mover of the page's single stream connection. An id with no tile
 // behind it collapses to the gallery rather than showing nothing.
 function setExpandedFeed(id) {
-  state.expandedFeed = id && cameraTiles.has(id) ? id : null;
+  const next = id && cameraTiles.has(id) ? id : null;
+  const previous = state.expandedFeed;
+  state.expandedFeed = next;
+  if (previous && previous !== next && cameraTiles.has(previous)) {
+    // Closing before opening, so the old and new stream never hold two
+    // sockets at once.
+    cameraTiles.get(previous).img.src = "";
+  }
+  if (next && next !== previous) reconnectFeed(next);
   renderGalleryLayout();
 }
 
@@ -648,8 +761,63 @@ function toggleExpandedFeed(id) {
 
 function reconnectFeed(id) {
   const tile = cameraTiles.get(id);
-  if (!tile) return;
-  tile.img.src = feedStreamUrl(tile.feed);
+  if (!tile || state.feedsSuspended) return;
+  // Only the expanded feed may poll. This one guard covers every caller --
+  // the periodic refresh, the img error handler, the breaker's resume and
+  // the pad's reconnect action all funnel through here.
+  if (state.expandedFeed !== id) return;
+  advanceFrame(tile);
+}
+
+// The control-channel circuit breaker ========================================
+//
+// The streams and the control traffic share one origin and therefore one
+// browser connection pool. When drive, gamepad or status fetches start
+// failing back to back, the likeliest cause on this page is that pool being
+// starved -- and even when the cause is elsewhere, closing four video streams
+// while the car is unreachable costs nothing. So: consecutive control
+// failures close every stream; control coming back reopens them, staggered,
+// after a pause. Video must never win a socket contest against driving.
+const CONTROL_FAIL_SUSPEND_THRESHOLD = 3;
+const FEED_RESUME_DELAY_MS = 5000;
+let controlFailStreak = 0;
+let feedResumeTimer = null;
+
+function noteControlSuccess() {
+  controlFailStreak = 0;
+}
+
+function noteControlFailure() {
+  controlFailStreak += 1;
+  if (controlFailStreak >= CONTROL_FAIL_SUSPEND_THRESHOLD) suspendFeeds();
+}
+
+function suspendFeeds() {
+  if (!state.feedsSuspended) {
+    state.feedsSuspended = true;
+    for (const tile of cameraTiles.values()) {
+      // src = "" aborts the in-flight stream, handing its socket back to the
+      // pool for the control traffic that is currently failing.
+      tile.img.src = "";
+    }
+  }
+  scheduleFeedResume();
+}
+
+function scheduleFeedResume() {
+  if (feedResumeTimer !== null) return;
+  feedResumeTimer = setTimeout(() => {
+    feedResumeTimer = null;
+    if (!state.feedsSuspended) return;
+    // Still failing after the pause means the page cannot reach the car at
+    // all; video would only get in the way of it trying. Check again later.
+    if (controlFailStreak > 0) {
+      scheduleFeedResume();
+      return;
+    }
+    state.feedsSuspended = false;
+    reconnectAllFeeds();
+  }, FEED_RESUME_DELAY_MS);
 }
 
 // scheduleFeedReconnect is the only path from a broken stream back to a live
@@ -756,13 +924,16 @@ function renderControllerPanel() {
   renderHidPanel();
 
   els.padSource.textContent = state.padSourceText;
-  els.padAxes.textContent = state.padAxesText;
-  els.padButtons.textContent = state.padButtonsText;
-  els.padLog.textContent = state.gamepadLog.length
-    ? state.gamepadLog.map(gamepadLogLine).join("\n")
-    : "No controller actions yet.";
-  els.padDrive.textContent = drivePayloadText(state.lastDrivePayload);
-  els.padResponse.textContent = agoText(state.lastDriveOkAt, Date.now());
+  const direct = state.directPanel;
+  els.padAxes.textContent = direct ? direct.axesText : state.padAxesText;
+  els.padButtons.textContent = direct ? direct.buttonsText : state.padButtonsText;
+  els.padLog.textContent = direct
+    ? direct.logText
+    : state.gamepadLog.length
+      ? state.gamepadLog.map(gamepadLogLine).join("\n")
+      : "No controller actions yet.";
+  els.padDrive.textContent = direct ? direct.driveText : drivePayloadText(state.lastDrivePayload);
+  els.padResponse.textContent = direct ? direct.responseText : agoText(state.lastDriveOkAt, Date.now());
 }
 
 // The WebHID fallback =======================================================
@@ -946,6 +1117,14 @@ function pressedButtons(pad) {
     .filter(Boolean);
 }
 
+// gamepadPostInFlight is the same guard driveInFlight and statusInFlight are:
+// reportGamepad already throttles itself to 10/s, but a hung post at that
+// rate is a new connection stacked every 100 ms with nothing to stop it,
+// exactly like the status poll. The throttle stays; this only skips the POST
+// itself when one is still outstanding, so the on-screen readout below still
+// updates every frame even while a slow post is in flight.
+let gamepadPostInFlight = false;
+
 function reportGamepad(pad) {
   const now = performance.now();
   if (now - state.gamepadLastReportAt < 100) return;
@@ -966,6 +1145,8 @@ function reportGamepad(pad) {
   }
   updateGamepadText();
 
+  if (gamepadPostInFlight) return;
+  gamepadPostInFlight = true;
   postJson("/api/gamepad", {
     enabled: state.gamepadEnabled,
     armed: state.armed,
@@ -976,7 +1157,7 @@ function reportGamepad(pad) {
     buttons: pad.buttons ? pad.buttons.length : 0,
     axes,
     pressed,
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => { gamepadPostInFlight = false; });
 }
 
 // applyGamepadAction is the whole dispatcher: every decision was already
@@ -1109,15 +1290,29 @@ function pollGamepad() {
   renderControllerPanel();
 }
 
+// statusInFlight is the status poll's version of driveInFlight above: a status
+// fetch that hangs must not get a second one stacked on top of it by the next
+// 750 ms tick, the way the wedged server did in the field. Unlike a drive
+// command, nothing ever needs to jump this queue, so the guard is a plain
+// skip with no exception for it: the interval itself keeps running (below),
+// only the fetch inside a tick that finds one already outstanding is skipped.
+let statusInFlight = false;
+
 async function refreshStatus() {
+  if (statusInFlight) return;
+  statusInFlight = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const status = await fetch("/api/status", { cache: "no-store" }).then((r) => r.json());
+    const status = await fetch("/api/status", { cache: "no-store", signal: controller.signal }).then((r) => r.json());
+    noteControlSuccess();
     const cameras = Array.isArray(status.cameras) ? status.cameras : [];
     const control = status.control || {};
     const limits = control.limits || {};
     const lidar = status.lidar || {};
     const auto = status.auto || {};
     const navigation = status.navigation || {};
+    const directGamepad = status.direct_gamepad || {};
     const sectors = lidar.sectors || {};
     state.limits.maxLinearX = limits.max_linear_x || state.limits.maxLinearX;
     state.limits.maxSteeringY = limits.max_steering_y || state.limits.maxSteeringY;
@@ -1154,6 +1349,16 @@ async function refreshStatus() {
     els.autoReadyValue.textContent = navigation.ready ? "Ready" : navigation.reason || "Not ready";
     els.driverValue.textContent = `${control.cmd_vel_subscribers || 0} subs`;
     els.watchdogValue.textContent = `${(limits.cmd_timeout_s || 0.5).toFixed(2)} s`;
+    state.directPanel = directPanelModel(directGamepad, state.padLines.length);
+    renderControllerPanel();
+    if (directGamepad.owned) {
+      els.directGamepadValue.textContent = `Active ${directGamepad.name || directGamepad.stable_id || directGamepad.id || "pad"}`;
+    } else if (directGamepad.connected && directGamepad.compatible && directGamepad.reason === "connected_unarmed") {
+      els.directGamepadValue.textContent = `Ready ${directGamepad.name || directGamepad.stable_id || directGamepad.id || "pad"}`;
+    } else {
+      els.directGamepadValue.textContent = String(directGamepad.reason || "waiting").replaceAll("_", " ");
+    }
+    els.sourceValue.textContent = String(control.active_source || "none").replaceAll("_", " ");
     els.lidarStats.textContent = lidar.ok ? `${lidar.finite_ranges || 0} pts` : "waiting";
     els.frontValue.textContent = meters(sectors.front && sectors.front.near_m);
     els.leftValue.textContent = meters(sectors.left && sectors.left.near_m);
@@ -1169,7 +1374,14 @@ async function refreshStatus() {
     drawLidar(lidar);
     updateReadouts();
   } catch {
+    // A hang never rejects on its own: this catch only runs because the
+    // timeout above turned it into one. Without that, a wedged server left
+    // this the only failure indicator, and it never fired.
+    noteControlFailure();
     setConnection(false, "Remote offline");
+  } finally {
+    clearTimeout(timer);
+    statusInFlight = false;
   }
 }
 

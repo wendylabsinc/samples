@@ -22,7 +22,7 @@ export CMAKE_PREFIX_PATH="${AMENT_PREFIX_PATH}"
 export LD_LIBRARY_PATH="/ros_ws/install/ydlidar_ros2_driver/lib:/ros_ws/install/yahboomcar_msgs/lib:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONPATH="/ros_ws/install/yahboomcar_ctrl/lib/python3.10/site-packages:/ros_ws/install/yahboomcar_bringup/lib/python3.10/site-packages:/ros_ws/install/yahboomcar_msgs/local/lib/python3.10/dist-packages:/opt/ros/humble/lib/python3.10/site-packages:${PYTHONPATH:-}"
 
-echo "rosmaster-a1-base starting"
+echo "rosmaster-a1 base service starting"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}"
 echo "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}"
 
@@ -48,6 +48,11 @@ unset ROSMASTER_SERIAL_PORT
 # drive command went nowhere. SERIAL_IDENTIFY lines make that visible in logs.
 # The probe reports through a file, not stdout: Rosmaster_Lib prints a banner
 # on every successful open and would otherwise end up inside the port name.
+# Only firmware-version identification (identify_serial.py) is allowed to select
+# ttyUSB0, because it proves the device is the motor board before claiming it.
+# The blind fallback below must never claim the LiDAR's usual slot: opening the
+# wrong CH340 succeeds silently, and in the merged app the base container's
+# entitlements normally don't include ttyUSB0 anyway.
 identify_out=/tmp/rosmaster_serial_port
 rm -f "${identify_out}"
 # The census is deliberately NOT run here. Opening a port to inspect it means
@@ -66,7 +71,6 @@ if [[ -n "${identified}" ]]; then
 else
   for candidate in \
     /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 \
-    /dev/ttyUSB0 \
     /dev/ttyUSB1 \
     /dev/ttyUSB2 \
     /dev/myserial; do
@@ -81,7 +85,10 @@ fi
 
 if [[ ! -e "${ROSMASTER_SERIAL_PORT}" ]]; then
   echo "No Rosmaster telemetry serial device found. Check USB entitlement/device wiring." >&2
-  sleep infinity
+  while true; do
+    echo "rosmaster-a1 base still down: no Rosmaster telemetry serial device found (ROSMASTER_SERIAL_PORT=${ROSMASTER_SERIAL_PORT:-unset}); idling for diagnostics." >&2
+    sleep 300
+  done
 fi
 
 echo "Checking Python ROS imports"
@@ -96,16 +103,53 @@ PY
 import_status=$?
 if [[ "${import_status}" -ne 0 ]]; then
   echo "Python ROS import check failed with status ${import_status}; keeping container alive for diagnostics." >&2
-  sleep infinity
+  while true; do
+    echo "rosmaster-a1 base still down: Python ROS import check failed with status ${import_status}; idling for diagnostics." >&2
+    sleep 300
+  done
 fi
+
+# Something in the Wendy runtime deletes /usr/lib/python3.10 again after the
+# restore at the top of this script (the same recurring deletion the ros2
+# shim guards against). A Python process that starts while the stdlib is
+# missing dies on its first C-extension import -- pure-Python modules still
+# resolve from /usr/lib/python310.zip, so the failure arrives as a confusing
+# ModuleNotFoundError for termios or similar. Restore before every launch and
+# relaunch on exit instead of letting a lost race kill the process for good.
+# The flock serializes concurrent restores (the two supervisors below launch
+# back-to-back, and the ros2 shim uses the same lock): an rm -rf landing while
+# another restore's tar is mid-extract leaves the tree transiently incomplete.
+restore_stdlib() {
+  if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then
+    (
+      flock 9
+      rm -rf /usr/lib/python3.10
+      tar -xzf /opt/python3.10-stdlib.tar.gz -C /usr/lib
+    ) 9>/tmp/python-stdlib-restore.lock
+  fi
+}
+
+supervise_python() {
+  local name=$1
+  shift
+  local attempt=0 backoff=5
+  while true; do
+    attempt=$((attempt + 1))
+    restore_stdlib
+    python3 "$@"
+    echo "${name} exited status=$? attempt=${attempt}; restarting in ${backoff}s" >&2
+    sleep "${backoff}"
+    backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
+  done
+}
 
 echo "Starting sensor-only probe"
 unset PROBE_RAW_LIDAR
-python3 /app/sensor_probe.py &
+supervise_python SENSOR_PROBE_SUPERVISOR /app/sensor_probe.py &
 sensor_probe_pid=$!
 
 echo "Starting direct Rosmaster base bridge with ROSMASTER_SERIAL_PORT=${ROSMASTER_SERIAL_PORT}"
-python3 /app/base_bridge.py &
+supervise_python BASE_BRIDGE_SUPERVISOR /app/base_bridge.py &
 driver_pid=$!
 
 wait "${sensor_probe_pid}" "${driver_pid}"

@@ -21,7 +21,14 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import os
+import queue
+import shutil
+import socket
+import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -36,6 +43,19 @@ APP_DIR = REPO_ROOT / "rosmaster-a1-web-remote-wendy" / "app"
 for _path in (str(STUBS_DIR), str(APP_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
+
+# server.py's background graph-count sampler thread ticks on a real timer
+# (GRAPH_COUNT_SAMPLE_INTERVAL_S), independent of anything a test does. Left
+# at its production default, a tick landing inside a test's
+# mock.patch.object(control, "count_publishers"/"count_subscribers", ...)
+# window would sample the mocked value into the shared cache behind the
+# test's back -- a real, if rare, source of flakiness, since every test
+# shares the one control singleton and its one cache. Tests prime the cache
+# explicitly via _sample_graph_counts()/_sample_graph_counts_tick() wherever
+# they need a particular value in it, so the background sampler only needs
+# to not interfere; set before import server so the one instance the module
+# constructs at import time is built with it.
+os.environ.setdefault("GRAPH_COUNT_SAMPLE_INTERVAL_S", "3600")
 
 import server  # noqa: E402  (import must follow the sys.path setup above)
 
@@ -83,6 +103,15 @@ class ServerTestCase(unittest.TestCase):
         server.control.publisher.messages.clear()
         server.control._realsense = server.control._empty_realsense()
         server.control._viewers.clear()
+        server.control._frame_polls.clear()
+        # Direct-control release intentionally leaves this latch set until a
+        # browser START. Tests share the singleton, so reset both arbitration
+        # fields explicitly rather than letting one safety test poison the
+        # unrelated endpoint test that follows it alphabetically.
+        with server.control._lock:
+            server.control._direct_owned = False
+            server.control._browser_start_required = False
+        server.direct_gamepad.note_external_stop("test_reset")
 
     def _connection(self):
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -197,6 +226,110 @@ class DriveEndpointTests(ServerTestCase):
         status, body = self._post_json("/api/drive", {"enabled": False})
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
+
+
+class DirectGamepadArbitrationTests(ServerTestCase):
+    def test_connected_but_unarmed_does_not_block_browser_control(self):
+        # Connection state belongs to the worker; only direct_acquire changes
+        # the control arbiter. With no acquisition, the ordinary browser path
+        # remains live.
+        self.assertIsNone(server.control.browser_rejection())
+        status, body = self._post_json(
+            "/api/drive",
+            {"enabled": True, "linear_x": 0.4, "steering_y": 0.0},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(body["rejected"])
+        self.assertEqual(server.control.snapshot()["active_source"], "browser")
+
+    def test_direct_owner_rejects_browser_drive_start_and_auto_with_http_200(self):
+        server.control.direct_acquire()
+        server.control.direct_update(1.0, 0.04)
+
+        requests = [
+            ("/api/drive", {"enabled": True, "linear_x": -1.0}),
+            ("/api/start", {}),
+            ("/api/auto", {"enabled": True}),
+        ]
+        for path, payload in requests:
+            with self.subTest(path=path):
+                status, body = self._post_json(path, payload)
+                self.assertEqual(status, 200)
+                self.assertTrue(body["rejected"])
+                self.assertEqual(body["reason"], "direct_gamepad_active")
+
+        command = server.control.snapshot()["command"]
+        self.assertEqual(command["source"], "direct_gamepad")
+        self.assertEqual(command["linear_x"], 1.0)
+
+    def test_direct_acquisition_between_handler_check_and_write_still_wins(self):
+        def acquire_after_early_check():
+            server.control.direct_acquire()
+            return None
+
+        with mock.patch.object(
+            server.control,
+            "browser_rejection",
+            side_effect=acquire_after_early_check,
+        ):
+            status, body = self._post_json(
+                "/api/drive",
+                {"enabled": True, "linear_x": 0.9, "steering_y": 0.0},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(body["rejected"])
+        self.assertEqual(body["reason"], "direct_gamepad_active")
+        self.assertEqual(server.control.snapshot()["command"]["source"], "direct_gamepad")
+        self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.0)
+
+    def test_browser_stop_overrides_direct_owner_and_releases_it(self):
+        server.control.direct_acquire()
+        server.control.direct_update(1.2, 0.06)
+        status, body = self._post_json("/api/stop", {})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["control"]["direct_gamepad_owned"])
+        self.assertEqual(body["control"]["command"]["linear_x"], 0.0)
+        self.assertEqual(body["control"]["active_source"], "none")
+        self.assertTrue(body["control"]["browser_start_required"])
+
+    def test_release_latches_browser_motion_until_explicit_start(self):
+        server.control.direct_acquire()
+        server.control.direct_update(0.8, 0.02)
+        server.control.direct_release("device_removed")
+
+        status, body = self._post_json("/api/drive", {"enabled": True, "linear_x": 0.9})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["rejected"])
+        self.assertEqual(body["reason"], "browser_start_required")
+        self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.0)
+
+        status, body = self._post_json("/api/auto", {"enabled": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["rejected"])
+        self.assertEqual(body["reason"], "browser_start_required")
+
+        status, body = self._post_json("/api/start", {})
+        self.assertEqual(status, 200)
+        self.assertNotIn("rejected", body)
+        self.assertFalse(body["control"]["browser_start_required"])
+
+        status, body = self._post_json("/api/drive", {"enabled": True, "linear_x": 0.3})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["rejected"])
+        self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.3)
+
+    def test_controller_stop_overrides_browser_even_before_direct_arm(self):
+        server.control.update({"enabled": True, "linear_x": 0.7})
+        server.control.direct_stop("direct_gamepad_stop")
+        snapshot = server.control.snapshot()
+        self.assertEqual(snapshot["command"]["linear_x"], 0.0)
+        self.assertTrue(snapshot["browser_start_required"])
+
+    def test_direct_auto_reports_the_actual_command_source(self):
+        server.control.direct_acquire()
+        server.control.direct_set_auto(True, 1.0)
+        self.assertEqual(server.control.snapshot()["active_source"], "direct_gamepad_auto")
 
 
 class StopEndpointTests(ServerTestCase):
@@ -376,12 +509,19 @@ class StatusEndpointTests(ServerTestCase):
             "auto",
             "navigation",
             "gamepad",
+            "direct_gamepad",
             "commands",
         ):
             self.assertIn(key, payload)
         self.assertEqual(payload["control"]["limits"]["max_steering_y"], server.MAX_STEERING_Y)
         self.assertEqual(payload["control"]["limits"]["max_angular_z"], server.MAX_ANGULAR_Z)
         self.assertEqual(payload["control"]["limits"]["max_linear_x"], server.MAX_LINEAR_X)
+        self.assertIn("active_source", payload["control"])
+        self.assertIn("worker_ok", payload["direct_gamepad"])
+        self.assertIn("stable_id", payload["direct_gamepad"])
+        self.assertIn("last_event_age_s", payload["direct_gamepad"])
+        # The browser telemetry contract stays separate and unchanged.
+        self.assertIn("ok", payload["gamepad"])
 
     def test_status_reports_the_command_enabled_flag_the_stop_confirmation_reads(self):
         """control.command.enabled is load bearing for the browser.
@@ -501,6 +641,251 @@ class KeepAliveTests(ServerTestCase):
         self.assertFalse(json.loads(raw.decode("utf-8"))["ok"])
 
 
+class LogQueueTests(ServerTestCase):
+    """Field incident: log_message fires on every request, and a rejected
+    drive command logs through CommandFreshness; both used to call
+    print(flush=True) straight from the handler thread. When the container's
+    stdout pipe stalled (log-collector backpressure), the next request to log
+    anything blocked inside that write. log_line() now only ever
+    put_nowait()s onto a bounded queue a background thread drains, so a
+    stalled sink can only ever stall the writer thread, never a handler.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_log_output = server._log_output
+        self._orig_dropped = server._LOG_DROPPED
+        server._LOG_DROPPED = 0
+        # Earlier tests' log lines may still be queued; start from empty so
+        # this test's own count of what filled/dropped is exact.
+        while True:
+            try:
+                server._LOG_QUEUE.get_nowait()
+            except queue.Empty:
+                break
+
+    def tearDown(self):
+        server._log_output = self._orig_log_output
+        server._LOG_DROPPED = self._orig_dropped
+        super().tearDown()
+
+    def test_a_stalled_log_sink_never_blocks_a_handler_thread(self):
+        release = threading.Event()
+        entered = threading.Event()
+        outputs = []
+
+        def controlled_output(line):
+            # The first line the writer thread ever picks up here simulates
+            # the stalled stdout pipe: it blocks until release fires. Every
+            # line after that (post-release) is appended immediately, which
+            # is how the drop marker below gets captured.
+            if not release.is_set():
+                entered.set()
+                release.wait()
+            outputs.append(line)
+
+        server._log_output = controlled_output
+        self.addCleanup(release.set)
+
+        # The writer thread's next dequeue may still be mid-flight against
+        # the pre-patch output function, so a line queued right at the
+        # instant of the swap can slip through before the swap is visible to
+        # it. Retry a throwaway line until one is demonstrably picked up by
+        # controlled_output (entered fires) rather than assume the first one
+        # lands; once any line is in it, the writer is stuck there for good.
+        warmups = 0
+        while not entered.wait(timeout=0.05):
+            warmups += 1
+            server.log_line(f"__warmup_{warmups}__")
+            self.assertLess(warmups, 100, "the writer thread never picked up the patched output function")
+
+        # log_message fires once per request; that line just queues up
+        # behind the writer thread, which is already stuck in
+        # controlled_output on the warmup line above.
+        status, _, _ = self._get("/")
+        self.assertEqual(status, 200)
+
+        # Push well past the queue's ~256 capacity so log_line has to start
+        # dropping rather than blocking.
+        for i in range(300):
+            server.log_line(f"filler {i}")
+
+        # The writer thread is stuck in controlled_output and the queue is
+        # full behind it. A drive POST and a GET / — each logging through
+        # the same stalled path — must still answer promptly.
+        start = time.monotonic()
+        status, _ = self._post_json("/api/drive", {"enabled": False})
+        self.assertEqual(status, 200)
+        status, _, _ = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertLess(
+            time.monotonic() - start,
+            2.0,
+            "a stalled log sink must never block a handler thread",
+        )
+
+        # Unblock the writer and let it fully drain the backlog before
+        # probing, so the marker below is unambiguously the first line
+        # queued after the drops rather than a race with leftover fillers.
+        release.set()
+        deadline = time.monotonic() + 2.0
+        while not server._LOG_QUEUE.empty() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(server._LOG_QUEUE.empty(), "the writer never drained the backlog once unblocked")
+
+        server.log_line("PROBE_AFTER_DROPS")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not any("PROBE_AFTER_DROPS" in line for line in outputs):
+            time.sleep(0.005)
+
+        probe = next((line for line in outputs if "PROBE_AFTER_DROPS" in line), None)
+        self.assertIsNotNone(probe, "the probe line never made it out of the writer thread")
+        self.assertTrue(
+            probe.startswith("LOG_DROPPED n="),
+            f"a line following drops must carry the drop marker so the gap is visible, got: {probe!r}",
+        )
+
+
+class GraphCountCacheTests(ServerTestCase):
+    """Field incident: count_publishers/count_subscribers are unbounded rclpy
+    graph queries with no timeout of their own. The drive and status response
+    paths called them directly — in RosmasterControl.snapshot,
+    _planner_depth_source, _auto_ready, hp60c_snapshot and realsense_snapshot
+    — so a stalled rmw layer hung both POST /api/drive and GET /api/status.
+    They are now sampled on their own daemon thread (_sample_graph_counts_loop)
+    and cached; a handler thread only ever reads the cache through a lock,
+    never the graph itself, and the /cmd_vel publish tick never touches the
+    graph at all.
+    """
+
+    def test_a_stalled_graph_query_does_not_block_drive_or_status(self):
+        # Prime the cache the way _sample_graph_counts_loop would, without
+        # waiting on its GRAPH_COUNT_SAMPLE_INTERVAL_S sleep: _publish() no
+        # longer samples the graph itself (that used to run on the executor
+        # thread, see _sample_graph_counts_loop's docstring for why it moved).
+        server.control._sample_graph_counts()
+
+        release = threading.Event()
+
+        def blocking(*args, **kwargs):
+            release.wait()
+            return 1
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        conn2 = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        self.addCleanup(release.set)
+        self.addCleanup(conn.close)
+        self.addCleanup(conn2.close)
+        try:
+            with mock.patch.object(server.control, "count_publishers", side_effect=blocking), mock.patch.object(
+                server.control, "count_subscribers", side_effect=blocking
+            ):
+                start = time.monotonic()
+                conn.request(
+                    "POST",
+                    "/api/drive",
+                    body=json.dumps({"enabled": False}).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                resp = conn.getresponse()
+                drive_body = json.loads(resp.read().decode())
+                self.assertEqual(resp.status, 200)
+
+                conn2.request("GET", "/api/status")
+                resp2 = conn2.getresponse()
+                status_body = json.loads(resp2.read().decode())
+                self.assertEqual(resp2.status, 200)
+
+                self.assertLess(
+                    time.monotonic() - start,
+                    2.0,
+                    "a stalled graph query must never block a handler thread",
+                )
+        finally:
+            release.set()
+
+        # And the promptness did not come from inventing numbers: both
+        # responses carried exactly the cache's last sampled (stub, zero)
+        # values, for both /cmd_vel subscribers and camera publishers.
+        self.assertEqual(drive_body["control"]["cmd_vel_subscribers"], 0)
+        self.assertEqual(status_body["control"]["cmd_vel_subscribers"], 0)
+        self.assertEqual(status_body["hp60c"]["publishers"]["depth"], 0)
+        self.assertEqual(status_body["realsense"]["publishers"]["depth"], 0)
+
+    def test_publish_never_calls_the_graph_directly_in_either_mode(self):
+        """Review finding: _sample_graph_counts() briefly ran at the top of
+        _publish(), the callback the /cmd_vel timer ticks on the single
+        threaded ROS executor -- the same thread whose saturation
+        PREVIEW_MAX_FPS's comment documents starving the command watchdog and
+        stopping the car answering the operator. count_publishers/
+        count_subscribers are exactly the unbounded rmw calls this file is
+        being hardened against, so a stall there would have frozen /cmd_vel
+        publishing itself, in every mode. Graph sampling now lives on its own
+        daemon thread; _publish() must never block on the graph, manual or
+        auto.
+        """
+        release = threading.Event()
+
+        def blocking(*args, **kwargs):
+            release.wait()
+            return 1
+
+        self.addCleanup(setattr, server.control, "_auto_state", server.control._new_auto_state())
+        with mock.patch.object(server.control, "count_publishers", side_effect=blocking), mock.patch.object(
+            server.control, "count_subscribers", side_effect=blocking
+        ):
+            self.addCleanup(release.set)
+            for auto_enabled in (False, True):
+                with self.subTest(auto_enabled=auto_enabled):
+                    server.control._auto["enabled"] = auto_enabled
+                    thread = threading.Thread(target=server.control._publish, daemon=True)
+                    start = time.monotonic()
+                    thread.start()
+                    thread.join(timeout=1.0)
+                    elapsed = time.monotonic() - start
+                    self.assertFalse(
+                        thread.is_alive(),
+                        "_publish() must never call the ROS graph directly, in "
+                        f"{'auto' if auto_enabled else 'manual'} mode ({elapsed:.2f}s and counting)",
+                    )
+        server.control._auto["enabled"] = False
+
+    def test_a_raising_graph_query_does_not_kill_the_sampler_thread(self):
+        """Review finding: _sample_graph_counts_loop was a bare `while True`
+        around the graph query with no exception guard. One RuntimeError out
+        of count_publishers -- exactly the shape a wedged rmw layer can raise
+        instead of just hanging -- would have killed this daemon thread
+        permanently: the cache freezes at its last values forever, and the
+        only signal is an unmonitored traceback via threading.excepthook.
+        Drives the tick method directly, rather than racing the real
+        thread's sleep interval, so this is deterministic.
+        """
+        control = server.control
+        control._graph_sample_failures = 0
+        logged = []
+        with mock.patch.object(server, "log_line", side_effect=logged.append):
+            with mock.patch.object(control, "count_publishers", side_effect=RuntimeError("rmw wedged")):
+                control._sample_graph_counts_tick()  # must not raise/propagate
+            self.assertEqual(control._graph_sample_failures, 1)
+            self.assertTrue(
+                any(line.startswith("GRAPH_COUNT_SAMPLE_FAILED") for line in logged),
+                "a failing sampler tick must say so once, not stay silent",
+            )
+
+            # The graph recovers on the next tick (count_publishers is no
+            # longer mocked here); the cache must follow it, and the thread
+            # -- proven alive by having a next tick at all -- must not have
+            # been silently killed by the exception above.
+            logged.clear()
+            control._sample_graph_counts_tick()
+        self.assertEqual(control._graph_sample_failures, 0)
+        self.assertTrue(
+            any(line.startswith("GRAPH_COUNT_SAMPLE_RECOVERED") for line in logged),
+            "recovering from a failed tick must say so",
+        )
+        self.assertEqual(control._cached_publisher_count(server.HP60C_DEPTH_TOPIC), 0)
+
+
 class MjpegStreamTests(ServerTestCase):
     """The MJPEG responses send no Content-Length, because the body never ends.
     Under HTTP/1.1 that is a promise the server cannot keep, so each must say
@@ -601,7 +986,7 @@ class CameraFeedRegistryTests(ServerTestCase):
         for feed in feeds:
             self.assertEqual(
                 sorted(feed),
-                ["age_s", "id", "label", "ok", "path"],
+                ["age_s", "frame", "id", "label", "ok", "path"],
                 "the client renders straight from these keys",
             )
             self.assertTrue(feed["label"], "a tile with no label tells the operator nothing")
@@ -982,6 +1367,55 @@ class CommandFreshnessTests(unittest.TestCase):
         self.assertGreaterEqual(len(logged), 1, "a rejection the operator cannot see in the logs is a rejection they cannot debug")
         self.assertLessEqual(len(logged), 3, "198 rejections in one burst must not become 198 log lines")
 
+    def test_a_blocked_log_does_not_wedge_a_concurrent_fresh_check(self):
+        """Field incident: a stale command's rejection log ran print(flush=True)
+        while check() still held self._lock. When the container's stdout pipe
+        stalled (log-collector backpressure), that write never returned, the
+        lock was never released, and a perfectly fresh drive command arriving
+        on a second connection blocked in check() waiting for a lock a log
+        line was holding. The counters and the throttling decision must still
+        happen while the lock is held; only the write itself may wait.
+        """
+        release = threading.Event()
+        entered = threading.Event()
+
+        def blocking_log(line):
+            entered.set()
+            release.wait()
+
+        freshness = server.CommandFreshness(max_age_ms=400.0, log=blocking_log)
+        freshness.check({"client_id": "a", "seq": 1, "age_ms": 5})
+
+        stale = threading.Thread(
+            target=freshness.check, args=({"client_id": "a", "seq": 2, "age_ms": 1500},), daemon=True
+        )
+        stale.start()
+        self.addCleanup(stale.join, timeout=2)
+        self.assertTrue(entered.wait(timeout=2), "the stale rejection never reached the log call")
+
+        fresh_verdict = {}
+        fresh = threading.Thread(
+            target=lambda: fresh_verdict.update(
+                v=freshness.check({"client_id": "a", "seq": 3, "age_ms": 5})
+            ),
+            daemon=True,
+        )
+        started_at = time.monotonic()
+        fresh.start()
+        self.addCleanup(fresh.join, timeout=2)
+        # Registered last so it runs first (addCleanup is LIFO): both threads
+        # are parked on release.wait() and must be freed before anything
+        # joins them, pass or fail.
+        self.addCleanup(release.set)
+        fresh.join(timeout=1.0)
+        elapsed = time.monotonic() - started_at
+
+        self.assertFalse(
+            fresh.is_alive(),
+            f"a fresh check on another connection must not wait on a wedged log call ({elapsed:.2f}s and counting)",
+        )
+        self.assertTrue(fresh_verdict.get("v", {}).get("fresh"))
+
 
 class DriveFreshnessEndpointTests(ServerTestCase):
     def setUp(self):
@@ -1121,6 +1555,11 @@ class DepthSourceTests(ServerTestCase):
         ), mock.patch.object(control, "hp60c_snapshot", return_value=hp60c), mock.patch.object(
             control, "realsense_snapshot", return_value=realsense
         ):
+            # _auto_ready reads the cmd_vel subscriber count off the cache
+            # _sample_graph_counts fills once per publish tick, not off
+            # count_subscribers directly; tick it here, patch still active,
+            # so the patched value actually reaches the cache.
+            control._sample_graph_counts()
             return control._auto_ready()
 
     def test_a_realsense_car_with_no_hp60c_can_engage_autonomy(self):
@@ -1210,6 +1649,7 @@ class DepthSourceTests(ServerTestCase):
             with self.subTest(camera=camera):
                 source = server.select_depth_source(hp60c, realsense)
                 with mock.patch.object(control, "count_subscribers", return_value=1):
+                    control._sample_graph_counts()
                     _, decision = control._compute_auto_command(scan, auto, source, update_state=False)
                 self.assertEqual(decision["depth_source"], camera)
                 self.assertTrue(decision["depth_ok"], decision["reason"])
@@ -1219,6 +1659,7 @@ class DepthSourceTests(ServerTestCase):
         scan = {"updated_at": time.monotonic(), "sectors": {"front": {"near_m": 1.4, "count": 40}}, "gap_samples": []}
         auto = {"speed": 0.4, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.6}
         with mock.patch.object(control, "count_subscribers", return_value=1):
+            control._sample_graph_counts()
             msg, decision = control._compute_auto_command(scan, auto, None, update_state=False)
         self.assertEqual(msg.linear.x, 0.0)
         self.assertIsNone(decision["depth_source"])
@@ -1231,6 +1672,7 @@ class DepthSourceTests(ServerTestCase):
         auto = {"speed": 0.4, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.6}
         source = server.select_depth_source(None, self._realsense(depth=self._usable_depth()))
         with mock.patch.object(control, "count_subscribers", return_value=1):
+            control._sample_graph_counts()
             _, decision = control._compute_auto_command(scan, auto, source, update_state=False)
         self.assertFalse(
             [key for key in decision if key.startswith("hp60c")],
@@ -1308,6 +1750,7 @@ class DepthSourceTests(ServerTestCase):
         scan = {"updated_at": time.monotonic(), "sectors": {"front": {"near_m": 1.4, "count": 40}}, "gap_samples": []}
         auto = {"speed": 0.4, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.6}
         with mock.patch.object(control, "count_subscribers", return_value=1):
+            control._sample_graph_counts()
             msg, decision = control._compute_auto_command(scan, auto, source, update_state=False)
         self.assertFalse(decision["depth_ok"])
         self.assertEqual(msg.linear.x, 0.0)
@@ -1368,6 +1811,13 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         with mock.patch.object(server.time, "monotonic", side_effect=lambda: self.clock), mock.patch.object(
             self.control, "count_subscribers", return_value=1
         ):
+            # _compute_auto_command reads the cmd_vel subscriber count off
+            # the cache _sample_graph_counts fills once per publish tick, not
+            # off count_subscribers directly; tick it here, patch still
+            # active, rather than call _publish() itself, which would also
+            # run this test's own auto-command math a tick early and disturb
+            # the auto_state this class is deliberately driving by hand.
+            self.control._sample_graph_counts()
             yield
 
     def _scan(self, front_m):
@@ -1545,6 +1995,167 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         self.assertIn("reverse_used_s", state)
         self.assertIn("reverse_used_m", state)
         self.assertGreater(state["reverse_used_s"], 0.0)
+
+
+class FrameEndpointTests(ServerTestCase):
+    """One finite JPEG per request, for browsers that cannot be trusted with
+    an infinite response.
+
+    Safari never reliably releases the connection behind an MJPEG <img>: each
+    stream churn leaked one ESTABLISHED connection until its six-per-host cap
+    was full, at which point every drive, gamepad and status fetch hung and
+    the operator's car 'froze' while perfectly healthy -- observed live
+    2026-08-06, six parked connections in lsof on the operator's machine.
+    A frame endpoint completes every request, so the page can poll the
+    expanded tile over its ordinary keep-alive pool and nothing can pin a
+    socket.
+    """
+
+    class _FakeControl:
+        def __init__(self, frame):
+            self.frame = frame
+            self.asked = []
+
+        def poll_camera_frame(self, camera, stream):
+            self.asked.append((camera, stream))
+            return self.frame
+
+    def test_every_feed_advertises_its_frame_path(self):
+        hp60c = {"depth": {"frames": 1, "ok": True, "age_s": 0.1}, "publishers": {}}
+        feeds = server.camera_feeds(hp60c=hp60c)
+        self.assertEqual(len(feeds), 1)
+        self.assertEqual(feeds[0]["frame"], "/frame_hp60c_depth.jpg")
+
+    def test_frame_endpoint_serves_the_latest_jpeg_with_a_length(self):
+        server.control = self._FakeControl(b"\xff\xd8 jpeg bytes")
+        conn = self._connection()
+        conn.request("GET", "/frame_realsense_color.jpg")
+        response = conn.getresponse()
+        body = response.read()
+        conn.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
+        self.assertEqual(int(response.getheader("Content-Length")), len(body))
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+        self.assertEqual(body, b"\xff\xd8 jpeg bytes")
+        self.assertEqual(server.control.asked, [("realsense", "color")])
+
+    def test_frame_endpoint_answers_404_before_any_frame(self):
+        server.control = self._FakeControl(None)
+        status, *_ = self._get("/frame_realsense_color.jpg")
+        self.assertEqual(status, 404)
+
+    def test_polling_counts_as_viewership_so_frames_get_encoded(self):
+        """The encoder is gated on someone watching; a poll is someone watching."""
+        control = server.control
+        self.assertIsNone(control.poll_camera_frame("realsense", "color"), "the first poll opens the lease and gets nothing")
+        control._on_realsense_color(RealSenseSubscriptionTests._image("rgb8"))
+        frame = control.poll_camera_frame("realsense", "color")
+        self.assertIsNotNone(frame)
+        self.assertTrue(frame.startswith(b"\xff\xd8"))
+
+    def test_an_expired_lease_does_not_replay_the_old_frame(self):
+        """A tile that comes back after a gap must not open on a stale frame."""
+        control = server.control
+        control.poll_camera_frame("realsense", "color")
+        control._on_realsense_color(RealSenseSubscriptionTests._image("rgb8"))
+        self.assertIsNotNone(control.poll_camera_frame("realsense", "color"))
+        with mock.patch.object(server, "POLL_VIEWER_TTL_S", 0.05):
+            time.sleep(0.1)
+            self.assertIsNone(
+                control.poll_camera_frame("realsense", "color"),
+                "the first poll after a lapse reopens the lease; only frames encoded after it are served",
+            )
+
+    def test_a_lapsed_lease_stops_the_encoder(self):
+        """Encoding for a tab that is gone is executor time stolen from /cmd_vel."""
+        control = server.control
+        control.poll_camera_frame("realsense", "color")
+        with mock.patch.object(server, "POLL_VIEWER_TTL_S", 0.05):
+            time.sleep(0.1)
+            control._on_realsense_color(RealSenseSubscriptionTests._image("rgb8"))
+            with control._lock:
+                self.assertIsNone(control._realsense.get("color_jpeg"), "no lease, no JPEG")
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl is needed to mint the test certificate")
+class TlsListenerTests(unittest.TestCase):
+    """The TLS handshake must never run on the accept thread.
+
+    serve_https used to hand ThreadingHTTPServer a listening socket wrapped
+    by ssl, which puts every client's handshake inside accept() on the one
+    serve_forever thread. A client that connects and then says nothing --
+    Safari parks speculative preconnects exactly like that -- blocked every
+    other HTTPS connection for as long as it stayed silent. Observed live on
+    the car, 2026-08-06: with the operator's Safari open, a curl to :8443
+    could not even complete a TCP handshake while :8091 answered normally,
+    and the operator's page showed every fetch that needed a new connection
+    dying at its timeout while fetches on established connections stayed
+    healthy. These tests pin the fix: an idle connection costs nobody else
+    anything.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cert = os.path.join(cls.tmp.name, "cert.pem")
+        key = os.path.join(cls.tmp.name, "key.pem")
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key, "-out", cert, "-days", "1",
+                "-subj", "/CN=localhost",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        cls.httpd = server.build_https_server(cert, key, host="127.0.0.1", port=0)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.thread.join(timeout=2)
+        cls.tmp.cleanup()
+
+    def _https_get(self, path, timeout):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=timeout, context=context)
+        try:
+            conn.request("GET", path)
+            response = conn.getresponse()
+            body = response.read()
+            return response.status, body
+        finally:
+            conn.close()
+
+    def test_https_serves_at_all(self):
+        status, body = self._https_get("/api/gamepad", timeout=5)
+        self.assertEqual(status, 200)
+        self.assertIn(b"gamepad", body)
+
+    def test_an_idle_connection_does_not_block_other_clients(self):
+        idle = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        self.addCleanup(idle.close)
+        # The idle socket says nothing, like a parked browser preconnect. A
+        # server that handshakes on the accept thread now hangs every other
+        # client; the 3 s budget below is far above a loopback round trip
+        # and far below the old failure mode, which held on for as long as
+        # the idle socket lived.
+        status, _ = self._https_get("/api/gamepad", timeout=3)
+        self.assertEqual(status, 200)
+
+    def test_several_idle_connections_do_not_block_other_clients(self):
+        for _ in range(3):
+            parked = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            self.addCleanup(parked.close)
+        status, _ = self._https_get("/api/gamepad", timeout=3)
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":

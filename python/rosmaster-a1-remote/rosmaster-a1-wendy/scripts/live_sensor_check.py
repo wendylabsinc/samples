@@ -76,6 +76,12 @@ def run(command: list[str], timeout: float) -> CommandResult:
             exc.stderr or "",
             timed_out=True,
         )
+    except FileNotFoundError as exc:
+        # macOS-only tools (networksetup, ipconfig) are unconditionally invoked by
+        # ethernet_devices()/local_network_state() below; on Linux they don't exist,
+        # and without this the missing binary would traceback the whole script
+        # instead of surfacing as a normal failed-command result.
+        return CommandResult(command, None, "", str(exc))
 
 
 def stream_for(command: list[str], seconds: float) -> CommandResult:
@@ -279,12 +285,16 @@ def main() -> int:
         topics_payload = parse_json_or_none(topics.stdout)
         command_counts = command_topic_publishers(topics_payload)
 
-        for app in ("rosmaster-a1-base", "rosmaster-a1-lidar"):
+        for service in ("base", "lidar"):
             logs = stream_for(
-                ["wendy", "--json", "device", "logs", "--app", app, "--tail", "100", "--device", args.device],
+                [
+                    "wendy", "--json", "device", "logs",
+                    "--app", "rosmaster-a1", "--service", service,
+                    "--tail", "100", "--device", args.device,
+                ],
                 seconds=args.log_seconds,
             )
-            print_command_result(f"logs:{app}", logs)
+            print_command_result(f"logs:{service}", logs)
             combined_logs += "\n" + logs.stdout
 
     evidence = parse_evidence(combined_logs)
