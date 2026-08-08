@@ -91,8 +91,12 @@ warm on an AGX class board, and that delay lands on your first question.
 
 ```bash
 wendy device attach nemoclaw --device <your-device>.local
-nemoclaw launch jetson
+openclaw
 ```
+
+The app prints the exact command to start the agent when it finishes booting; use that if
+it differs. If NemoClaw's sandbox came up on your board, it will say `nemoclaw launch
+jetson` instead.
 
 Three prompts that show what it is, in order.
 
@@ -127,16 +131,18 @@ single cast.
 ```
 your laptop  ──wendy CLI──►  Jetson (WendyOS)
                              └── nemoclaw app       entitled and sandboxed
-                                   ├── dockerd      nested, for the OpenShell sandbox
                                    ├── OpenClaw + NVIDIA Nemotron
-                                   ├── Jetson Agent Skills
-                                   └── Wendy MCP    device control
+                                   ├── 33 Jetson Agent Skills
+                                   ├── Wendy MCP    device and fleet control
+                                   └── dockerd      nested, for OpenShell when it works
 ```
 
 WendyOS is a minimal Yocto system with a read-only root filesystem, so the whole
 NemoClaw stack lives inside the container rather than on the host. NemoClaw's onboarding
 requires OpenShell's Docker compute driver and rejects Podman, so the app supervises a
-nested Docker daemon; the `build` entitlement grants the privileges that needs.
+nested Docker daemon; the `build` entitlement grants the privileges that needs, and the
+app remounts `/proc/sys` read-write at startup so that daemon can configure container
+networking at all.
 
 The security model is the interesting part, and it is four lines of `wendy.json`:
 `gpu` injects the NVIDIA Container Device Interface specification so CUDA works without
@@ -172,7 +178,7 @@ sensor at the edge of your system shares a toolchain with the Jetson in the midd
 | Problem | Fix |
 |---|---|
 | `wendy discover` finds nothing | Connect over USB-C, or check the device is on the same network. Devices answer on port 50051 before enrollment and 50052 after |
-| Onboarding fails at preflight | Check the nested daemon is up: attach and run `docker info`. NemoClaw refuses Podman and the podman-docker shim |
+| Onboarding fails at preflight | Expected on boards under 8 GiB, and currently expected everywhere because OpenShell's dashboard forward does not register. The app falls back to running the agent directly; check the logs for `skills installed` and `wendy MCP server registered` |
 | Model pull stalls at zero bytes | Some devices cannot pull from the model registry directly. Stage the model files from your workstation into the model server's volume instead |
 | First answer is slow | Cold model load costs roughly 24 seconds against about 2 warm. Ask a throwaway question to warm it |
 | GPU not detected | Confirm `{ "type": "gpu" }` is in `wendy.json` and that `wendy device info` reports `hasGpu: true` |
