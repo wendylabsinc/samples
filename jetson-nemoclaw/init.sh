@@ -4,7 +4,14 @@
 # then stay alive so `wendy device attach nemoclaw` can open a session.
 set -u
 
-STATE=/root/.nemoclaw-app
+# One HOME for everything in this container. NemoClaw's installer, its gateway and the
+# agent must all agree, and it has to be an exec-capable filesystem: persist volumes are
+# mounted noexec, so /root cannot hold an install that has to run.
+export HOME=/opt/nchome
+export PATH="/opt/nchome/.local/bin:$PATH"
+mkdir -p "$HOME"
+
+STATE=/opt/nchome/.nemoclaw-app
 LOG=/workspace/logs/install.log
 SANDBOX="${NEMOCLAW_SANDBOX_NAME:-jetson}"
 mkdir -p /workspace/logs /workspace/casts "$STATE"
@@ -12,31 +19,52 @@ mkdir -p /workspace/logs /workspace/casts "$STATE"
 say() { printf '\n===== %s =====\n' "$1"; }
 
 # ---------------------------------------------------------------- dockerd
+# WendyOS mounts /proc/sys read-only, which stops dockerd writing ip_forward and stops it
+# configuring container interfaces at all (it fails disabling IPv6 on the veth, and the
+# container never starts). The `build` entitlement grants CAP_SYS_ADMIN and the container
+# has its own mount namespace, so we can lift that ourselves rather than needing a
+# platform change: remount /proc/sys read-write here.
+PROC_SYS_RW=0
+if mount -o remount,rw /proc/sys 2>/dev/null; then
+  PROC_SYS_RW=1
+  echo "PASS  remounted /proc/sys read-write"
+else
+  echo "WARN  could not remount /proc/sys read-write; falling back to restricted networking"
+fi
+
 # Supervised rather than started once: if the daemon dies, every later agent action
 # fails silently, which is worse than a restart loop we can see in the logs.
 DOCKERD_PID=""
-#
-# The network flags are not optional. WendyOS mounts /proc/sys read-only even under the
-# `build` entitlement, which grants every capability but is not the same as a privileged
-# container. dockerd's default bridge setup writes /proc/sys/net/ipv4/ip_forward and dies:
-#
-#   failed to set IP forwarding '/proc/sys/net/ipv4/ip_forward' = '1': read-only file system
-#
-# --ip-forward=false stops it writing that sysctl, and --bridge=none skips the default
-# bridge entirely. The app already runs with host networking, so sandbox containers reach
-# the network directly rather than through a docker0 bridge.
 start_dockerd() {
-  dockerd --host=unix:///var/run/docker.sock \
-          --data-root=/var/lib/docker \
-          --storage-driver=overlay2 \
-          --ip-forward=false \
-          --iptables=false \
-          --ip6tables=false \
-          --bridge=none \
-          >&2 2>&1 &
+  if [ "$PROC_SYS_RW" = "1" ]; then
+    # Normal daemon: bridge networking, iptables, forwarding. This is what OpenShell's
+    # sandbox needs in order to get an address.
+    dockerd --host=unix:///var/run/docker.sock \
+            --data-root=/var/lib/docker \
+            --storage-driver=overlay2 \
+            >&2 2>&1 &
+  else
+    dockerd --host=unix:///var/run/docker.sock \
+            --data-root=/var/lib/docker \
+            --storage-driver=overlay2 \
+            --ip-forward=false --iptables=false --ip6tables=false --bridge=none \
+            >&2 2>&1 &
+  fi
   DOCKERD_PID=$!
 }
-trap 'kill "$DOCKERD_PID" 2>/dev/null; exit 0' TERM INT
+# Clean up the daemon's cgroup subtree on the way out. Without this, the cgroups the
+# nested runtime created inside this app's delegated subtree survive the container and
+# wedge the app id: every later deploy fails with
+# "OCI runtime create failed: read status from sync socket", and removing the app does
+# not clear it.
+cleanup() {
+  kill "$DOCKERD_PID" 2>/dev/null
+  sleep 1
+  for d in /sys/fs/cgroup/docker/*/ ; do [ -d "$d" ] && rmdir "$d" 2>/dev/null; done
+  rmdir /sys/fs/cgroup/docker 2>/dev/null
+  exit 0
+}
+trap cleanup TERM INT
 
 say "starting the nested Docker daemon"
 start_dockerd
@@ -49,6 +77,13 @@ if docker info >/dev/null 2>&1; then
   echo "docker ready: $(docker version --format '{{.Server.Version}}' 2>/dev/null)"
 else
   echo "warning: docker did not become ready; NemoClaw onboarding will fail" >&2
+fi
+
+say "nested container networking smoke test"
+if docker run --rm alpine:latest sh -c 'wget -q -O- -T5 https://registry-1.docker.io/v2/ >/dev/null 2>&1 || true; echo networking-ok' 2>&1 | tail -2; then
+  echo "PASS  a nested container started and ran"
+else
+  echo "FAIL  nested container could not start"
 fi
 
 # ---------------------------------------------------------------- NemoClaw
@@ -91,7 +126,7 @@ if [ ! -f "$STATE/installed" ]; then
            NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}" \
            NEMOCLAW_SANDBOX_NAME="$SANDBOX" \
            OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
-           HOME=/opt/nchome
+           HOME=/opt/nchome  # inherited; kept explicit for the subshell
     curl -fsSL https://www.nvidia.com/nemoclaw.sh \
       | bash -s -- --non-interactive --yes-i-accept-third-party-software
   ) >>"$LOG" 2>&1 && touch "$STATE/installed"
@@ -103,6 +138,79 @@ if [ ! -f "$STATE/installed" ]; then
       && echo "saved NemoClaw state to the persist volume"
   fi
   tail -20 "$LOG"
+fi
+
+# ---------------------------------------------------------------- onboarding
+# The installer skips onboarding when its preflight objects. The only objection left on an
+# AGX-class board is the missing NVIDIA CDI spec inside the nested Docker, which does not
+# matter here: inference runs in a separate Wendy app that holds the `gpu` entitlement, so
+# the sandbox itself needs no GPU passthrough. Onboard explicitly with --no-gpu.
+export PATH="/opt/nchome/.local/bin:$PATH"
+if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
+  say "onboarding options available in this build"
+  nemoclaw onboard --help 2>&1 | head -80
+  say "gateway/forward related environment knobs"
+  nemoclaw --help 2>&1 | head -30
+
+  say "onboarding sandbox '$SANDBOX' without GPU passthrough"
+  NEMOCLAW_NON_INTERACTIVE=1 \
+  NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 \
+  NEMOCLAW_PROVIDER="${NEMOCLAW_PROVIDER:-ollama}" \
+  NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}" \
+  NEMOCLAW_SANDBOX_NAME="$SANDBOX" \
+  OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
+  CHAT_UI_URL="${CHAT_UI_URL:-http://127.0.0.1:18789}" \
+    nemoclaw onboard --non-interactive --no-gpu --fresh --name "$SANDBOX" \
+      --control-ui-port "${CONTROL_UI_PORT:-18999}" 2>&1 | tail -25
+
+  say "openshell gateway log (the real error behind a failed forward)"
+  find "$HOME/.local/state/nemoclaw" -name 'openshell-gateway.log' -exec tail -40 {} \; 2>/dev/null \
+    || echo "no gateway log found"
+  say "ports already listening in this network namespace"
+  ss -ltnp 2>/dev/null | head -15 || true
+
+  say "sandbox status"
+  nemoclaw list 2>&1 | head -10
+fi
+
+# ---------------------------------------------------------------- Jetson Agent Skills
+if command -v nemoclaw >/dev/null 2>&1 && nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
+  if [ ! -f "$STATE/skills-installed" ]; then
+    say "installing NVIDIA's Jetson Agent Skills into the sandbox"
+    (cd /opt/jetson-device-skills && ./install.sh --targets nemoclaw \
+        --nemoclaw-sandbox "$SANDBOX" 2>&1 | tail -20) && touch "$STATE/skills-installed"
+  fi
+fi
+
+# ---------------------------------------------------------------- fallback agent
+# NemoClaw's sandbox needs OpenShell's dashboard forward, which does not register in this
+# environment, and its preflight also refuses boards under 8 GiB. Neither blocks the agent
+# itself: OpenClaw, Nemotron and the Jetson skills are the parts that do the work, and
+# WendyOS entitlements already provide the isolation OpenShell would. So if no sandbox
+# exists, set up the direct path instead, and the app is usable either way.
+if ! nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
+  say "OpenShell sandbox unavailable; setting up the direct agent path"
+
+  mkdir -p "$HOME/.openclaw/skills"
+  cp -r /opt/jetson-device-skills/skills/. "$HOME/.openclaw/skills/" 2>/dev/null || true
+  cp -r /opt/jetson-bsp-skills/skills/.    "$HOME/.openclaw/skills/" 2>/dev/null || true
+  echo "skills installed: $(ls "$HOME/.openclaw/skills" | wc -l)"
+  ls "$HOME/.openclaw/skills" | head -10
+
+  if [ -n "${WENDY_AGENT_SOCKET:-}" ]; then
+    openclaw mcp set wendy '{"command":"wendy","args":["mcp","serve"]}' >/dev/null 2>&1 \
+      && echo "PASS  wendy MCP server registered with OpenClaw" \
+      || echo "WARN  could not register the wendy MCP server"
+  fi
+
+  if curl -fsS --max-time 5 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
+    echo "PASS  model server reachable at ${OLLAMA_HOST:-http://127.0.0.1:11434}"
+  else
+    echo "WARN  no model server at ${OLLAMA_HOST:-http://127.0.0.1:11434}; deploy one before recording"
+  fi
+  AGENT_CMD="openclaw"
+else
+  AGENT_CMD="nemoclaw launch $SANDBOX"
 fi
 
 # ---------------------------------------------------------------- fleet tools
@@ -126,7 +234,7 @@ Attach a session:
   wendy device attach nemoclaw --device <your-device>.local
 
 Then talk to the agent:
-  nemoclaw launch $SANDBOX
+  $AGENT_CMD
 
 Record it:
   asciinema rec /workspace/casts/demo.cast --idle-time-limit 2 --cols 120 --rows 34

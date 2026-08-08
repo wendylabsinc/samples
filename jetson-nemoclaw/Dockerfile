@@ -15,6 +15,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
        ca-certificates curl git jq python3 python3-venv zstd binutils \
        iptables iproute2 procps util-linux sudo asciinema tmux \
+       netcat-openbsd \
   && rm -rf /var/lib/apt/lists/*
 
 # Node 22 from NodeSource: the Ubuntu archive is older than NemoClaw requires.
@@ -30,6 +31,19 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # cgroup privileges that needs.
 RUN curl -fsSL https://get.docker.com | sh \
   && rm -rf /var/lib/apt/lists/*
+
+# OpenClaw itself, for the fallback path. NemoClaw is OpenClaw plus Nemotron plus the
+# Jetson skills plus OpenShell; when OpenShell's sandbox cannot come up, the first three
+# still give a complete on-device agent, sandboxed by WendyOS entitlements instead.
+RUN npm install -g openclaw@latest && openclaw --version
+
+# NVIDIA's Jetson Agent Skills, cloned at build time so the device needs no git access.
+# install.sh is run after onboarding, once the sandbox exists to install them into.
+RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/jetson-device-skills.git \
+      /opt/jetson-device-skills \
+ && git clone --depth 1 https://github.com/NVIDIA-AI-IOT/jetson-bsp-skills.git \
+      /opt/jetson-bsp-skills \
+ && test -f /opt/jetson-device-skills/skills/jetson-memory-audit/SKILL.md
 
 # Mount destinations must exist in the image. WendyOS does not create a missing
 # bind-mount target, and the container fails at task creation if one is absent.
