@@ -1,10 +1,5 @@
 # NemoClaw on NVIDIA Jetson
 
-> **Draft status.** The app builds and deploys, and the NemoClaw installer runs on
-> device and installs both binaries. End-to-end onboarding with the nested Docker
-> daemon has **not** been verified yet. See the pull request for exactly what was and
-> was not tested. Remove this block before merge.
-
 Run NVIDIA's agentic AI stack on a Jetson, fully local, with no flashing marathon, no
 JetPack surgery, no CUDA version archaeology, and no SSH.
 
@@ -20,6 +15,22 @@ it is running on.
 
 Typical Jetson setup for something like this takes about three and a half hours. This
 takes about three minutes, and most of that is the download.
+
+## What runs today
+
+Verified on a Jetson Orin Nano 8 GB and a Jetson AGX Thor, WendyOS 0.17.0 / JetPack 7.2:
+
+- **OpenClaw**, NVIDIA's agent runtime, on the device.
+- **NVIDIA Nemotron**, served locally on the device GPU.
+- **33 Jetson Agent Skills**, the device and board-support skills NVIDIA ships.
+- **Wendy device tools** over the Model Context Protocol, so the agent can operate its
+  own hardware and the rest of your fleet.
+
+**Not running yet: NemoClaw's OpenShell sandbox.** Its dashboard port forward does not
+register in this environment, and its preflight separately refuses boards under 8 GiB, so
+an Orin Nano is out regardless. The app detects this and sets up the agent directly, with
+WendyOS entitlements providing the isolation OpenShell would have. Everything above works
+either way. NemoClaw is an early-preview project; this sample tracks it.
 
 ## What you get
 
