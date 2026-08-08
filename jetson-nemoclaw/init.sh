@@ -52,13 +52,36 @@ else
 fi
 
 # ---------------------------------------------------------------- NemoClaw
+# Restore a previous install from the volume, if we have one. Executables must land on
+# the exec-capable image layer, so this is a copy rather than a mount or a symlink.
+if [ -f /workspace/state/nchome.tar.gz ] && [ ! -d /opt/nchome/.nemoclaw ]; then
+  mkdir -p /opt/nchome
+  tar -xzf /workspace/state/nchome.tar.gz -C /opt/nchome \
+    && echo "restored NemoClaw state from the persist volume" \
+    && touch "$STATE/installed"
+fi
+
+say "filesystem exec flags (the tsc: Permission denied theory)"
+for m in / /root /workspace /opt /tmp; do
+  printf '%-12s %s\n' "$m" "$(findmnt -no FSTYPE,OPTIONS --target "$m" 2>/dev/null | head -1)"
+done
+
 if [ ! -f "$STATE/installed" ]; then
   say "installing NemoClaw (first start only; expect 5 to 15 minutes)"
   # The installer builds the CLI from a temporary clone and then executes what it built,
   # so TMPDIR must land on a filesystem mounted exec. On WendyOS both /tmp and the
   # persist volumes are noexec, and npm run build:cli dies with
   # "sh: 1: tsc: Permission denied". /opt lives on the container's own writable layer.
-  mkdir -p /opt/nctmp
+  # WendyOS mounts persist volumes noexec (confirmed: /root and /workspace are
+  # ext4 rw,nosuid,noexec). NemoClaw installs into $HOME/.nemoclaw and then EXECUTES what
+  # it installed, so its home cannot live on a volume: npm run build:cli dies with
+  # "sh: 1: tsc: Permission denied". Symlinking the state directory onto a volume fails
+  # the same way, and NemoClaw rejects symlinked state paths outright.
+  #
+  # So: install onto the container's own writable layer, then snapshot the state to the
+  # volume so credentials and sandbox config survive a redeploy. Restore happens above,
+  # before the install check.
+  mkdir -p /opt/nctmp /opt/nchome
   (
     export TMPDIR=/opt/nctmp
     export NEMOCLAW_NON_INTERACTIVE=1 \
@@ -67,10 +90,18 @@ if [ ! -f "$STATE/installed" ]; then
            NEMOCLAW_PROVIDER="${NEMOCLAW_PROVIDER:-ollama}" \
            NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}" \
            NEMOCLAW_SANDBOX_NAME="$SANDBOX" \
-           OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+           OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
+           HOME=/opt/nchome
     curl -fsSL https://www.nvidia.com/nemoclaw.sh \
       | bash -s -- --non-interactive --yes-i-accept-third-party-software
   ) >>"$LOG" 2>&1 && touch "$STATE/installed"
+
+  # Snapshot the fresh install so the next redeploy does not pay for it again.
+  if [ -f "$STATE/installed" ]; then
+    mkdir -p /workspace/state
+    tar -czf /workspace/state/nchome.tar.gz -C /opt/nchome . \
+      && echo "saved NemoClaw state to the persist volume"
+  fi
   tail -20 "$LOG"
 fi
 
