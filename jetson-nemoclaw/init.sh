@@ -203,6 +203,15 @@ if ! nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
       || echo "WARN  could not register the wendy MCP server"
   fi
 
+  if [ -z "${OLLAMA_HOST:-}" ]; then
+    OLLAMA_HOST=http://127.0.0.1:11434
+    if ! curl -fsS --max-time 3 "$OLLAMA_HOST/api/tags" >/dev/null 2>&1; then
+      GW="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
+      [ -n "$GW" ] && curl -fsS --max-time 3 "http://$GW:11434/api/tags" >/dev/null 2>&1 \
+        && OLLAMA_HOST="http://$GW:11434"
+    fi
+    export OLLAMA_HOST
+  fi
   if curl -fsS --max-time 5 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
     echo "PASS  model server reachable at ${OLLAMA_HOST:-http://127.0.0.1:11434}"
   else
