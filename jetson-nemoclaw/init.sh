@@ -197,6 +197,25 @@ done
 # the sandbox itself needs no GPU passthrough. Onboard explicitly with --no-gpu.
 export PATH="/opt/nchome/.local/bin:$PATH"
 if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
+  # The OpenShell installer can extract its gateway/sandbox binaries one directory too
+  # deep (/usr/local/bin/openshell-sandbox/openshell-sandbox). NemoClaw then reports
+  # "missing provider credential rewrite or MCP L7 policy support" and reinstalls in a
+  # loop, because its feature gate requires the CLI, gateway and sandbox binaries under
+  # one install root. Flatten them.
+  for b in openshell-gateway openshell-sandbox; do
+    if [ -d "/usr/local/bin/$b" ] && [ -x "/usr/local/bin/$b/$b" ]; then
+      mv "/usr/local/bin/$b/$b" "/usr/local/bin/$b.tmp" \
+        && rm -rf "/usr/local/bin/$b" \
+        && mv "/usr/local/bin/$b.tmp" "/usr/local/bin/$b" \
+        && echo "flattened misextracted $b"
+    fi
+  done
+
+  # An aborted attempt leaves half-written TLS material and an orphaned sandbox, and both
+  # make every later attempt fail with a different error. Clear them before onboarding.
+  rm -rf "$HOME/.local/state/nemoclaw/openshell-docker-gateway-$GW_PORT/tls" 2>/dev/null
+  openshell sandbox delete "$SANDBOX" >/dev/null 2>&1 || true
+
   say "onboarding options available in this build"
   nemoclaw onboard --help 2>&1 | head -80
   say "gateway/forward related environment knobs"
