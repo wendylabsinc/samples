@@ -15,10 +15,24 @@ say() { printf '\n===== %s =====\n' "$1"; }
 # Supervised rather than started once: if the daemon dies, every later agent action
 # fails silently, which is worse than a restart loop we can see in the logs.
 DOCKERD_PID=""
+#
+# The network flags are not optional. WendyOS mounts /proc/sys read-only even under the
+# `build` entitlement, which grants every capability but is not the same as a privileged
+# container. dockerd's default bridge setup writes /proc/sys/net/ipv4/ip_forward and dies:
+#
+#   failed to set IP forwarding '/proc/sys/net/ipv4/ip_forward' = '1': read-only file system
+#
+# --ip-forward=false stops it writing that sysctl, and --bridge=none skips the default
+# bridge entirely. The app already runs with host networking, so sandbox containers reach
+# the network directly rather than through a docker0 bridge.
 start_dockerd() {
   dockerd --host=unix:///var/run/docker.sock \
           --data-root=/var/lib/docker \
           --storage-driver=overlay2 \
+          --ip-forward=false \
+          --iptables=false \
+          --ip6tables=false \
+          --bridge=none \
           >&2 2>&1 &
   DOCKERD_PID=$!
 }
@@ -40,7 +54,13 @@ fi
 # ---------------------------------------------------------------- NemoClaw
 if [ ! -f "$STATE/installed" ]; then
   say "installing NemoClaw (first start only; expect 5 to 15 minutes)"
+  # The installer builds the CLI from a temporary clone and then executes what it built,
+  # so TMPDIR must land on a filesystem mounted exec. On WendyOS both /tmp and the
+  # persist volumes are noexec, and npm run build:cli dies with
+  # "sh: 1: tsc: Permission denied". /opt lives on the container's own writable layer.
+  mkdir -p /opt/nctmp
   (
+    export TMPDIR=/opt/nctmp
     export NEMOCLAW_NON_INTERACTIVE=1 \
            NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 \
            NEMOCLAW_NO_EXPRESS=1 \
@@ -58,11 +78,13 @@ fi
 # The Wendy MCP server is what turns the agent from a chatbot into an operator: device
 # inventory, app lifecycle, logs, telemetry. `mcp set` is idempotent, unlike `mcp add`,
 # so this re-applies safely on every start.
-if [ -n "${WENDY_AGENT_SOCKET:-}" ]; then
+if [ -n "${WENDY_AGENT_SOCKET:-}" ] && command -v nemoclaw >/dev/null 2>&1; then
   say "registering the Wendy MCP server with the agent"
   nemoclaw "$SANDBOX" exec -- \
     openclaw mcp set wendy '{"command":"wendy","args":["mcp","serve"]}' 2>&1 \
     || echo "warning: could not register the wendy MCP server (is onboarding finished?)" >&2
+elif ! command -v nemoclaw >/dev/null 2>&1; then
+  echo "note: nemoclaw is not installed yet, so there is nothing to register" >&2
 else
   echo "note: no admin entitlement, so the agent has no device tools" >&2
 fi
