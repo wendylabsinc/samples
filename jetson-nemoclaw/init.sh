@@ -69,7 +69,7 @@ trap cleanup TERM INT
 say "starting the nested Docker daemon"
 start_dockerd
 i=0
-while [ "$i" -lt 60 ]; do
+while [ "$i" -lt 240 ]; do
   docker info >/dev/null 2>&1 && break
   i=$((i + 1)); sleep 1
 done
@@ -141,8 +141,17 @@ for m in / /root /workspace /opt /tmp; do
   printf '%-12s %s\n' "$m" "$(findmnt -no FSTYPE,OPTIONS --target "$m" 2>/dev/null | head -1)"
 done
 
-if [ ! -f "$STATE/installed" ]; then
-  say "installing NemoClaw (first start only; expect 5 to 15 minutes)"
+install_attempt=0
+while [ ! -f "$STATE/installed" ] && [ "$install_attempt" -lt 3 ]; do
+  install_attempt=$((install_attempt + 1))
+  # Do not start until the daemon is genuinely up: the installer aborts with "Docker is
+  # installed but not reachable" and, before this loop existed, never retried for the
+  # life of the container.
+  if ! docker info >/dev/null 2>&1; then
+    echo "waiting for docker before install attempt $install_attempt"
+    j=0; while [ "$j" -lt 120 ]; do docker info >/dev/null 2>&1 && break; j=$((j + 1)); sleep 2; done
+  fi
+  say "installing NemoClaw (attempt $install_attempt; expect 5 to 15 minutes)"
   # The installer builds the CLI from a temporary clone and then executes what it built,
   # so TMPDIR must land on a filesystem mounted exec. On WendyOS both /tmp and the
   # persist volumes are noexec, and npm run build:cli dies with
@@ -178,7 +187,8 @@ if [ ! -f "$STATE/installed" ]; then
       && echo "saved NemoClaw state to the persist volume"
   fi
   tail -20 "$LOG"
-fi
+  [ -f "$STATE/installed" ] || { echo "install attempt $install_attempt failed; retrying"; sleep 5; }
+done
 
 # ---------------------------------------------------------------- onboarding
 # The installer skips onboarding when its preflight objects. The only objection left on an
