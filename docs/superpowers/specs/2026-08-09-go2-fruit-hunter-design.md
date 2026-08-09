@@ -130,11 +130,18 @@ localhost-only, both request/response shaped rather than streaming.
 | Topic | Type | Publisher → Subscriber |
 |---|---|---|
 | `rt/go2/camera/image_raw/compressed` | `sensor_msgs/CompressedImage` | `camera` → `detector`, `dashboard` |
-| `rt/go2/detections` | `vision_msgs/Detection2DArray` | `detector` → `brain`, `dashboard` |
+| `rt/go2/detections` | `go2_fruit/Detections` (see note) | `detector` → `brain`, `dashboard` |
 | `rt/go2/mission_state` | custom (JSON string msg) | `brain` → `dashboard` |
 | `rt/utlidar/cloud_deskewed` | `sensor_msgs/PointCloud2` | Go2 → `navigator` (**BEST_EFFORT QoS required** — the Unitree driver will not deliver to a RELIABLE subscriber) |
 | `cmd_vel` | `geometry_msgs/Twist` | `navigator` → `motion` |
 | `rt/audioreceiver` | `unitree_go/AudioData` | `motion` → Go2 speaker |
+
+**Note on the detections message.** `vision_msgs/Detection2DArray` would require
+hand-nesting five ROS2 message types (`Detection2D`,
+`ObjectHypothesisWithPose`, `BoundingBox2D`, `Pose2D`, `Header`) as cyclonedds
+`IdlStruct`s, and nothing outside this app consumes the topic — `brain` and
+`dashboard` are both ours. A compact purpose-built `go2_fruit/Detections`
+struct carries the same information at a fraction of the surface area.
 
 ## 4. The MAX detector
 
