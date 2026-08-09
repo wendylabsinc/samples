@@ -96,9 +96,38 @@ pick_port() {
 export NEMOCLAW_GATEWAY_PORT="${NEMOCLAW_GATEWAY_PORT:-$(pick_port 18080)}"
 export NEMOCLAW_DASHBOARD_PORT="${NEMOCLAW_DASHBOARD_PORT:-$(pick_port 18890)}"
 export NEMOCLAW_OLLAMA_PROXY_PORT="${NEMOCLAW_OLLAMA_PROXY_PORT:-$(pick_port 11435)}"
-# NemoClaw auto-picks the largest installed model, which frequently fails its completion
-# probe on an edge device. Pin one that fits, overridable by the operator.
-export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-qwen2.5:3b}"
+# The model comes from this app's own `ollama` service, not from whatever happened to be
+# on the device. Wait for that sibling and adopt whichever model it pulled, so the two
+# services cannot disagree about the name.
+export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+wait_for_model_runtime() {
+  i=0
+  while [ "$i" -lt 900 ]; do
+    tags=$(curl -fsS --max-time 5 "$OLLAMA_HOST/api/tags" 2>/dev/null)
+    if [ -n "$tags" ]; then
+      # Prefer Nemotron when present: NemoClaw may have pulled a second model into the
+      # shared volume, and taking whatever the API lists first picked the wrong one.
+      m=$(printf '%s' "$tags" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); ms=[x["name"] for x in (d.get("models") or [])]
+    pref=[n for n in ms if "nemotron" in n.lower()]
+    print((pref or ms or [""])[0])
+except Exception: print("")' 2>/dev/null)
+      [ -n "$m" ] && { echo "$m"; return 0; }
+    fi
+    i=$((i + 5)); sleep 5
+  done
+  echo ""
+}
+say "waiting for this app's model runtime (the ollama service)"
+DISCOVERED_MODEL="$(wait_for_model_runtime)"
+if [ -n "$DISCOVERED_MODEL" ]; then
+  export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-$DISCOVERED_MODEL}"
+  echo "PASS  model runtime ready, serving $NEMOCLAW_MODEL"
+else
+  export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-nemotron-3-nano:4b}"
+  echo "FAIL  this app's model runtime never came up; onboarding will abort"
+fi
 GW_PORT="$NEMOCLAW_GATEWAY_PORT"; UI_PORT="$NEMOCLAW_DASHBOARD_PORT"
 say "port selection (host networking shares the device's ports)"
 echo "gateway=$GW_PORT dashboard=$UI_PORT"
@@ -134,6 +163,22 @@ if [ -f /workspace/state/nchome.tar.gz ] && [ ! -d /opt/nchome/.nemoclaw ]; then
     echo "snapshot restored but nemoclaw binary missing; reinstalling"
     rm -f "$STATE/installed"
   fi
+fi
+
+# OpenShell writes per-sandbox JWTs under $HOME/.local/state and then bind-mounts them
+# into the sandbox container. $HOME is on the container's own overlay layer, and a nested
+# daemon cannot bind-mount a file off that overlay into its own container:
+#   error mounting ".../sandbox.jwt" to rootfs at "/etc/openshell/auth/sandbox.jwt"
+#   flags=MS_BIND|MS_REC
+# Back that one directory with the ext4 persist volume, keeping the path identical. Only
+# state lands there, never executables, so the volume's noexec does not bite.
+mkdir -p /workspace/openshell-state "$HOME/.local/state"
+if mountpoint -q "$HOME/.local/state" 2>/dev/null; then
+  echo "state dir already bind-mounted"
+elif mount --bind /workspace/openshell-state "$HOME/.local/state" 2>/dev/null; then
+  echo "PASS  bound \$HOME/.local/state onto the ext4 volume (nested bind-mounts need this)"
+else
+  echo "WARN  could not bind state dir; sandbox container may fail to start"
 fi
 
 say "filesystem exec flags (the tsc: Permission denied theory)"
@@ -211,6 +256,17 @@ if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q 
     fi
   done
 
+  # OpenShell's sandbox records live on the persist volume while the JWT it bind-mounts is
+  # written under the container's own overlay. A redeploy therefore resurrects a sandbox id
+  # whose token file no longer exists, and the container fails with
+  # "error mounting .../sandbox.jwt ... not a directory". Wipe the state tree so onboarding
+  # starts from nothing; --fresh alone does not reach the gateway-side records.
+  if [ "${NEMOCLAW_RESET_STATE:-1}" = "1" ]; then
+    nemoclaw "$SANDBOX" destroy --yes >/dev/null 2>&1 || true
+    rm -rf "$HOME/.local/state/openshell" 2>/dev/null
+    echo "reset OpenShell state (stale sandbox ids cannot survive into this run)"
+  fi
+
   # An aborted attempt leaves half-written TLS material and an orphaned sandbox, and both
   # make every later attempt fail with a different error. Clear them before onboarding.
   rm -rf "$HOME/.local/state/nemoclaw/openshell-docker-gateway-$GW_PORT/tls" 2>/dev/null
@@ -220,6 +276,18 @@ if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q 
   nemoclaw onboard --help 2>&1 | head -80
   say "gateway/forward related environment knobs"
   nemoclaw --help 2>&1 | head -30
+
+  # NemoClaw sizes the model against *available* GPU memory, so our own model runtime
+  # holding 24 GB resident makes it reject the model we already have and fall back to one
+  # we do not: "Requested Ollama model ... is unlikely to fit currently available GPU
+  # memory; falling back to 'qwen3.5:9b'". Unload first; Ollama reloads on the next call.
+  say "unloading the model so onboarding sees free GPU memory"
+  curl -s --max-time 60 "${OLLAMA_HOST}/api/generate" \
+    -d "{\"model\":\"$NEMOCLAW_MODEL\",\"keep_alive\":0}" >/dev/null 2>&1 \
+    && echo "requested unload of $NEMOCLAW_MODEL"
+  sleep 10
+  free_mb=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1)
+  echo "GPU memory free now: ${free_mb:-unknown} MB"
 
   say "onboarding sandbox '$SANDBOX' without GPU passthrough"
   NEMOCLAW_NON_INTERACTIVE=1 \
@@ -231,7 +299,8 @@ if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q 
   OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}" \
   CHAT_UI_URL="http://127.0.0.1:$UI_PORT" \
   NEMOCLAW_GATEWAY_PORT="$GW_PORT" \
-    nemoclaw onboard --non-interactive --no-gpu --fresh --name "$SANDBOX" \
+  NEMOCLAW_YES=1 \
+    nemoclaw onboard --non-interactive --yes --no-gpu --fresh --name "$SANDBOX" \
       --control-ui-port "$UI_PORT" 2>&1 | tail -30
 
   say "openshell gateway log (the real error behind a failed forward)"
@@ -239,6 +308,9 @@ if command -v nemoclaw >/dev/null 2>&1 && ! nemoclaw list 2>/dev/null | grep -q 
     || echo "no gateway log found"
   say "ports already listening in this network namespace"
   ss -ltnp 2>/dev/null | head -15 || true
+
+  say "non-interactive agent invocation surface"
+  nemoclaw "$SANDBOX" agent --help 2>&1 | head -25 || true
 
   say "sandbox status"
   nemoclaw list 2>&1 | head -10
@@ -253,53 +325,28 @@ if command -v nemoclaw >/dev/null 2>&1 && nemoclaw list 2>/dev/null | grep -q "$
   fi
 fi
 
-# ---------------------------------------------------------------- fallback agent
-# NemoClaw's sandbox needs OpenShell's dashboard forward, which does not register in this
-# environment, and its preflight also refuses boards under 8 GiB. Neither blocks the agent
-# itself: OpenClaw, Nemotron and the Jetson skills are the parts that do the work, and
-# WendyOS entitlements already provide the isolation OpenShell would. So if no sandbox
-# exists, set up the direct path instead, and the app is usable either way.
-if ! nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
-  say "OpenShell sandbox unavailable; setting up the direct agent path"
-
-  mkdir -p "$HOME/.openclaw/skills"
-  cp -r /opt/jetson-device-skills/skills/. "$HOME/.openclaw/skills/" 2>/dev/null || true
-  cp -r /opt/jetson-bsp-skills/skills/.    "$HOME/.openclaw/skills/" 2>/dev/null || true
-  echo "skills installed: $(ls "$HOME/.openclaw/skills" | wc -l)"
-  ls "$HOME/.openclaw/skills" | head -10
-
-  if [ -n "${WENDY_AGENT_SOCKET:-}" ]; then
-    openclaw mcp set wendy '{"command":"wendy","args":["mcp","serve"]}' >/dev/null 2>&1 \
-      && echo "PASS  wendy MCP server registered with OpenClaw" \
-      || echo "WARN  could not register the wendy MCP server"
-  fi
-
-  if [ -z "${OLLAMA_HOST:-}" ]; then
-    OLLAMA_HOST=http://127.0.0.1:11434
-    if ! curl -fsS --max-time 3 "$OLLAMA_HOST/api/tags" >/dev/null 2>&1; then
-      GW="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
-      [ -n "$GW" ] && curl -fsS --max-time 3 "http://$GW:11434/api/tags" >/dev/null 2>&1 \
-        && OLLAMA_HOST="http://$GW:11434"
-    fi
-    export OLLAMA_HOST
-  fi
-  # NemoClaw probes the model with a real completion. A model server can answer /api/tags
-  # while /api/generate hangs (a known wedged-Ollama state), and onboarding then aborts
-  # with "model unavailable". Warm the model so the probe succeeds.
-  if [ -n "${NEMOCLAW_MODEL:-}" ]; then
-    curl -s --max-time 120 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/generate" \
-      -d "{\"model\":\"$NEMOCLAW_MODEL\",\"prompt\":\"hi\",\"stream\":false}" >/dev/null 2>&1 \
-      && echo "PASS  model $NEMOCLAW_MODEL answered a completion probe" \
-      || echo "WARN  model $NEMOCLAW_MODEL did not answer /api/generate; onboarding will abort"
-  fi
-  if curl -fsS --max-time 5 "${OLLAMA_HOST:-http://127.0.0.1:11434}/api/tags" >/dev/null 2>&1; then
-    echo "PASS  model server reachable at ${OLLAMA_HOST:-http://127.0.0.1:11434}"
-  else
-    echo "WARN  no model server at ${OLLAMA_HOST:-http://127.0.0.1:11434}; deploy one before recording"
-  fi
-  AGENT_CMD="openclaw"
-else
+# ---------------------------------------------------------------- verdict
+# No fallback. An earlier version of this script quietly set up plain OpenClaw whenever
+# the OpenShell sandbox failed, so every run printed healthy-looking PASS lines while the
+# thing the sample exists to demonstrate had not started at all. That masked the real
+# failure for days. If the sandbox is not Ready, say so loudly and stop.
+if nemoclaw list 2>/dev/null | grep -q "$SANDBOX"; then
   AGENT_CMD="nemoclaw launch $SANDBOX"
+  echo "PASS  NemoClaw sandbox '$SANDBOX' exists"
+else
+  AGENT_CMD=""
+  cat <<'BANNER'
+
+  ############################################################
+  #  NEMOCLAW DID NOT COME UP                                #
+  #                                                          #
+  #  The OpenShell sandbox never reached Ready, so no agent  #
+  #  is running. Everything below this line is diagnostics,  #
+  #  not a working system. Do not demo this.                 #
+  ############################################################
+
+BANNER
+  nemoclaw "$SANDBOX" doctor 2>&1 | tail -25 || true
 fi
 
 # ---------------------------------------------------------------- fleet tools
@@ -316,6 +363,34 @@ elif ! command -v nemoclaw >/dev/null 2>&1; then
 else
   echo "note: no admin entitlement, so the agent has no device tools" >&2
 fi
+
+# ---------------------------------------------------------------- diagnostics
+say "sandbox token state (why the nested bind-mount fails)"
+echo "XDG_STATE_HOME=${XDG_STATE_HOME:-unset}  HOME=$HOME"
+echo "state dir mount: $(findmnt -no SOURCE,FSTYPE,TARGET "$HOME/.local/state" 2>/dev/null || echo 'not a mountpoint')"
+find "$HOME/.local/state/openshell" -maxdepth 4 2>/dev/null | head -20 || echo "no openshell state tree"
+find "$HOME/.local/state/openshell" -name 'sandbox.jwt' -exec ls -l {} \; 2>/dev/null | head -5 \
+  || echo "no sandbox.jwt anywhere under the state tree"
+echo "gateway processes:"; ps -eo pid,user,args 2>/dev/null | grep -iE 'openshell|gateway' | grep -v grep | head -5
+
+say "agent CLI headless surface"
+openclaw --help 2>&1 | grep -iE 'print|headless|non-inter|exec|run |-p,|--prompt' | head -12
+
+# ---------------------------------------------------------------- cart pole
+# The headline task: ask the on-device model to solve Cart Pole and keep the artifacts.
+cartpole_is_solved() {
+  python3 -c "import json,sys;d=json.load(open('/workspace/cartpole/results.json'));sys.exit(0 if d.get('best_steps',0)>=200 else 1)" 2>/dev/null
+}
+if [ "${RUN_CARTPOLE:-0}" = "1" ] && [ -n "$AGENT_CMD" ] && ! cartpole_is_solved; then
+  # Opt-in only, and only when a sandbox actually exists.
+  say "asking the agent to solve Cart Pole"
+  /usr/local/bin/cartpole 2>&1 | tail -40 || echo "cart pole run did not finish"
+fi
+
+# Serve the artifacts so they can be collected without a TTY.
+say "serving artifacts on port 8088"
+(cd /workspace && python3 -m http.server 8088 >/dev/null 2>&1 &) \
+  && echo "artifacts: http://<device>:8088/cartpole/"
 
 say "ready"
 cat <<EOF

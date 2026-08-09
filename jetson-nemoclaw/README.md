@@ -1,56 +1,53 @@
-# NemoClaw on NVIDIA Jetson
+# NemoClaw on NVIDIA Jetson (does not work yet)
 
-Run NVIDIA's agentic AI stack on a Jetson, fully local, with no flashing marathon, no
-JetPack surgery, no CUDA version archaeology, and no SSH.
+> **Status: NemoClaw does not run on WendyOS.** The installer works, every preflight check
+> passes, the sandbox image builds and the gateway starts, but the OpenShell sandbox never
+> reaches Ready, so no agent ever runs. This directory is an honest record of how far it
+> got and what blocks it. Do not present it as working.
 
-```bash
-git clone https://github.com/wendylabsinc/samples.git
-cd samples/jetson-nemoclaw
-wendy run --device <your-device>.local
+## What works
+
+Verified on a Jetson AGX Thor, WendyOS 0.17.0 / JetPack 7.2:
+
+- NemoClaw's installer runs and installs `nemoclaw` and `openshell` on the device.
+- Every onboarding preflight check passes: 14 vCPU / 122.8 GiB, GPU detected, gateway
+  healthy, ports available, local Ollama found.
+- The 2.4 GB OpenShell sandbox image builds on-device, all 138 stages.
+- The gateway starts and serves; in one run its dashboard came up.
+- The app ships its own model runtime: NVIDIA Nemotron 3 Nano 30B on the device GPU at
+  roughly 56 tokens per second, pulled from scratch onto a clean device.
+
+## What does not work
+
+The sandbox container fails to start:
+
+```
+error mounting ".../docker-sandbox-tokens/default/<id>/sandbox.jwt"
+to rootfs at "/etc/openshell/auth/sandbox.jwt": not a directory
 ```
 
-The agent comes up on the device with NVIDIA Nemotron running locally on the Jetson
-GPU, NVIDIA's Jetson Agent Skills preloaded, and tools that let it operate the device
-it is running on.
+The sandbox id survives on the persist volume while the JWT that OpenShell bind-mounts is
+written to the container's own overlay layer, so a redeploy resurrects a record pointing at
+a file that no longer exists. A state reset was written for this but never got a clean run,
+because the installer then began failing its own retries and hardware access ended.
 
-Typical Jetson setup for something like this takes about three and a half hours. This
-takes about three minutes, and most of that is the download.
+## Root cause
 
-## What runs today
+WendyOS is immutable and container-only; NemoClaw is a host installer for Ubuntu with
+Docker. Every failure in this directory traces back to that mismatch:
 
-Verified on a Jetson Orin Nano 8 GB and a Jetson AGX Thor, WendyOS 0.17.0 / JetPack 7.2:
+| Symptom | Cause |
+|---|---|
+| Installer cannot run on the host | Read-only rootfs, no package manager |
+| `tsc: Permission denied` | Persist volumes are mounted `noexec` |
+| Docker daemon will not start | `/proc/sys` is read-only under the `build` entitlement |
+| Gateway port refused | Host networking; port 8080 already owned on the device |
+| Port forward dies with `os error 2` | OpenShell forwards over SSH; no ssh client in the image |
+| Model downgraded to one not installed | Preflight sizes against free GPU memory, ours was loaded |
+| Sandbox container will not start | Nested Docker cannot bind-mount the JWT (above) |
 
-- **OpenClaw**, NVIDIA's agent runtime, on the device.
-- **NVIDIA Nemotron**, served locally on the device GPU.
-- **33 Jetson Agent Skills**, the device and board-support skills NVIDIA ships.
-- **Wendy device tools** over the Model Context Protocol, so the agent can operate its
-  own hardware and the rest of your fleet.
-
-**Not running yet: NemoClaw's OpenShell sandbox.** Its dashboard port forward does not
-register in this environment, and its preflight separately refuses boards under 8 GiB, so
-an Orin Nano is out regardless. The app detects this and sets up the agent directly, with
-WendyOS entitlements providing the isolation OpenShell would have. Everything above works
-either way. NemoClaw is an early-preview project; this sample tracks it.
-
-## What you get
-
-**An agent that runs entirely on your device.** NVIDIA Nemotron served locally on the
-Jetson GPU. No API key, no cloud round trip, no data leaving the board. Unplug the
-network and it keeps answering.
-
-**NVIDIA's Jetson Agent Skills.** The device skills that shipped with JetPack 7.2:
-diagnostics, memory audit, inference memory tuning, model serving, benchmarking,
-packaging, speculative decoding and headless mode. The agent uses them to reason about
-the board it is on.
-
-**Hands on the hardware.** Through the Wendy Model Context Protocol server the agent can
-inventory devices, deploy and stop apps, stream logs and telemetry, exec into
-containers, and trigger over-the-air updates. It is an operator, not a chatbot.
-
-**A sandbox that is declared, not assumed.** The agent runs as a WendyOS app under an
-explicit entitlement set. What it can touch is one file, enforced by the operating
-system. Read [SECURITY.md](SECURITY.md) before deploying: two of those entitlements are
-deliberately powerful.
+Each of those was found and fixed except the last. None of them appear in NVIDIA's docs,
+because no tested host of theirs is immutable.
 
 ## Requirements
 

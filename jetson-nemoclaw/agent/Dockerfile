@@ -17,6 +17,7 @@ RUN apt-get update \
        iptables iproute2 procps util-linux sudo asciinema tmux \
        openssh-client lsof \
        netcat-openbsd \
+       python3-numpy python3-matplotlib ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 # openssh-client is REQUIRED, not optional: OpenShell implements its dashboard port
@@ -57,8 +58,9 @@ RUN git clone --depth 1 https://github.com/NVIDIA-AI-IOT/jetson-device-skills.gi
 # bind-mount target, and the container fails at task creation if one is absent.
 RUN mkdir -p /workspace /var/lib/docker /root
 
+COPY cartpole.sh /usr/local/bin/cartpole
 COPY init.sh /usr/local/bin/nemoclaw-init
-RUN chmod +x /usr/local/bin/nemoclaw-init
+RUN chmod +x /usr/local/bin/nemoclaw-init /usr/local/bin/cartpole
 
 # Runs as root deliberately: dockerd needs it, and the admin entitlement bind-mounts a
 # root-owned control socket.
