@@ -1,6 +1,6 @@
 # Qwen3-VL Vision-Language Model Service
 # Optimized for Jetson Orin Nano with INT4 quantization using Jetson-compatible bitsandbytes
-# Model is baked into the image for fast startup (no downloads needed)
+# Model is downloaded on first startup via HuggingFace Hub (~4GB)
 
 FROM ubuntu:22.04
 
@@ -17,9 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pre-downloaded Qwen3-VL-2B model EARLY for better layer caching
-# Download once with: huggingface-cli download Qwen/Qwen3-VL-2B-Instruct --local-dir ./models/Qwen3-VL-2B-Instruct
-COPY models/Qwen3-VL-2B-Instruct /app/models/Qwen3-VL-2B-Instruct
+# Model is downloaded at runtime on first startup via HuggingFace Hub
+# (Qwen/Qwen3-VL-2B-Instruct, ~4GB, public - no token needed)
 
 # Upgrade pip
 RUN pip3 install --no-cache-dir --upgrade pip
