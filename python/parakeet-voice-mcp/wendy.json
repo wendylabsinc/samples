@@ -1,6 +1,6 @@
 {
     "appId": "sh.wendy.examples.parakeet-voice-mcp",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "entitlements": [
         {
             "type": "network",

@@ -70,20 +70,28 @@ The supervised Woof image selects `ACTION_MODE=border_collie`. In that mode
 the LLM and general MCP discovery are bypassed. Only these phrases are accepted
 after **Hey Wendy**:
 
-* `go to pear` / `go to the pear`
-* `go to apple` / `go to the apple`
+* `go to pear` / `go to the pear` / `find pears`
+* `go to apple` / `go to the apple` / `find apples`
+* `go to banana` / `go to the banana` / `find bananas`
 * natural variants such as `can you find a pear for me` and `locate the red apple`
 * `stop`, `stop demo`, or `stop the demo`
 
 The pear homophone `pair` is accepted only when it appears with a supported
 action verb. A casual fruit mention or a command containing multiple fruits is
-rejected as ambiguous.
+rejected as ambiguous. Parsed fruit commands still pass through the Border
+Collie API's qualified-fruit and readiness gates. Pear, red apple, and banana
+are accepted by the assembled stage-demo build; detection still has to qualify
+the requested fruit before motion begins.
 
 Voice actions start **disarmed after every app restart**. Review live transcripts
 at `http://<device>:8080`, then explicitly arm them there. The adapter calls the
 Border Collie app's existing `/api/run` and `/api/stop` endpoints, so its normal
 preflight and motion gates still apply. Spoken stop is only a convenience; it is
 not an emergency-stop mechanism, and the physical remote remains authoritative.
+
+Microphone readiness fails loudly. `/healthz` reports `ok: false` with the
+discovery or capture error, the page displays `MIC ERROR`, and voice actions
+cannot be armed until the configured input is actively capturing audio.
 
 ### Potential features
 

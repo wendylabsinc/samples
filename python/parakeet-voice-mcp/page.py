@@ -57,7 +57,7 @@ INDEX_HTML = """<!doctype html>
   <div class="hint">Say <b>&ldquo;{{WAKE}}&rdquo;</b>, then a command. Everything runs on the device.</div>
   <div id="actionControls">
     <span>Border Collie voice actions: <span id="actionState">disarmed</span>.<br>
-      <small>Allowed: &ldquo;find/go to pear or apple&rdquo; and convenience stop. Keep the physical remote ready.</small>
+      <small>Understands singular/plural pear, apple, or banana requests; the demo API enforces its qualified-fruit gate. Keep the physical remote ready.</small>
     </span>
     <button id="armButton" type="button">Arm voice actions</button>
   </div>
@@ -144,6 +144,18 @@ INDEX_HTML = """<!doctype html>
   function renderActionState(status) {
     if (status.mode !== 'border_collie') return;
     actionControls.classList.add('show');
+    if (!status.microphone || !status.microphone.ready) {
+      const error = status.microphone?.error || 'microphone status unavailable';
+      actionState.textContent = `MIC ERROR: ${error}`;
+      actionState.style.color = '#ff6b6b';
+      armButton.disabled = true;
+      armButton.textContent = 'Microphone unavailable';
+      armButton.className = '';
+      armButton.dataset.armed = '0';
+      return;
+    }
+    actionState.style.color = '';
+    armButton.disabled = false;
     actionState.textContent = status.armed ? 'ARMED' : 'disarmed';
     armButton.textContent = status.armed ? 'Disarm voice actions' : 'Arm voice actions';
     armButton.className = status.armed ? 'armed' : '';
@@ -160,9 +172,14 @@ INDEX_HTML = """<!doctype html>
     armButton.disabled = true;
     try {
       const response = await fetch('/api/actions/' + operation, { method: 'POST' });
-      renderActionState(await response.json());
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || 'Voice action failed');
+      renderActionState(body);
+    } catch (error) {
+      actionState.textContent = `MIC ERROR: ${error.message}`;
+      actionState.style.color = '#ff6b6b';
     } finally {
-      armButton.disabled = false;
+      await refreshActionState();
     }
   });
   connect();

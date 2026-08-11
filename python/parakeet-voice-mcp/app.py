@@ -20,7 +20,7 @@ import uuid
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from asr import SherpaTranscriber
@@ -100,6 +100,11 @@ def build_app() -> FastAPI:
     clients: set[WebSocket] = set()
     commands: asyncio.Queue = asyncio.Queue()
     ready = {"ready": False}
+    audio_state: dict = {
+        "ready": False,
+        "device": None,
+        "error": "microphone initialization has not completed",
+    }
     state: dict = {"loop": None}
     collie = BorderCollieAdapter(BORDER_COLLIE_URL) if ACTION_MODE == "border_collie" else None
     if collie is not None:
@@ -115,17 +120,45 @@ def build_app() -> FastAPI:
     # -- audio thread -------------------------------------------------------
 
     def listen() -> None:
-        devices = list_input_devices()
-        device = select_input_device(AUDIO_DEVICE, devices)
+        try:
+            devices = list_input_devices()
+            device = select_input_device(AUDIO_DEVICE, devices)
+        except Exception as exc:
+            audio_state.update(
+                ready=False,
+                device=None,
+                error=f"microphone discovery failed: {exc}",
+            )
+            print(f"[audio] FATAL: {audio_state['error']}", flush=True)
+            return
         if device is None:
-            print(f"[audio] no input matched {AUDIO_DEVICE!r}", flush=True)
+            available = ", ".join(f"[{item.index}] {item.name}" for item in devices)
+            audio_state.update(
+                ready=False,
+                device=None,
+                error=(
+                    f"no microphone matched {AUDIO_DEVICE!r}; "
+                    f"available inputs: {available or 'none'}"
+                ),
+            )
+            print(f"[audio] FATAL: {audio_state['error']}", flush=True)
             return
         print(f"[audio] using [{device.index}] {device.name}", flush=True)
 
         frontend = AudioFrontEnd(target_dbfs=-20.0)
         chunker = UtteranceChunker()
         capture = Capture(device)
-        capture.start()
+        try:
+            capture.start()
+        except Exception as exc:
+            audio_state.update(
+                ready=False,
+                device=device.name,
+                error=f"microphone capture failed to start: {exc}",
+            )
+            print(f"[audio] FATAL: {audio_state['error']}", flush=True)
+            return
+        audio_state.update(ready=True, device=device.name, error=None)
         armed_until = 0.0
         last_level_broadcast = 0.0
         import time
@@ -191,8 +224,19 @@ def build_app() -> FastAPI:
                 if not CONTINUOUS_TRANSCRIPTION and ready["ready"]:
                     asyncio.run_coroutine_threadsafe(
                         commands.put((event["id"], event["text"])), loop)
+        except Exception as exc:
+            audio_state.update(
+                ready=False,
+                error=f"microphone capture stopped unexpectedly: {exc}",
+            )
+            print(f"[audio] FATAL: {audio_state['error']}", flush=True)
         finally:
             capture.stop()
+            if audio_state["ready"]:
+                audio_state.update(
+                    ready=False,
+                    error="microphone capture stopped",
+                )
 
     # -- LLM + MCP worker ---------------------------------------------------
 
@@ -267,20 +311,28 @@ def build_app() -> FastAPI:
 
     @app.get("/healthz")
     async def _healthz() -> dict:
-        return {"ok": True, "wake_word": wake_key, "tools_ready": ready["ready"],
+        return {"ok": bool(audio_state["ready"]),
+                "wake_word": wake_key, "tools_ready": ready["ready"],
                 "clients": len(clients), "action_mode": ACTION_MODE,
                 "actions_armed": collie.armed if collie is not None else None,
-                "continuous_transcription": CONTINUOUS_TRANSCRIPTION}
+                "continuous_transcription": CONTINUOUS_TRANSCRIPTION,
+                "microphone": dict(audio_state)}
 
     @app.get("/api/actions/status")
     async def _action_status() -> dict:
         return {"mode": ACTION_MODE,
-                "armed": collie.armed if collie is not None else None}
+                "armed": collie.armed if collie is not None else None,
+                "microphone": dict(audio_state)}
 
     @app.post("/api/actions/arm")
     async def _arm_actions() -> dict:
         if collie is None:
             return {"mode": ACTION_MODE, "armed": None}
+        if not audio_state["ready"]:
+            raise HTTPException(
+                status_code=503,
+                detail=str(audio_state["error"] or "microphone is unavailable"),
+            )
         collie.arm()
         print("[collie] voice actions armed from the local UI", flush=True)
         return {"mode": ACTION_MODE, "armed": True}

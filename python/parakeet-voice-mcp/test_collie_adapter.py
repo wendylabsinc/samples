@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from collie_adapter import BorderCollieAdapter, VoiceIntent, interpret_command
+from page import INDEX_HTML
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -27,7 +28,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class InterpretCommandTests(unittest.TestCase):
-    def test_accepts_only_the_supported_fruit_phrases(self) -> None:
+    def test_accepts_singular_and_plural_supported_fruit_phrases(self) -> None:
         self.assertEqual(
             interpret_command("Go to the pear"),
             VoiceIntent(action="activate_demo", target_fruit="pear"),
@@ -36,8 +37,19 @@ class InterpretCommandTests(unittest.TestCase):
             interpret_command("go to apple"),
             VoiceIntent(action="activate_demo", target_fruit="apple"),
         )
+        self.assertEqual(
+            interpret_command("go to apples"),
+            VoiceIntent(action="activate_demo", target_fruit="apple"),
+        )
+        self.assertEqual(
+            interpret_command("find the banana"),
+            VoiceIntent(action="activate_demo", target_fruit="banana"),
+        )
+        self.assertEqual(
+            interpret_command("find bananas"),
+            VoiceIntent(action="activate_demo", target_fruit="banana"),
+        )
         self.assertIsNone(interpret_command("go forward"))
-        self.assertIsNone(interpret_command("go to banana"))
 
     def test_accepts_natural_find_requests_and_the_pear_homophone(self) -> None:
         self.assertEqual(
@@ -52,9 +64,17 @@ class InterpretCommandTests(unittest.TestCase):
     def test_does_not_trigger_on_a_casual_or_ambiguous_fruit_mention(self) -> None:
         self.assertIsNone(interpret_command("I like pears"))
         self.assertIsNone(interpret_command("find an apple and a pear"))
+        self.assertIsNone(interpret_command("find bananas and apples"))
 
     def test_accepts_a_narrow_stop_vocabulary(self) -> None:
         self.assertEqual(interpret_command("stop the demo"), VoiceIntent("stop_demo"))
+
+
+class VoicePageTests(unittest.TestCase):
+    def test_missing_microphone_is_rendered_as_a_loud_blocker(self) -> None:
+        self.assertIn("MIC ERROR", INDEX_HTML)
+        self.assertIn("Microphone unavailable", INDEX_HTML)
+        self.assertIn("armButton.disabled = true", INDEX_HTML)
 
 
 class DispatchTests(unittest.TestCase):
@@ -82,6 +102,15 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(
             _Handler.requests,
             [("/api/run", {"target_fruit": "pear", "activation_source": "voice"})],
+        )
+        self.assertEqual(result["calls"][0]["tool"], "activate_demo")
+
+    def test_plural_banana_dispatches_the_canonical_target(self) -> None:
+        self.adapter.arm()
+        result = self.adapter.dispatch("find bananas")
+        self.assertEqual(
+            _Handler.requests,
+            [("/api/run", {"target_fruit": "banana", "activation_source": "voice"})],
         )
         self.assertEqual(result["calls"][0]["tool"], "activate_demo")
 
