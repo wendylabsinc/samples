@@ -1,0 +1,6 @@
+# HOST ONLY. Never referenced by any Stagefile — see the plan's global
+# constraints for why torch must not enter a device image.
+ultralytics==8.3.0
+torch==2.4.1
+safetensors==0.4.5
+numpy==1.26.4
