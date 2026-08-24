@@ -3,8 +3,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Send, Bot, User, Loader2, Cpu, Zap } from "lucide-react";
+
+let idCounter = 0;
+function generateId(): string {
+  return `${Date.now()}-${++idCounter}`;
+}
 
 interface Message {
   id: string;
@@ -36,7 +41,7 @@ function App() {
     if (!input.trim() || isLoading) return;
 
     const userMessage: Message = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       role: "user",
       content: input.trim(),
     };
@@ -59,7 +64,7 @@ function App() {
       const data: ChatResponse = await response.json();
 
       const assistantMessage: Message = {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: "assistant",
         content: data.text,
         tokensGenerated: data.tokensGenerated,
@@ -70,7 +75,7 @@ function App() {
     } catch (error) {
       console.error("Error:", error);
       const errorMessage: Message = {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: "assistant",
         content: "Sorry, there was an error processing your request.",
       };
