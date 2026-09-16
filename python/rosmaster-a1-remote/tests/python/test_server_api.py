@@ -354,6 +354,16 @@ class DirectGamepadArbitrationTests(ServerTestCase):
         self.assertEqual(snapshot["command"]["linear_x"], 0.0)
         self.assertTrue(snapshot["browser_start_required"])
 
+    def test_a_manual_direct_command_disables_the_planner_for_stick_override(self):
+        """WDY-1645 server half: the stick override sends a manual command, and
+        direct_update must disable autonomy so the planner stops driving."""
+        server.control.direct_acquire()
+        with mock.patch.object(server.control, "_auto_ready", return_value={"ready": True, "reason": "ready"}):
+            self.assertTrue(server.control.direct_set_auto(True, 1.0))
+        self.assertTrue(server.control.auto_snapshot()["enabled"])
+        self.assertTrue(server.control.direct_update(0.5, 0.03))
+        self.assertFalse(server.control.auto_snapshot()["enabled"])
+
     def test_direct_auto_reports_the_actual_command_source(self):
         server.control.direct_acquire()
         with mock.patch.object(server.control, "_auto_ready", return_value={"ready": True, "reason": "ready"}):

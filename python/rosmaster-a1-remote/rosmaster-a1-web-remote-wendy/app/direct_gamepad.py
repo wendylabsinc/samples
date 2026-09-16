@@ -82,6 +82,13 @@ DIRECT_STEERING_MAX_PERCENT = 100
 DIRECT_SCAN_INTERVAL_S = 0.5
 DIRECT_HEARTBEAT_INTERVAL_S = 0.1
 DIRECT_ACTION_LOG_LIMIT = 20
+# WDY-1645: a deliberate stick or trigger move during Auto Nav reverts to
+# manual. The magnitude that counts as deliberate sits above the drive
+# deadzone, and it must persist for this many consecutive input samples so a
+# BLE pad's rest jitter or a single noisy report cannot flip modes. Two samples
+# at the pad's report rate settle in well under one autonomy publish tick.
+DIRECT_OVERRIDE_THRESHOLD = float(os.environ.get("DIRECT_OVERRIDE_THRESHOLD", "0.25"))
+DIRECT_OVERRIDE_SAMPLES = int(os.environ.get("DIRECT_OVERRIDE_SAMPLES", "2"))
 
 
 @dataclass(frozen=True)
@@ -281,6 +288,8 @@ class DirectGamepadWorker:
         self._axis_values: dict[int, float] = {}
         self._hat_values = {Codes.ABS_HAT0X: 0, Codes.ABS_HAT0Y: 0}
         self._motion_dirty = False
+        # Consecutive over-threshold motion samples seen while auto is engaged.
+        self._override_samples = 0
         self._speed = DIRECT_SPEED_DEFAULT
         self._auto_speed = clamp(float(auto_speed), DIRECT_SPEED_MIN, DIRECT_SPEED_MAX)
         self._steering_percent = DIRECT_STEERING_DEFAULT_PERCENT
@@ -735,6 +744,10 @@ class DirectGamepadWorker:
                 self._note_action("auto_rejected", f"{speed:.2f}")
                 return
             self._auto_enabled = enabled
+            if enabled:
+                # A fresh engagement starts the override debounce from zero, so
+                # a count left over from before cannot trip it on the next tick.
+                self._override_samples = 0
             self._status["reason"] = "direct_gamepad_auto" if enabled else "direct_gamepad_active"
             self._note_action("auto_on" if enabled else "auto_off", f"{speed:.2f}")
         if not enabled:
@@ -775,9 +788,38 @@ class DirectGamepadWorker:
         with self._lock:
             dirty = self._motion_dirty
             self._motion_dirty = False
-            apply = dirty and self._owned and not self._auto_enabled
+            override = self._detect_stick_override_locked()
+            apply = (dirty or override) and self._owned and not self._auto_enabled
         if apply:
             self._apply_drive()
+
+    def _detect_stick_override_locked(self) -> bool:
+        """Exit auto on sustained deliberate stick/trigger motion; lock held.
+
+        Returns True on the sample that trips the override, having already
+        cleared the auto flag and logged it. The manual drive itself is applied
+        by the caller, which also disables the planner server-side.
+        """
+        if not (self._owned and self._auto_enabled) or self._candidate is None:
+            self._override_samples = 0
+            return False
+        inputs = self._drive_inputs_locked(self._candidate)
+        if inputs is None:
+            self._override_samples = 0
+            return False
+        steer, forward, reverse = inputs
+        magnitude = max(abs(steer), forward, reverse)
+        if magnitude < DIRECT_OVERRIDE_THRESHOLD:
+            self._override_samples = 0
+            return False
+        self._override_samples += 1
+        if self._override_samples < DIRECT_OVERRIDE_SAMPLES:
+            return False
+        self._override_samples = 0
+        self._auto_enabled = False
+        self._status["reason"] = "direct_gamepad_active"
+        self._note_action("stick_override", f"{magnitude:.2f}")
+        return True
 
     def _drive_inputs_locked(self, candidate: Candidate) -> tuple[float, float, float] | None:
         """(steer, forward, reverse) from current axis/button state; lock held."""

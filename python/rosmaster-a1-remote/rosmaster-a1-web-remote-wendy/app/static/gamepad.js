@@ -35,6 +35,13 @@ const GAMEPAD_SPEED_STEP = 0.05;
 const GAMEPAD_SPEED_MIN = 0;
 const GAMEPAD_SPEED_MAX = 2;
 const GAMEPAD_STEER_STEP = 10;
+// WDY-1645: a stick or trigger past this magnitude, held this many consecutive
+// frames while Auto Nav owns the motors, hands control back to the operator.
+// The magnitude sits above the drive deadzone, and the frame count rejects a
+// BLE pad's rest jitter or a single noisy sample. It mirrors the on-device
+// DIRECT_OVERRIDE_* constants in direct_gamepad.py.
+const GAMEPAD_OVERRIDE_THRESHOLD = 0.25;
+const GAMEPAD_OVERRIDE_SAMPLES = 2;
 const GAMEPAD_STEER_MIN = 10;
 const GAMEPAD_STEER_MAX = 100;
 
@@ -224,6 +231,8 @@ function computeGamepadStep(padSnapshot, prevPadState, uiState) {
     actions.push({ type: "nudgeSteerScale", value: nudgeSteer(uiState.steerScale, -GAMEPAD_STEER_STEP) });
   }
 
+  let overrideSamples = (prevPadState && prevPadState.overrideSamples) || 0;
+
   let drive;
   if (stopping) {
     // A stop frame ends with a zeroed command, whatever the sticks and
@@ -233,12 +242,34 @@ function computeGamepadStep(padSnapshot, prevPadState, uiState) {
     // survived the stop, so the decision lives here now and the dispatcher
     // only assigns what it is handed.
     drive = { left: { x: 0, y: 0 } };
+    overrideSamples = 0;
   } else if (uiState.auto) {
-    // Auto Nav owns the motors. Returning null tells the dispatcher to leave
-    // the outgoing command alone rather than overwrite it with stick values.
-    drive = null;
+    // Auto Nav owns the motors, so the pad stays out of the command stream
+    // (drive stays null) UNTIL the operator makes a deliberate, sustained
+    // move: a stick or trigger past the override threshold for two frames
+    // hands control back. This is the only way out of auto besides Y and the
+    // stop buttons, and it must not fire on a single noisy sample.
+    const axes = (padSnapshot && padSnapshot.axes) || [];
+    const steer = applyDeadzone(axes[0] || 0);
+    const reverse = gamepadButtonValue(buttons[6]);
+    const forward = gamepadButtonValue(buttons[7]);
+    const magnitude = Math.max(Math.abs(steer), forward, reverse);
+    overrideSamples = magnitude >= GAMEPAD_OVERRIDE_THRESHOLD ? overrideSamples + 1 : 0;
+    if (overrideSamples >= GAMEPAD_OVERRIDE_SAMPLES) {
+      overrideSamples = 0;
+      const driveValue = applyDeadzone(forward - reverse, 0.05);
+      const left = { x: steer, y: -driveValue };
+      // The dispatcher arms manual control and posts this command, which also
+      // disables the planner server-side. The drive rides in the action so it
+      // is sent before the next heartbeat rather than a frame later.
+      actions.push({ type: "stickOverride", drive: { left } });
+      drive = { left };
+    } else {
+      drive = null;
+    }
   } else if (!uiState.armed) {
     drive = { left: { x: 0, y: 0 } };
+    overrideSamples = 0;
   } else {
     // The right stick is deliberately unread. Commanding angular_z at 1.0 for
     // two seconds produced an encoder delta of exactly zero on all four
@@ -252,9 +283,10 @@ function computeGamepadStep(padSnapshot, prevPadState, uiState) {
     const forward = gamepadButtonValue(buttons[7]);
     const driveValue = applyDeadzone(forward - reverse, 0.05);
     drive = { left: { x: steer, y: -driveValue } };
+    overrideSamples = 0;
   }
 
-  return { actions, drive, nextPadState: { buttons: pressed } };
+  return { actions, drive, nextPadState: { buttons: pressed, overrideSamples } };
 }
 
 // computeDisconnectStep decides what happens when the pad vanishes mid drive.

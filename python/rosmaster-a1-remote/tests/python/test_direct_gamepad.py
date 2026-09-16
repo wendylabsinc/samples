@@ -543,3 +543,91 @@ class WorkerEventTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutonomyStickOverrideTests(unittest.TestCase):
+    """WDY-1645: a deliberate stick move during Auto Nav reverts to manual.
+
+    The reader thread must not simply un-gate the sticks during auto (a BLE
+    pad's rest jitter or a single noisy sample would kick the car out of its
+    plan). Movement past a threshold, held for two consecutive samples, exits
+    auto, logs ``stick_override`` and applies the manual command, which also
+    disables the planner server-side through ``direct_update``.
+    """
+
+    def setUp(self):
+        self.control = FakeControl()
+        self.now = 100.0
+        self.worker = gamepad.DirectGamepadWorker(
+            self.control,
+            backend=FakeBackend(),
+            clock=lambda: self.now,
+            log=lambda _: None,
+        )
+        self.worker._prepare_candidate(candidate())
+
+    def event(self, event_type, code, value):
+        self.worker.process_event(Event(event_type, code, value))
+
+    def sync(self):
+        self.event(gamepad.Codes.EV_SYN, gamepad.Codes.SYN_REPORT, 0)
+
+    def engage_auto(self):
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)  # A -> arm
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1)   # Y -> auto on
+        self.assertTrue(self.worker.snapshot()["auto"])
+
+    def actions(self):
+        return [entry["action"] for entry in self.worker.snapshot()["live"]["actions"]]
+
+    def test_two_samples_of_stick_movement_exit_auto_into_manual(self):
+        self.engage_auto()
+        # ABS_X 16000 -> steer ~0.42, well past the 0.25 override threshold.
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_X, 16000)
+        self.sync()
+        self.assertTrue(self.worker.snapshot()["auto"], "one sample must not flip modes")
+        self.sync()
+        snapshot = self.worker.snapshot()
+        self.assertFalse(snapshot["auto"])
+        self.assertEqual(snapshot["reason"], "direct_gamepad_active")
+        self.assertIn("stick_override", self.actions())
+        # The manual drive reached the control object and it steers (positive
+        # stick maps to negative steering_y).
+        update = [call for call in self.control.calls if call[0] == "update"][-1]
+        self.assertLess(update[2], 0.0)
+
+    def test_a_single_stick_sample_does_not_exit_auto(self):
+        self.engage_auto()
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_X, 16000)
+        self.sync()
+        self.assertTrue(self.worker.snapshot()["auto"])
+        self.assertNotIn("stick_override", self.actions())
+
+    def test_small_stick_noise_below_the_threshold_never_exits_auto(self):
+        self.engage_auto()
+        drive_calls_before = len([c for c in self.control.calls if c[0] == "update"])
+        for _ in range(6):
+            # ABS_X 8300 -> steer ~0.15: past the deadzone, short of override.
+            self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_X, 8300)
+            self.sync()
+        self.assertTrue(self.worker.snapshot()["auto"])
+        self.assertNotIn("stick_override", self.actions())
+        # No manual command slipped through while auto was still engaged.
+        drive_calls_after = len([c for c in self.control.calls if c[0] == "update"])
+        self.assertEqual(drive_calls_after, drive_calls_before)
+
+    def test_a_pulled_trigger_also_exits_auto(self):
+        worker = gamepad.DirectGamepadWorker(
+            self.control, backend=FakeBackend(), clock=lambda: self.now, log=lambda _: None
+        )
+        worker._prepare_candidate(candidate(ble=True))
+        worker.process_event(Event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1))
+        worker.process_event(Event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1))
+        self.assertTrue(worker.snapshot()["auto"])
+        worker.process_event(Event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_GAS, 1023))
+        worker.process_event(Event(gamepad.Codes.EV_SYN, gamepad.Codes.SYN_REPORT, 0))
+        worker.process_event(Event(gamepad.Codes.EV_SYN, gamepad.Codes.SYN_REPORT, 0))
+        self.assertFalse(worker.snapshot()["auto"])
+        self.assertIn("stick_override", [e["action"] for e in worker.snapshot()["live"]["actions"]])
+        update = [call for call in self.control.calls if call[0] == "update"][-1]
+        self.assertGreater(update[1], 0.0)  # forward manual drive applied
