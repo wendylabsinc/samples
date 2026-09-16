@@ -55,6 +55,13 @@ check "CP2102 first: picks it" "${root}/dev/ttyUSB0" 0 "${root}"
 root="${work}/motoronly"; make_adapter "${root}" ttyUSB0 1-2.1 1a86
 check "CH340 alone: refuses rather than claims the motor board" "" 1 "${root}"
 
+# The bus as seen on 2026-09-16: the motor board's CH340 (1a86:7523) plus the
+# Yahboom voice module's CH340 (1a86:7522, behind the module's own hub next to
+# its USB audio codec), and the LiDAR's CP2102 unplugged. Two 1a86 adapters and
+# no 10c4 must still answer nothing -- neither CH340 is the LiDAR.
+root="${work}/twoch340"; make_adapter "${root}" ttyUSB0 1-2.1 1a86; make_adapter "${root}" ttyUSB1 1-2.3.4.3 1a86
+check "two CH340s (motor board + voice module), no CP2102: refuses" "" 1 "${root}"
+
 # CP2102 visible in sysfs but its /dev node absent (entitlement gap).
 root="${work}/nodev"; make_adapter "${root}" ttyUSB0 1-2.4 10c4 no
 check "CP2102 without a dev node: refuses" "" 1 "${root}"

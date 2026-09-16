@@ -158,13 +158,13 @@ class DriveEndpointTests(ServerTestCase):
     def test_normal_command_is_accepted_and_reaches_control(self):
         status, body = self._post_json(
             "/api/drive",
-            {"enabled": True, "linear_x": 0.4, "steering_y": 0.05, "angular_z": 0.2},
+            {"enabled": True, "linear_x": 0.4, "steering_y": 0.04, "angular_z": 0.2},
         )
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
         self.assertEqual(body["command"]["enabled"], True)
         self.assertEqual(body["command"]["linear_x"], 0.4)
-        self.assertEqual(body["command"]["steering_y"], 0.05)
+        self.assertEqual(body["command"]["steering_y"], 0.04)
         self.assertEqual(body["command"]["angular_z"], 0.2)
         # It really reached the shared control object, not just the response body.
         self.assertEqual(server.control.snapshot()["command"]["linear_x"], 0.4)
@@ -228,7 +228,35 @@ class DriveEndpointTests(ServerTestCase):
         self.assertTrue(body["ok"])
 
 
+class SteeringRangeTests(unittest.TestCase):
+    def test_steering_limit_defaults_to_the_firmware_range(self):
+        """For the Ackermann A1, Twist.linear.y is a steering angle.
+
+        Rosmaster_Lib documents v_y in [-0.045, 0.045] for the steering car
+        types, and the board clamps anything larger: on the bench it read
+        back 0.045 whatever the app sent above it. A limit of 0.12 made the
+        stick saturate at about half travel.
+        """
+        self.assertEqual(server.MAX_STEERING_Y, 0.045)
+
+
 class DirectGamepadArbitrationTests(ServerTestCase):
+    def test_direct_auto_refuses_to_engage_until_the_car_is_ready(self):
+        """The direct path must gate on the same readiness the README promises.
+
+        A fresh control has no LiDAR, so it is not ready. Engaging anyway left
+        the worker believing it was in auto while the planner only waited.
+        """
+        server.control.direct_acquire()
+        self.assertFalse(server.control.direct_set_auto(True, 1.0))
+        snapshot = server.control.auto_snapshot()
+        self.assertFalse(snapshot["enabled"])
+        self.assertIn("waiting", snapshot["decision"]["reason"])
+
+        with mock.patch.object(server.control, "_auto_ready", return_value={"ready": True, "reason": "ready"}):
+            self.assertTrue(server.control.direct_set_auto(True, 1.0))
+        self.assertTrue(server.control.auto_snapshot()["enabled"])
+
     def test_connected_but_unarmed_does_not_block_browser_control(self):
         # Connection state belongs to the worker; only direct_acquire changes
         # the control arbiter. With no acquisition, the ordinary browser path
@@ -328,7 +356,8 @@ class DirectGamepadArbitrationTests(ServerTestCase):
 
     def test_direct_auto_reports_the_actual_command_source(self):
         server.control.direct_acquire()
-        server.control.direct_set_auto(True, 1.0)
+        with mock.patch.object(server.control, "_auto_ready", return_value={"ready": True, "reason": "ready"}):
+            server.control.direct_set_auto(True, 1.0)
         self.assertEqual(server.control.snapshot()["active_source"], "direct_gamepad_auto")
 
 
@@ -362,7 +391,7 @@ class PublishTwistTests(ServerTestCase):
 
     def test_publish_maps_command_fields_onto_twist(self):
         server.control.update(
-            {"enabled": True, "linear_x": 0.4, "steering_y": 0.05, "angular_z": 0.2}
+            {"enabled": True, "linear_x": 0.4, "steering_y": 0.04, "angular_z": 0.2}
         )
         server.control._publish()
 
@@ -371,7 +400,7 @@ class PublishTwistTests(ServerTestCase):
         # velocity; angular.z carries the turn rate. See server.py lines
         # 850-852.
         self.assertEqual(msg.linear.x, 0.4)
-        self.assertEqual(msg.linear.y, 0.05)
+        self.assertEqual(msg.linear.y, 0.04)
         self.assertEqual(msg.angular.z, 0.2)
 
     def test_publish_falls_back_to_zero_twist_after_command_timeout(self):
@@ -2044,6 +2073,41 @@ class FrameEndpointTests(ServerTestCase):
         server.control = self._FakeControl(None)
         status, *_ = self._get("/frame_realsense_color.jpg")
         self.assertEqual(status, 404)
+
+    def test_a_frame_404_keeps_the_connection_open_for_the_next_poll(self):
+        """The 404 that opens a lease must not cost the page a new TLS handshake.
+
+        send_error answers with Connection: close. On Wi-Fi with 20 % loss the
+        page's retry then paid TCP + TLS again, arrived after the two-second
+        lease had lapsed, got another lease-opening 404, and the tile never
+        showed a frame (observed 2026-09-16).
+        """
+        control = self._FakeControl(None)
+        server.control = control
+        conn = self._connection()
+        try:
+            conn.request("GET", "/frame_realsense_color.jpg?r=1")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 404)
+            self.assertFalse(response.will_close, "a lease-opening 404 must keep the socket")
+            self.assertEqual(len(response.read()), int(response.getheader("Content-Length")))
+
+            control.frame = b"\xff\xd8 next"
+            conn.request("GET", "/frame_realsense_color.jpg?r=2")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"\xff\xd8 next")
+        finally:
+            conn.close()
+
+    def test_the_frame_lease_outlives_the_pages_retry(self):
+        """The page retries a failed frame after 1 s plus 0.4 s per tile index.
+
+        Three tiles and one slow round trip put the retry well past two
+        seconds. A lease shorter than that lapses between polls and every poll
+        becomes the lease-opening 404 again.
+        """
+        self.assertGreaterEqual(server.POLL_VIEWER_TTL_S, 6.0)
 
     def test_polling_counts_as_viewership_so_frames_get_encoded(self):
         """The encoder is gated on someone watching; a poll is someone watching."""

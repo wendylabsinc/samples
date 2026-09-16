@@ -53,7 +53,12 @@ PUBLISH_HZ = float(os.environ.get("PUBLISH_HZ", "20"))
 # never a stalled command.
 GRAPH_COUNT_SAMPLE_INTERVAL_S = float(os.environ.get("GRAPH_COUNT_SAMPLE_INTERVAL_S", "0.5"))
 MAX_LINEAR_X = float(os.environ.get("MAX_LINEAR_X", "1000.00"))
-MAX_STEERING_Y = float(os.environ.get("MAX_STEERING_Y", "0.12"))
+# For this Ackermann chassis Twist.linear.y is a steering angle, not a
+# velocity: Rosmaster_Lib documents v_y in [-0.045, 0.045] for the steering car
+# types and the board clamps anything beyond that (it read back 0.045 on the
+# bench whatever was sent above it). 0.12 made the stick saturate at about half
+# travel and behave like a three-position switch.
+MAX_STEERING_Y = float(os.environ.get("MAX_STEERING_Y", "0.045"))
 MAX_ANGULAR_Z = float(os.environ.get("MAX_ANGULAR_Z", "1.0"))
 AUTO_SPEED = float(os.environ.get("AUTO_SPEED", "1.00"))
 AUTO_STOP_DISTANCE = float(os.environ.get("AUTO_STOP_DISTANCE", "0.35"))
@@ -156,9 +161,15 @@ PREVIEW_MAX_FPS = float(os.environ.get("PREVIEW_MAX_FPS", "6.0"))
 PREVIEW_MIN_INTERVAL_S = 1.0 / PREVIEW_MAX_FPS if PREVIEW_MAX_FPS > 0 else 0.0
 # How long one GET /frame_*.jpg counts as "someone is watching" for the
 # encoder gate. The page polls its expanded tile several times a second, so
-# a live viewer renews this continuously; a closed tab lapses within a couple
-# of seconds and encoding stops, same as an MJPEG viewer disconnecting.
-POLL_VIEWER_TTL_S = float(os.environ.get("POLL_VIEWER_TTL_S", "2.0"))
+# a live viewer renews this continuously; a closed tab lapses and encoding
+# stops, same as an MJPEG viewer disconnecting.
+#
+# The lease has to outlive the page's retry after the 404 that opens it: one
+# second plus 0.4 s per tile index, plus one slow round trip. At 2 s a lossy
+# Wi-Fi link lapsed the lease between every poll and the tile never showed a
+# frame (2026-09-16). The cost of a longer lease is a few seconds of encoding
+# after the last viewer leaves.
+POLL_VIEWER_TTL_S = float(os.environ.get("POLL_VIEWER_TTL_S", "8.0"))
 # No depth feed is named here. Which depth camera this car carries is decided
 # at runtime, and naming one in a static list is exactly the bug that left Auto
 # Nav refusing to engage on a car whose HP60C had been replaced by a RealSense.
@@ -734,6 +745,23 @@ class RosmasterControl(Node):
         return True
 
     def direct_set_auto(self, enabled: bool, speed: float) -> bool:
+        with self._lock:
+            if not self._direct_owned:
+                return False
+        if enabled:
+            # Same gate the browser path and the README promise: no LiDAR, no
+            # depth or no base driver means no engagement, and the reason is
+            # left where the page and the pad's action log can show it.
+            ready = self._auto_ready()
+            if not ready["ready"]:
+                with self._lock:
+                    self._auto_decision = {
+                        "action": "auto_refused",
+                        "linear_x": 0.0,
+                        "steering_y": 0.0,
+                        "reason": ready["reason"],
+                    }
+                return False
         with self._lock:
             if not self._direct_owned:
                 return False
@@ -3104,7 +3132,17 @@ class Handler(BaseHTTPRequestHandler):
         """
         jpg = control.poll_camera_frame(camera, stream)
         if jpg is None:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            # Not send_error: that answers Connection: close, and the page's
+            # retry then pays TCP + TLS again, which on a lossy link arrives
+            # after the lease it just opened has lapsed. A plain 404 with a
+            # length keeps the socket for the poll that will get the frame.
+            body = b"no frame yet\n"
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "image/jpeg")

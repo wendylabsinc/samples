@@ -54,8 +54,9 @@ On the device, container IDs are `rosmaster-a1_<service>`; read one service's
 logs with `wendy device logs --app rosmaster-a1 --service <name>`.
 
 `scripts/deploy_car.sh <car-hostname>.local:50052 [service ...]` is the
-preferred way to deploy. It prunes `serial` entitlements for tty nodes that
-are not currently present, then runs `wendy run` for you. A serial
+preferred way to deploy. It asks the device which tty nodes exist right now
+(`wendy device shell -- ls /dev/ttyUSB*`), prunes `serial` entitlements for
+the ones that are absent, then runs `wendy run` for you. A serial
 entitlement naming an absent device does not degrade, it hard fails container
 creation, and USB serial adapters renumber between boots — and now that all
 four services share one app, one absent adapter can block the whole deploy
@@ -75,9 +76,11 @@ cd rosmaster-a1-devscan-wendy && wendy run --yes --device <car-hostname>.local:5
 
 ## Driving it
 
-The web service opens the remote for you: once it passes its readiness check,
-a postStart hook launches your browser at `https://<car-hostname>.local:8443`
-automatically on deploy. To open it by hand instead:
+On an attached `wendy run`, the web service opens the remote for you: once it
+passes its readiness check, a postStart hook launches your browser at
+`https://<car-hostname>.local:8443`. A detached deploy, which is what
+`scripts/deploy_car.sh` does, skips host-side postStart hooks entirely (CLI
+behaviour since 2026-08-21), so open it by hand:
 
 ```text
 https://<car-hostname>.local:8443
@@ -125,7 +128,10 @@ silently while a name simply stops resolving.
 
 On the direct WendyOS path, **X** and **View** are intentionally ignored because
 their browser camera actions do not exist without the page. All drive, stop,
-speed, steering, and Auto Nav controls keep the mapping above.
+speed, steering, and Auto Nav controls keep the mapping above. If **Y** does
+nothing, look at the direct-pad action log in the diagnostics panel: an
+`auto_rejected` entry means the car was not ready (the reason is shown under
+Auto Nav), and no entry at all means the press never reached the worker.
 
 ### If the controller does nothing
 
@@ -155,7 +161,8 @@ The Controller panel distinguishes the cases. In order of likelihood:
   Disconnect, read failure, or stop releases ownership and browser motion stays
   latched off until an explicit START; reconnecting never resumes motion.
 - **Autonomous mode refuses to engage** without fresh depth, fresh LiDAR and a
-  live `/cmd_vel` subscriber, and it names which one it is waiting for.
+  live `/cmd_vel` subscriber, and it names which one it is waiting for. This
+  holds on both paths: the page's Auto Nav toggle and the pad's **Y** button.
 - **The recovery manoeuvre is bounded.** When boxed in, the car reverses for at
   most 1.5 seconds and 0.25 m per episode, shared across attempts and never
   extended, then stops and hands control back.
@@ -183,7 +190,19 @@ again.
 
 - **Serial adapters renumber between boots.** The motor board is identified by
   asking it for its firmware version rather than by device name; the LiDAR is
-  whichever adapter the motor board's `by-id` symlink does not resolve to.
+  chosen by USB vendor id (`10c4`, its CP2102), never by tty number.
+- **There is a third USB serial adapter on this car.** The Yahboom voice module
+  hangs off its own hub (`1a86:8091`) next to its USB audio codec and exposes a
+  CH340 (`1a86:7522`) for its MCU. It is silent at 115200 and 230400, so the
+  firmware-version probe skips it and the vendor-id picker ignores it, but it
+  does take a `ttyUSB<N>` slot: with the LiDAR plugged in there are three, and
+  with it unplugged the two `1a86` adapters are the motor board and the voice
+  module, not the motor board and the LiDAR.
+- **`wendy device hardware list` reports no serial ttys.** Release agents through
+  at least 2026.09.16 list usb, i2c, camera, spi, audio, network, gpu and
+  storage, but no `serial` category, so anything that prunes entitlements from
+  that list silently prunes nothing. `scripts/deploy_car.sh` enumerates through
+  `wendy device shell` instead and keeps the hardware list only as a fallback.
 - **A serial entitlement for an absent device hard fails deployment.** It does
   not warn and continue, so a loose cable can make an app undeployable. With
   all four services now sharing one `rosmaster-a1` app instead of four
@@ -200,6 +219,22 @@ again.
   command publisher, and four tiles at full frame rate starved it enough that
   the motor watchdog cut in. `PREVIEW_MAX_FPS` caps it; depth statistics are
   still computed on every frame.
+- **Steering is an angle, and the firmware caps it at 45 degrees.** For this
+  Ackermann chassis `Twist.linear.y` is the steering angle in the motor
+  library's units, documented as `[-0.045, 0.045]`, and the board clamps
+  anything larger (it reads back 0.045 whatever is sent above it). The app's
+  `MAX_STEERING_Y` is 0.045 for that reason; the earlier 0.12 made the stick
+  saturate at about half travel. Raising it buys nothing.
+- **A Bluetooth pad reports 0 on every axis until its first report.** The
+  kernel's placeholder value for a stick whose true centre is 32767 reads as
+  full left, so an axis that has not reported yet is treated as centred rather
+  than trusted. Before this, pressing **A** before touching the stick sent one
+  full-lock steer.
+- **The frame poll's first answer is a 404 that opens the viewer lease.** It is
+  answered with a length and without closing the connection, and the lease
+  (`POLL_VIEWER_TTL_S`, 8 s) outlives the page's retry, because a 2 s lease on
+  a lossy Wi-Fi link lapsed between every poll and the tile never showed a
+  frame while its badge still said live.
 - **The throttle ceiling is the motor library, not this code.**
   `set_car_motion` documents `v_x` in `[-1.8, 1.8]` for this chassis, and
   measured output saturates near 0.72 m/s well below that. More speed means
