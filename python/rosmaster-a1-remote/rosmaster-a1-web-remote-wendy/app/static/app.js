@@ -456,6 +456,23 @@ async function hardStop() {
   updateReadouts();
 }
 
+// stickOverride is WDY-1645: the operator moved a stick or trigger while Auto
+// Nav was driving. It arms manual control (startManual clears auto and, unlike
+// autoOff, guarantees armed so the stick actually drives), then posts the live
+// command. The enabled /api/drive is what disables the planner server-side, so
+// there is no separate /api/auto call to race the drive. It supersedes an
+// outstanding stop the same way every mode change does.
+async function stickOverride(action) {
+  applyControlState("startManual");
+  if (action && action.drive && action.drive.left) state.left = action.drive.left;
+  try {
+    await sendDrive();
+  } catch {
+    setConnection(false, "Override offline");
+  }
+  updateReadouts();
+}
+
 async function startManual() {
   applyControlState("startManual");
   state.left = { x: 0, y: 0 };
@@ -1170,6 +1187,7 @@ function applyGamepadAction(action) {
   if (action.type === "hardStop") hardStop();
   else if (action.type === "startManual") startManual();
   else if (action.type === "toggleAuto") setAuto(action.enabled);
+  else if (action.type === "stickOverride") stickOverride(action);
   else if (action.type === "expandFeed") setExpandedFeed(action.id);
   else if (action.type === "reconnectCamera") reconnectAllFeeds();
   else if (action.type === "nudgeManualSpeed") setSpeedValue("manual", action.value);

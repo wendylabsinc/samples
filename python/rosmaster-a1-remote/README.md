@@ -121,6 +121,7 @@ silently while a name simply stops resolving.
 | A | Arm manual driving |
 | B or Menu | Hard stop, works during autonomous mode too |
 | Y | Toggle autonomous mode |
+| Left stick or triggers, during Auto Nav | Take back manual control |
 | X | Cycle which camera tile is expanded |
 | D-pad up/down | Manual speed |
 | D-pad left/right | Autonomous speed |
@@ -163,6 +164,14 @@ The Controller panel distinguishes the cases. In order of likelihood:
 - **Autonomous mode refuses to engage** without fresh depth, fresh LiDAR and a
   live `/cmd_vel` subscriber, and it names which one it is waiting for. This
   holds on both paths: the page's Auto Nav toggle and the pad's **Y** button.
+- **Moving a stick takes control back from Auto Nav.** During an autonomous
+  run, pushing the left stick or squeezing a trigger past a threshold above the
+  deadzone, held for two input samples, exits autonomy and applies that manual
+  command. The two-sample debounce keeps a Bluetooth pad's rest jitter or a
+  single noisy report from tripping it. It works on both paths and settles well
+  inside one autonomy publish tick; the transition logs `stick_override` on the
+  direct path and arms manual driving on the page. `DIRECT_OVERRIDE_THRESHOLD`
+  and `DIRECT_OVERRIDE_SAMPLES` tune the on-device path.
 - **The recovery manoeuvre is bounded.** When boxed in, the car reverses for at
   most 1.5 seconds and 0.25 m per episode, shared across attempts and never
   extended, then stops and hands control back.

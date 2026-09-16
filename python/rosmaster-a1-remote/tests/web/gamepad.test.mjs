@@ -978,3 +978,61 @@ test("directPanelModel reports an empty action log honestly", () => {
   const model = directPanelModel({ connected: true, owned: true, live: liveBlock({ actions: [] }) }, 0);
   assert.equal(model.logText, "No controller actions yet.");
 });
+
+// WDY-1645: sustained stick/trigger movement during Auto Nav reverts to manual
+// ==========================================================================
+
+test("SAFETY: a stick held past the threshold for two frames exits auto into manual", () => {
+  const ui = uiState({ auto: true });
+  const pad = makePad({ axes: [0.9, 0, 0] });
+  const first = computeGamepadStep(pad, noPrev(), ui);
+  assert.equal(first.drive, null, "one frame must not flip modes");
+  assert.equal(first.actions.some((a) => a.type === "stickOverride"), false);
+
+  const second = computeGamepadStep(pad, first.nextPadState, ui);
+  const override = second.actions.find((a) => a.type === "stickOverride");
+  assert.ok(override, "two sustained frames must emit stickOverride");
+  assert.ok(second.drive && second.drive.left, "the override carries the live manual drive");
+  assert.ok(Math.abs(second.drive.left.x) > 0.5, "the held steer reaches the manual command");
+});
+
+test("a single over-threshold frame does not exit auto", () => {
+  const pad = makePad({ axes: [0.9, 0, 0] });
+  const result = computeGamepadStep(pad, noPrev(), uiState({ auto: true }));
+  assert.equal(result.actions.some((a) => a.type === "stickOverride"), false);
+  assert.equal(result.drive, null);
+});
+
+test("stick noise below the override threshold never exits auto", () => {
+  const ui = uiState({ auto: true });
+  const pad = makePad({ axes: [0.15, 0, 0] }); // past the 0.12 deadzone, short of 0.25
+  let prev = noPrev();
+  for (let frame = 0; frame < 6; frame += 1) {
+    const result = computeGamepadStep(pad, prev, ui);
+    assert.equal(result.actions.some((a) => a.type === "stickOverride"), false);
+    assert.equal(result.drive, null);
+    prev = result.nextPadState;
+  }
+});
+
+test("a trigger held past the threshold for two frames also exits auto", () => {
+  const ui = uiState({ auto: true });
+  const pad = makePad({ buttons: { 7: { pressed: true, value: 1 } } }); // right trigger
+  const first = computeGamepadStep(pad, noPrev(), ui);
+  assert.equal(first.actions.some((a) => a.type === "stickOverride"), false);
+  const second = computeGamepadStep(pad, first.nextPadState, ui);
+  assert.ok(second.actions.some((a) => a.type === "stickOverride"));
+  assert.ok(second.drive.left.y < 0, "forward trigger drives the manual command forward");
+});
+
+test("a stop pressed on the override frame wins and does not exit into a drive", () => {
+  const ui = uiState({ auto: true, armed: true });
+  const pad = makePad({ axes: [0.9, 0, 0] });
+  const first = computeGamepadStep(pad, noPrev(), ui);
+  // Now press B (stop) while the stick is still over the threshold.
+  const stopPad = makePad({ axes: [0.9, 0, 0], buttons: { 1: { pressed: true } } });
+  const second = computeGamepadStep(stopPad, first.nextPadState, ui);
+  assert.ok(second.actions.some((a) => a.type === "hardStop"));
+  assert.equal(second.actions.some((a) => a.type === "stickOverride"), false);
+  assert.deepEqual(second.drive, { left: { x: 0, y: 0 } });
+});

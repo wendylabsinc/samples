@@ -1162,3 +1162,29 @@ test("RESILIENCE: a status fetch that times out flips the connection indicator o
   assert.equal(page.el("statusText").textContent, "Remote offline");
   assert.equal(page.state.lastStatusOk, false);
 });
+
+test("WDY-1645: a sustained stick move during Auto Nav arms manual and drives the car", async () => {
+  const page = await freshPage();
+  page.run("state.gamepadEnabled = true; state.auto = true; state.armed = false;");
+
+  padFrame(page, {}, [0.9, 0, 0, 0]); // frame 1: below the debounce, still auto
+  assert.equal(page.posts("/api/drive").length, 0, "one frame must not command a drive");
+  assert.equal(page.state.auto, true);
+
+  padFrame(page, {}, [0.9, 0, 0, 0]); // frame 2: override trips
+  assert.equal(page.state.auto, false, "the override exits Auto Nav");
+  assert.equal(page.state.armed, true, "and arms manual so the stick actually drives");
+  const drives = page.posts("/api/drive");
+  assert.ok(drives.length >= 1, "the override posts the live manual command");
+  const body = drives[drives.length - 1].body;
+  assert.equal(body.enabled, true, "the posted command is an enabled manual drive");
+  assert.ok(Math.abs(body.steering_y) > 0, "the held steer reached the car");
+});
+
+test("WDY-1645: stick noise during Auto Nav neither drives nor exits auto", async () => {
+  const page = await freshPage();
+  page.run("state.gamepadEnabled = true; state.auto = true;");
+  for (let frame = 0; frame < 6; frame += 1) padFrame(page, {}, [0.15, 0, 0, 0]);
+  assert.equal(page.state.auto, true, "sub-threshold jitter must not exit auto");
+  assert.deepEqual(page.posts("/api/drive"), [], "and must not command a manual drive");
+});
