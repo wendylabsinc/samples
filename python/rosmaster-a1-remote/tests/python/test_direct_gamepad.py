@@ -36,6 +36,9 @@ class FakeControl:
 
     def direct_set_auto(self, enabled, speed):
         self.calls.append(("auto", enabled, speed))
+        # The real controller answers False when it will not engage (not
+        # owned, or the car is not ready). Tests flip this to exercise that.
+        return getattr(self, "auto_result", True)
 
     def direct_stop(self, reason):
         self.calls.append(("stop", reason))
@@ -242,6 +245,33 @@ class BluetoothProfileTests(unittest.TestCase):
     def last_linear(self):
         return [call for call in self.control.calls if call[0] == "update"][-1][1]
 
+    def test_arming_before_the_first_stick_report_steers_straight(self):
+        """A BLE pad advertises 0 for every axis until its first report.
+
+        The kernel seeds absinfo.value with 0 on a uhid device whose true
+        centre is 32767, so reading the advertised value as a position puts
+        the stick at full left. On the car, pressing A before touching the
+        stick sent one full-lock steer. An axis that has not reported yet is
+        centred, not wherever the kernel's placeholder happens to be.
+        """
+        axes = ble_axes()
+        axes[gamepad.Codes.ABS_X] = absinfo(0, 0, 65535, 4095)
+        device = FakeDevice("/dev/input/event7", keys=set(STANDARD_KEYS), axes=axes, uniq="pad-uniq")
+        seeded = candidate(device, ble=True)
+        seeded.axes = {code: gamepad._axis_range(info) for code, info in axes.items()}
+        self.worker._prepare_candidate(seeded)
+
+        self.assertEqual(self.worker.snapshot()["live"]["steer"], 0.0)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
+        update = [call for call in self.control.calls if call[0] == "update"][-1]
+        self.assertEqual(update[2], 0.0)
+
+        # The first real report is honoured as before.
+        self.event(gamepad.Codes.EV_ABS, gamepad.Codes.ABS_X, 0)
+        self.sync()
+        update = [call for call in self.control.calls if call[0] == "update"][-1]
+        self.assertAlmostEqual(update[2], 0.084, places=3)
+
     def test_gas_and_brake_satisfy_compatibility_without_legacy_trigger_codes(self):
         axes = ble_axes()
         axes.pop(gamepad.Codes.ABS_Z)
@@ -414,15 +444,39 @@ class WorkerEventTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.control.calls].count("acquire"), 2)
 
     def test_y_toggles_auto_only_after_direct_acquisition(self):
-        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_NORTH, 1)
+        """Physical Y is BTN_WEST (0x134) on xpad and hid-microsoft alike.
+
+        Captured raw from the kernel on the car on 2026-09-16: Y -> 0x134,
+        X -> 0x133. The first floor drive found Y doing nothing because the
+        dispatcher listened for 0x133, the X button.
+        """
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1)
         self.assertFalse(any(call[0] == "auto" for call in self.control.calls))
-        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_NORTH, 0)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 0)
         self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
-        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_NORTH, 1)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1)
         self.assertEqual(self.control.calls[-1], ("auto", True, 1.0))
-        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_NORTH, 0)
-        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_NORTH, 1)
+        self.assertTrue(self.worker.snapshot()["auto"])
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 0)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1)
         self.assertTrue(any(call == ("auto", False, 1.0) for call in self.control.calls))
+
+    def test_an_auto_toggle_the_server_refuses_leaves_the_pad_in_manual(self):
+        """direct_set_auto answers False when the car is not ready to drive itself.
+
+        The worker must not believe it is in auto (which silences its manual
+        drive path) while the server never engaged the planner.
+        """
+        self.control.auto_result = False
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1)
+        self.assertEqual(self.control.calls[-1], ("auto", True, 1.0))
+        snapshot = self.worker.snapshot()
+        self.assertFalse(snapshot["auto"])
+        self.assertEqual(snapshot["reason"], "direct_gamepad_active")
+        actions = [entry["action"] for entry in snapshot["live"]["actions"]]
+        self.assertIn("auto_rejected", actions)
+        self.assertNotIn("auto_on", actions)
 
     def test_dpad_and_bumpers_use_existing_bounds_and_steps(self):
         self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_DPAD_UP, 1)
@@ -438,10 +492,14 @@ class WorkerEventTests(unittest.TestCase):
         self.assertEqual(self.worker.snapshot()["steering_percent"], 80)
 
     def test_x_and_view_are_ignored_on_direct_path(self):
+        # Physical X is BTN_NORTH (0x133). Its browser-only camera action has
+        # no meaning here, and it must never reach the autonomy toggle.
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)
         before = list(self.control.calls)
-        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_WEST, 1)
+        self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_NORTH, 1)
         self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SELECT, 1)
         self.assertEqual(self.control.calls, before)
+        self.assertFalse(self.worker.snapshot()["auto"])
 
     def test_syn_dropped_stops_and_releases_immediately(self):
         self.event(gamepad.Codes.EV_KEY, gamepad.Codes.BTN_SOUTH, 1)

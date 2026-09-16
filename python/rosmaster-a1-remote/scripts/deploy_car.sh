@@ -53,13 +53,27 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${repo_root}"
 
 echo "Asking ${DEVICE} which serial nodes exist"
-# Older CLIs exposed this as `wendy hardware capabilities` returning a
-# {"capabilities": [...]} object; current CLIs use `wendy device hardware list`
-# returning a bare array. Older agents (0.17.x) also omit serial entries
-# entirely, which lands in the empty-result fallback below.
-present=$(wendy --json device info --device "${DEVICE}" >/dev/null 2>&1 && \
-          wendy --json device hardware list --device "${DEVICE}" 2>/dev/null | \
-          python3 -c '
+# Two enumeration paths, most reliable first.
+#
+#   1. `wendy device shell -- ls /dev/ttyUSB*`: the host's real /dev. Agents
+#      from 2026.09 run a non-interactive command through a PTY, so the output
+#      is CRLF-terminated and stderr is merged; both are handled below.
+#   2. `wendy device hardware list`: the older path. Release agents through at
+#      least 2026.09.16 report no serial category at all (only usb, i2c,
+#      camera, spi, audio, network, gpu, storage), so on its own this path
+#      silently yielded nothing and every deploy fell through to the
+#      per-service fallback. It stays as a fallback for agents without shell.
+# `ls` inside the PTY prints its matches in columns on one line, and the shell
+# exits non-zero whenever one of the two globs has no match, so match paths
+# anywhere in the output rather than anchoring lines or trusting the exit code.
+present=$(wendy device shell --device "${DEVICE}" -- \
+            sh -c 'ls -d /dev/ttyUSB* /dev/ttyACM* 2>/dev/null; exit 0' 2>/dev/null | \
+          tr -d '\r' | grep -o -E '/dev/tty(USB|ACM)[0-9]+' | sed 's#^/dev/##' | sort -u || true)
+if [[ -z "${present}" ]]; then
+  echo "Shell enumeration returned nothing; trying the hardware list." >&2
+  present=$(wendy --json device info --device "${DEVICE}" >/dev/null 2>&1 && \
+            wendy --json device hardware list --device "${DEVICE}" 2>/dev/null | \
+            python3 -c '
 import json,sys
 try:
     doc=json.load(sys.stdin)
@@ -68,9 +82,10 @@ except Exception:
 caps=doc.get("capabilities",[]) if isinstance(doc,dict) else doc
 for c in caps:
     p=c.get("device_path","")
-    if p.startswith("/dev/ttyUSB"):
+    if p.startswith("/dev/ttyUSB") or p.startswith("/dev/ttyACM"):
         print(p.rsplit("/",1)[-1])
 ' || true)
+fi
 
 if [[ -z "${present}" ]]; then
   echo "Could not enumerate tty nodes from the device." >&2

@@ -589,7 +589,15 @@ class DirectGamepadWorker:
         with self._lock:
             self._candidate = candidate
             self._pressed = active_keys
-            self._axis_values = {code: axis.value for code, axis in candidate.axes.items()}
+            # Only the hats are seeded from the advertised absinfo. A motion
+            # axis that has not reported yet is unknown, and unknown means
+            # centred: a uhid (Bluetooth) pad advertises 0 for a stick whose
+            # true centre is 32767, which read as full left until the first
+            # report and sent one full-lock steer the moment A was pressed.
+            self._axis_values = {
+                code: axis.value for code, axis in candidate.axes.items()
+                if code in (Codes.ABS_HAT0X, Codes.ABS_HAT0Y)
+            }
             self._hat_values = {
                 Codes.ABS_HAT0X: int(self._axis_values.get(Codes.ABS_HAT0X, 0)),
                 Codes.ABS_HAT0Y: int(self._axis_values.get(Codes.ABS_HAT0Y, 0)),
@@ -676,7 +684,10 @@ class DirectGamepadWorker:
             self._controller_stop("direct_gamepad_stop")
         elif code == Codes.BTN_SOUTH:
             self._arm()
-        elif code == Codes.BTN_NORTH:
+        elif code == Codes.BTN_WEST:
+            # Physical Y. Linux names 0x134 BTN_WEST (and BTN_Y); 0x133 is
+            # BTN_NORTH, the physical X. Both xpad and hid-microsoft agree,
+            # captured raw from the kernel on the car on 2026-09-16.
             self._toggle_auto()
         elif code in {Codes.BTN_DPAD_UP, Codes.BTN_DPAD_DOWN}:
             self._nudge_manual_speed(DIRECT_SPEED_STEP if code == Codes.BTN_DPAD_UP else -DIRECT_SPEED_STEP)
@@ -686,7 +697,7 @@ class DirectGamepadWorker:
             self._nudge_steering(
                 DIRECT_STEERING_STEP_PERCENT if code == Codes.BTN_TR else -DIRECT_STEERING_STEP_PERCENT
             )
-        # BTN_WEST (X) and BTN_SELECT (View) intentionally do nothing on the
+        # BTN_NORTH (X) and BTN_SELECT (View) intentionally do nothing on the
         # direct path. Their browser-only camera actions have no meaning here.
 
     def _note_action(self, action: str, detail: str = "") -> None:
@@ -710,12 +721,22 @@ class DirectGamepadWorker:
         with self._lock:
             if not self._owned:
                 return
-            self._auto_enabled = not self._auto_enabled
-            enabled = self._auto_enabled
+            enabled = not self._auto_enabled
             speed = self._auto_speed
+        accepted = self._controller.direct_set_auto(enabled, speed)
+        with self._lock:
+            if enabled and accepted is False:
+                # The server would not engage: ownership is gone or the car is
+                # not ready to drive itself. Stay in manual and say so, rather
+                # than silencing the drive path for a planner that never
+                # started.
+                self._auto_enabled = False
+                self._status["reason"] = "direct_gamepad_active"
+                self._note_action("auto_rejected", f"{speed:.2f}")
+                return
+            self._auto_enabled = enabled
             self._status["reason"] = "direct_gamepad_auto" if enabled else "direct_gamepad_active"
             self._note_action("auto_on" if enabled else "auto_off", f"{speed:.2f}")
-        self._controller.direct_set_auto(enabled, speed)
         if not enabled:
             self._apply_drive()
 
@@ -763,18 +784,17 @@ class DirectGamepadWorker:
         steer_axis = candidate.axes.get(Codes.ABS_X)
         if steer_axis is None:
             return None
-        steer = normalize_centered(self._axis_values.get(Codes.ABS_X, steer_axis.value), steer_axis)
+        # An axis with no report yet reads as its rest position, never as the
+        # kernel's placeholder value (see _prepare_candidate).
+        raw_steer = self._axis_values.get(Codes.ABS_X)
+        steer = normalize_centered(raw_steer, steer_axis) if raw_steer is not None else 0.0
         triggers = trigger_axis_codes(candidate.axes)
         if triggers is not None:
             forward_code, reverse_code = triggers
-            reverse = normalize_trigger(
-                self._axis_values.get(reverse_code, candidate.axes[reverse_code].value),
-                candidate.axes[reverse_code],
-            )
-            forward = normalize_trigger(
-                self._axis_values.get(forward_code, candidate.axes[forward_code].value),
-                candidate.axes[forward_code],
-            )
+            raw_reverse = self._axis_values.get(reverse_code)
+            raw_forward = self._axis_values.get(forward_code)
+            reverse = normalize_trigger(raw_reverse, candidate.axes[reverse_code]) if raw_reverse is not None else 0.0
+            forward = normalize_trigger(raw_forward, candidate.axes[forward_code]) if raw_forward is not None else 0.0
         else:
             reverse = 1.0 if Codes.BTN_TL2 in self._pressed else 0.0
             forward = 1.0 if Codes.BTN_TR2 in self._pressed else 0.0
