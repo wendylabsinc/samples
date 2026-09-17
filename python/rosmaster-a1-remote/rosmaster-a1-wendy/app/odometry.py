@@ -16,6 +16,11 @@ import math
 import time
 from dataclasses import dataclass
 
+# Anything past these is a decode error, not a manoeuvre: the A1 tops out
+# around 1 m/s and its gyro at ±8.7 rad/s (500 °/s).
+MAX_SPEED_MPS = 5.0
+MAX_YAW_RATE_RAD_S = 20.0
+
 
 @dataclass
 class Pose:
@@ -74,6 +79,9 @@ class DeadReckoner:
         return "tracking" if self.bias is not None else "calibrating_gyro"
 
     def imu(self, yaw_rate: float) -> None:
+        if not math.isfinite(yaw_rate) or abs(yaw_rate) > MAX_YAW_RATE_RAD_S:
+            self.dropped += 1
+            return
         self._gyro = yaw_rate
         self._gyro_at = self._clock()
         if self._still_since is not None:
@@ -81,6 +89,9 @@ class DeadReckoner:
             self._still_count += 1
 
     def velocity(self, vx: float) -> Pose | None:
+        if not math.isfinite(vx) or abs(vx) > MAX_SPEED_MPS:
+            self.dropped += 1
+            return None
         now = self._clock()
         dt = 0.0 if self._last_vel_at is None else min(now - self._last_vel_at, self.max_dt_s)
         self._last_vel_at = now

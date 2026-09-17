@@ -171,5 +171,61 @@ class TurningTests(unittest.TestCase):
         self.assertEqual(pose.yaw, 0.0)
 
 
+class RobustnessTests(unittest.TestCase):
+    def test_a_stale_imu_holds_the_heading_but_keeps_integrating_distance(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock, imu_stale_s=0.5)
+        settle(reckoner, clock)
+        reckoner.imu(1.0)
+        clock.t += 0.6  # older than imu_stale_s by the time the frame arrives
+        pose = reckoner.velocity(0.5)
+        self.assertTrue(reckoner.imu_stale)
+        self.assertEqual(pose.yaw_rate, 0.0)
+        self.assertAlmostEqual(pose.x, 0.5 * 0.25, places=6)  # dt capped, see below
+
+    def test_a_gap_in_velocity_frames_integrates_at_most_max_dt(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock, max_dt_s=0.25)
+        reckoner.velocity(0.5)
+        clock.t += 5.0
+        pose = reckoner.velocity(0.5)
+        self.assertAlmostEqual(pose.x, 0.5 * 0.25, places=6)
+
+    def test_non_finite_and_absurd_speeds_are_dropped_and_counted(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=1.0, vx=0.5, gyro=0.0)
+        before = (reckoner.x, reckoner.frames)
+        clock.t += 0.05
+        self.assertIsNone(reckoner.velocity(float("nan")))
+        clock.t += 0.05
+        self.assertIsNone(reckoner.velocity(float("inf")))
+        clock.t += 0.05
+        self.assertIsNone(reckoner.velocity(7.0))
+        self.assertEqual((reckoner.x, reckoner.frames), before)
+        self.assertEqual(reckoner.dropped, 3)
+
+    def test_non_finite_and_absurd_gyro_samples_are_dropped_and_counted(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        settle(reckoner, clock)
+        reckoner.imu(float("nan"))
+        reckoner.imu(25.0)
+        self.assertEqual(reckoner.dropped, 2)
+        clock.t += 0.05
+        pose = reckoner.velocity(0.5)
+        self.assertAlmostEqual(pose.yaw_rate, 0.0, places=6, msg="the last good sample was 0.0")
+
+    def test_a_dropped_frame_does_not_advance_the_clock_for_the_next_one(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        reckoner.velocity(0.5)
+        clock.t += 0.1
+        reckoner.velocity(float("nan"))
+        clock.t += 0.1
+        pose = reckoner.velocity(0.5)
+        self.assertAlmostEqual(pose.x, 0.5 * 0.2, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
