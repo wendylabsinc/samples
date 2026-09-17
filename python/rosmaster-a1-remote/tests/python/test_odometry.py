@@ -75,5 +75,48 @@ class StraightLineTests(unittest.TestCase):
         self.assertEqual(reckoner.frames, 1)
 
 
+class GyroBiasTests(unittest.TestCase):
+    def test_two_still_seconds_adopt_the_mean_gyro_as_bias(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        self.assertEqual(reckoner.state, "waiting_for_vel_raw")
+        run(reckoner, clock, seconds=1.5, vx=0.0, gyro=0.02)
+        self.assertIsNone(reckoner.bias)
+        self.assertEqual(reckoner.state, "calibrating_gyro")
+        run(reckoner, clock, seconds=0.6, vx=0.0, gyro=0.02)
+        self.assertAlmostEqual(reckoner.bias, 0.02, places=6)
+        self.assertEqual(reckoner.state, "tracking")
+
+    def test_a_resting_car_never_turns_even_before_the_bias_exists(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        pose = run(reckoner, clock, seconds=1.0, vx=0.0, gyro=0.5)
+        self.assertEqual(pose.yaw, 0.0)
+        self.assertEqual(pose.yaw_rate, 0.0)
+
+    def test_a_resting_car_stays_put_once_the_bias_exists(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.02)
+        pose = run(reckoner, clock, seconds=5.0, vx=0.0, gyro=0.02)
+        self.assertEqual(pose.yaw, 0.0)
+
+    def test_later_still_windows_blend_into_the_bias(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.02)
+        run(reckoner, clock, seconds=1.0, vx=0.5, gyro=0.02)  # a drive resets the window
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.03)
+        self.assertAlmostEqual(reckoner.bias, 0.8 * 0.02 + 0.2 * 0.03, places=6)
+
+    def test_motion_interrupts_a_still_window(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=1.5, vx=0.0, gyro=0.02)
+        run(reckoner, clock, seconds=0.2, vx=0.3, gyro=0.02)
+        run(reckoner, clock, seconds=1.5, vx=0.0, gyro=0.02)
+        self.assertIsNone(reckoner.bias, "1.5 s + 1.5 s of stillness is not one 2 s window")
+
+
 if __name__ == "__main__":
     unittest.main()
