@@ -65,6 +65,9 @@ class Node:
     def create_timer(self, *args) -> _Inert:
         return _Inert(*args)
 
+    def create_client(self, *args) -> _Inert:
+        return _Inert(*args)
+
     def count_subscribers(self, topic: str) -> int:
         return 0
 
