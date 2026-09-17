@@ -26,6 +26,11 @@ Run the suite from the repository root, with the venv active:
 
 Stdlib `unittest` only, no pytest, no fixtures library.
 
+`scripts/odom_scan_consistency.py` is covered by
+`tests/python/test_odom_scan_consistency.py`; the tool itself needs numpy
+(in the `.venv`) and a rosbag2 `.db3` recorded with
+`wendy device ros2 bag record /scan /odom`.
+
 ## Shell: lidar service scripts (`tests/shell`)
 
 Cover the three bash scripts behind the lidar service's driver
