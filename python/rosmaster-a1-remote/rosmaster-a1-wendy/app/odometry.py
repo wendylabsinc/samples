@@ -16,10 +16,70 @@ import math
 import time
 from dataclasses import dataclass
 
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+
 # Anything past these is a decode error, not a manoeuvre: the A1 tops out
 # around 1 m/s and its gyro at ±8.7 rad/s (500 °/s).
 MAX_SPEED_MPS = 5.0
 MAX_YAW_RATE_RAD_S = 20.0
+
+# Fixed, diagonal, honest-enough covariances: modest confidence on the planar
+# states we actually observe, none at all on z, roll and pitch.
+_OBSERVED = 0.05
+_UNOBSERVED = 1e3
+
+
+def _diagonal(values) -> list:
+    cov = [0.0] * 36
+    for index, value in enumerate(values):
+        cov[index * 7] = value
+    return cov
+
+
+POSE_COVARIANCE = _diagonal([_OBSERVED, _OBSERVED, _UNOBSERVED, _UNOBSERVED, _UNOBSERVED, _OBSERVED])
+TWIST_COVARIANCE = _diagonal([_OBSERVED, _OBSERVED, _UNOBSERVED, _UNOBSERVED, _UNOBSERVED, _OBSERVED])
+
+
+def yaw_quaternion(yaw: float) -> tuple[float, float, float, float]:
+    """(x, y, z, w) for a rotation of `yaw` about z."""
+    return 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+
+
+def odometry_message(pose: Pose, frame: str, child_frame: str, stamp) -> Odometry:
+    msg = Odometry()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame
+    msg.child_frame_id = child_frame
+    msg.pose.pose.position.x = pose.x
+    msg.pose.pose.position.y = pose.y
+    msg.pose.pose.position.z = 0.0
+    qx, qy, qz, qw = yaw_quaternion(pose.yaw)
+    msg.pose.pose.orientation.x = qx
+    msg.pose.pose.orientation.y = qy
+    msg.pose.pose.orientation.z = qz
+    msg.pose.pose.orientation.w = qw
+    msg.pose.covariance = list(POSE_COVARIANCE)
+    msg.twist.twist.linear.x = pose.vx
+    msg.twist.twist.angular.z = pose.yaw_rate
+    msg.twist.covariance = list(TWIST_COVARIANCE)
+    return msg
+
+
+def transform_message(pose: Pose, frame: str, child_frame: str, stamp) -> TransformStamped:
+    tf = TransformStamped()
+    tf.header.stamp = stamp
+    tf.header.frame_id = frame
+    tf.child_frame_id = child_frame
+    tf.transform.translation.x = pose.x
+    tf.transform.translation.y = pose.y
+    tf.transform.translation.z = 0.0
+    qx, qy, qz, qw = yaw_quaternion(pose.yaw)
+    tf.transform.rotation.x = qx
+    tf.transform.rotation.y = qy
+    tf.transform.rotation.z = qz
+    tf.transform.rotation.w = qw
+    return tf
 
 
 @dataclass

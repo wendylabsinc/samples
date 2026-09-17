@@ -227,5 +227,38 @@ class RobustnessTests(unittest.TestCase):
         self.assertAlmostEqual(pose.x, 0.5 * 0.2, places=6)
 
 
+class MessageTests(unittest.TestCase):
+    def test_yaw_quaternion_is_rotation_about_z(self):
+        x, y, z, w = odometry.yaw_quaternion(math.pi / 2.0)
+        self.assertEqual((x, y), (0.0, 0.0))
+        self.assertAlmostEqual(z, math.sin(math.pi / 4.0), places=9)
+        self.assertAlmostEqual(w, math.cos(math.pi / 4.0), places=9)
+
+    def test_odometry_message_carries_frames_pose_twist_and_covariance(self):
+        pose = odometry.Pose(x=1.5, y=-0.25, yaw=0.3, vx=0.4, yaw_rate=0.1, at=12.0)
+        msg = odometry.odometry_message(pose, "odom", "base_link", stamp="STAMP")
+        self.assertEqual(msg.header.stamp, "STAMP")
+        self.assertEqual(msg.header.frame_id, "odom")
+        self.assertEqual(msg.child_frame_id, "base_link")
+        self.assertEqual((msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z), (1.5, -0.25, 0.0))
+        self.assertAlmostEqual(msg.pose.pose.orientation.z, math.sin(0.15), places=9)
+        self.assertAlmostEqual(msg.pose.pose.orientation.w, math.cos(0.15), places=9)
+        self.assertEqual((msg.twist.twist.linear.x, msg.twist.twist.angular.z), (0.4, 0.1))
+        self.assertEqual(len(msg.pose.covariance), 36)
+        self.assertEqual([msg.pose.covariance[i * 7] for i in range(6)], [0.05, 0.05, 1e3, 1e3, 1e3, 0.05])
+        self.assertEqual([msg.twist.covariance[i * 7] for i in range(6)], [0.05, 0.05, 1e3, 1e3, 1e3, 0.05])
+        self.assertEqual(sum(1 for v in msg.pose.covariance if v != 0.0), 6, "diagonal only")
+
+    def test_transform_message_mirrors_the_pose_with_the_same_stamp(self):
+        pose = odometry.Pose(x=1.5, y=-0.25, yaw=0.3, vx=0.4, yaw_rate=0.1, at=12.0)
+        tf = odometry.transform_message(pose, "odom", "base_link", stamp="STAMP")
+        self.assertEqual(tf.header.stamp, "STAMP")
+        self.assertEqual(tf.header.frame_id, "odom")
+        self.assertEqual(tf.child_frame_id, "base_link")
+        self.assertEqual((tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z), (1.5, -0.25, 0.0))
+        self.assertAlmostEqual(tf.transform.rotation.z, math.sin(0.15), places=9)
+        self.assertAlmostEqual(tf.transform.rotation.w, math.cos(0.15), places=9)
+
+
 if __name__ == "__main__":
     unittest.main()
