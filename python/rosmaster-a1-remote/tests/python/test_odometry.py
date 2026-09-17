@@ -260,5 +260,102 @@ class MessageTests(unittest.TestCase):
         self.assertAlmostEqual(tf.transform.rotation.w, math.cos(0.15), places=9)
 
 
+def twist(vx):
+    return types.SimpleNamespace(linear=types.SimpleNamespace(x=vx, y=0.0, z=0.0), angular=types.SimpleNamespace(x=0.0, y=0.0, z=0.0))
+
+
+def imu(gyro_z):
+    return types.SimpleNamespace(angular_velocity=types.SimpleNamespace(x=0.0, y=0.0, z=gyro_z))
+
+
+class NodeTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        self.reckoner = odometry.DeadReckoner(clock=self.clock)
+        self.node = odometry.OdometryNode(reckoner=self.reckoner)
+
+    def _drive(self, seconds, vx, gyro, hz=20):
+        # Same priming rule as run(): a fresh reckoner gets one zero-dt frame
+        # first, so `seconds` is exactly the integrated time.
+        if self.reckoner.frames == 0:
+            self.node.on_imu(imu(gyro))
+            self.node.on_velocity(twist(vx))
+        for _ in range(int(round(seconds * hz))):
+            self.clock.t += 1.0 / hz
+            self.node.on_imu(imu(gyro))
+            self.node.on_velocity(twist(vx))
+
+    def test_a_velocity_frame_publishes_odom_and_the_transform(self):
+        self._drive(1.0, vx=0.5, gyro=0.0)
+        odom = self.node.odom_pub.messages[-1]
+        tf = self.node.tf_broadcaster.sent[-1]
+        self.assertEqual(len(self.node.odom_pub.messages), 21)  # priming frame + 20
+        self.assertEqual(len(self.node.tf_broadcaster.sent), 21)
+        self.assertAlmostEqual(odom.pose.pose.position.x, 0.5, places=3)
+        self.assertEqual((odom.header.frame_id, odom.child_frame_id), ("odom", "base_link"))
+        self.assertEqual((tf.header.frame_id, tf.child_frame_id), ("odom", "base_link"))
+        self.assertEqual(tf.transform.translation.x, odom.pose.pose.position.x)
+        self.assertIs(tf.header.stamp, odom.header.stamp)
+
+    def test_a_dropped_frame_publishes_nothing(self):
+        self.node.on_velocity(twist(float("nan")))
+        self.assertEqual(self.node.odom_pub.messages, [])
+        self.assertEqual(self.node.tf_broadcaster.sent, [])
+
+    def test_publish_tf_false_keeps_odom_and_withholds_the_transform(self):
+        node = odometry.OdometryNode(reckoner=self.reckoner, publish_tf=False)
+        node.on_velocity(twist(0.0))
+        self.assertEqual(len(node.odom_pub.messages), 1)
+        self.assertEqual(node.tf_broadcaster.sent, [])
+
+    def test_frames_come_from_the_environment(self):
+        with mock.patch.dict("os.environ", {"ODOM_FRAME": "odom_raw", "ODOM_CHILD_FRAME": "base_footprint", "ODOM_PUBLISH_TF": "0"}):
+            node = odometry.OdometryNode(reckoner=self.reckoner)
+        self.assertEqual((node.frame, node.child_frame, node.publish_tf), ("odom_raw", "base_footprint", False))
+
+    def test_status_reports_the_state_machine_and_pose(self):
+        self.node.publish_status()
+        first = json.loads(self.node.status_pub.messages[-1].data)
+        self.assertEqual(first["state"], "waiting_for_vel_raw")
+        self.assertIsNone(first["bias_rad_s"])
+        self._drive(1.0, vx=0.0, gyro=0.02)
+        self.node.publish_status()
+        self.assertEqual(json.loads(self.node.status_pub.messages[-1].data)["state"], "calibrating_gyro")
+        self._drive(1.2, vx=0.0, gyro=0.02)
+        self._drive(1.0, vx=0.5, gyro=0.02)
+        self.node.publish_status()
+        status = json.loads(self.node.status_pub.messages[-1].data)
+        self.assertEqual(status["state"], "tracking")
+        self.assertAlmostEqual(status["bias_rad_s"], 0.02, places=6)
+        self.assertAlmostEqual(status["x"], 0.5, places=3)
+        self.assertEqual(status["dropped"], 0)
+        self.assertEqual(status["frames"], 65)  # 1 priming + 20 + 24 + 20
+        self.assertFalse(status["imu_stale"])
+        self.assertAlmostEqual(status["imu_age_s"], 0.0, places=3)
+        self.assertAlmostEqual(status["vel_age_s"], 0.0, places=3)
+        self.assertEqual(sorted(status), ["bias_rad_s", "dropped", "frames", "imu_age_s", "imu_stale", "state", "vel_age_s", "x", "y", "yaw"])
+
+    def test_env_float_falls_back_on_blank_garbage_and_non_finite(self):
+        for raw in ("", "  ", "abc", "nan", "inf"):
+            with mock.patch.dict("os.environ", {"ODOM_MAX_DT_S": raw}):
+                self.assertEqual(odometry._env_float("ODOM_MAX_DT_S", 0.25), 0.25)
+        with mock.patch.dict("os.environ", {"ODOM_MAX_DT_S": "0.5"}):
+            self.assertEqual(odometry._env_float("ODOM_MAX_DT_S", 0.25), 0.5)
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(odometry._env_float("ODOM_MAX_DT_S", 0.25), 0.25)
+
+    def test_a_default_constructed_node_reads_its_knobs_from_the_environment(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"ODOM_MAX_DT_S": "0.1", "ODOM_IMU_STALE_S": "0.2", "ODOM_BIAS_STILL_S": "3.0", "ODOM_STILL_SPEED_MPS": "0.02"},
+        ):
+            node = odometry.OdometryNode()
+        self.assertIsInstance(node.reckoner, odometry.DeadReckoner)
+        self.assertEqual(node.reckoner.max_dt_s, 0.1)
+        self.assertEqual(node.reckoner.imu_stale_s, 0.2)
+        self.assertEqual(node.reckoner.bias_still_s, 3.0)
+        self.assertEqual(node.reckoner.still_speed_mps, 0.02)
+
+
 if __name__ == "__main__":
     unittest.main()
