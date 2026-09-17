@@ -9,11 +9,14 @@ Run: .venv/bin/python -m unittest tests.python.test_odom_scan_consistency
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import math
 import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -190,6 +193,56 @@ class LagTests(unittest.TestCase):
             rows.append((t0, icp_dth, 0.3, 0.0, 0.0, 0.3, 0.01))
         tau, _ = osc.best_lag(rows, odom, 0.0, [x / 20 for x in range(-10, 11)])
         self.assertAlmostEqual(tau, -0.2, places=6)
+
+
+class MainTests(unittest.TestCase):
+    """main() through a patched read_bag: argument parsing, window filtering,
+    verdict composition and the exit status, without a bag on disk."""
+
+    def synthetic_bag(self, vx_sign=1):
+        """A car driving at 0.32 m/s past a 6 x 6 grid of posts while gently
+        yawing (+-0.04 rad): 12 scans at 10 Hz, odometry at 20 Hz. Each scan is
+        the posts seen from the car, so ICP between scans recovers the car's
+        own motion exactly; vx_sign=-1 records the odometry with the speed
+        sign inverted, the defect the tool exists to catch."""
+        posts = post_grid()
+
+        def pose(t):
+            s = t - 100.0
+            return 0.32 * s, 0.0, 0.04 * math.sin(2 * math.pi * s / 1.2)
+
+        scans = []
+        for k in range(12):
+            t = 100.0 + 0.1 * k
+            x, y, yaw = pose(t)
+            scans.append((t, (posts - np.array([x, y])) @ rot(yaw)))   # world -> car frame: R(-yaw)(p - pos)
+        odom = []
+        for k in range(24):
+            t = 100.0 + 0.05 * k
+            x, y, yaw = pose(t)
+            odom.append((t, vx_sign * x, y, yaw, vx_sign * 0.32))
+        return scans, odom
+
+    def run_main(self, argv, bag):
+        with mock.patch.object(osc, "read_bag", return_value=bag):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                status = osc.main(argv)
+        return status, out.getvalue()
+
+    def test_a_consistent_bag_exits_zero(self):
+        status, out = self.run_main(["fake.db3"], self.synthetic_bag())
+        self.assertEqual(status, 0)
+        self.assertIn("verdict: consistent", out)
+        self.assertIn("scan-vs-odometry lag: +0.00 s", out)
+
+    def test_an_inverted_speed_exits_two_with_the_rotation_verdict(self):
+        status, out = self.run_main(["fake.db3"], self.synthetic_bag(vx_sign=-1))
+        self.assertEqual(status, 2)
+        self.assertIn("verdict: scan rotated 180 deg or speed sign inverted", out)
+
+    def test_from_and_to_limit_the_windows(self):
+        status, out = self.run_main(["fake.db3", "--from", "0.3", "--to", "0.45"], self.synthetic_bag())
+        self.assertTrue(out.startswith("1 moving windows"), out.splitlines()[0])
 
 
 if __name__ == "__main__":
