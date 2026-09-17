@@ -199,7 +199,10 @@ again.
 
 - **Serial adapters renumber between boots.** The motor board is identified by
   asking it for its firmware version rather than by device name; the LiDAR is
-  chosen by USB vendor id (`10c4`, its CP2102), never by tty number.
+  chosen by USB vendor id (`10c4`, its CP2102), never by tty number -- and the
+  container's node is paired with its sysfs entry by device number, because
+  the runtime keeps manifest names for the nodes it projects while
+  re-resolving them by udev by-id on every start.
 - **There is a third USB serial adapter on this car.** The Yahboom voice module
   hangs off its own hub (`1a86:8091`) next to its USB audio codec and exposes a
   CH340 (`1a86:7522`) for its MCU. It is silent at 115200 and 230400, so the

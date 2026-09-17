@@ -102,62 +102,34 @@ sensor_probe_pid=$!
 # The Rosmaster board owns the by-id symlink, so the LiDAR is whichever adapter
 # that symlink does not point at.
 lidar_params=/ros_ws/install/ydlidar_ros2_driver/share/ydlidar_ros2_driver/params/Tmini.yaml
+lidar_driver=/ros_ws/install/ydlidar_ros2_driver/lib/ydlidar_ros2_driver/ydlidar_ros2_driver_node
+
+# base_link -> laser_frame. ydlidar_launch.py used to start this next to the
+# driver, and that is exactly why the driver's death went unnoticed on
+# 2026-09-16: the launch process stayed alive on this publisher alone. It is
+# static, so it runs on its own and is simply restarted if it ever exits.
+tf_supervisor() {
+  while true; do
+    /opt/ros/humble/lib/tf2_ros/static_transform_publisher \
+      --x 0 --y 0 --z 0.02 --qx 0 --qy 0 --qz 0 --qw 1 \
+      --frame-id base_link --child-frame-id laser_frame
+    echo "TF_SUPERVISOR static_transform_publisher exited status=$?; restarting in 5s" >&2
+    sleep 5
+  done
+}
+tf_supervisor &
+tf_pid=$!
 
 # The LiDAR adapter comes and goes on this chassis. Within a single startup the
 # port has been observed present when the port is chosen and gone a few seconds
 # later, with nothing touching USB in between, which is a connector or power
 # fault rather than anything software can fix. What software can do is stop
-# treating the first failure as permanent: the old code picked a port once at
-# boot, and if the adapter was absent at that instant the LiDAR stayed dead
-# until someone redeployed. This retries forever, re-globbing every attempt, so
-# the driver comes up on its own whenever the adapter reappears.
-lidar_supervisor() {
-  local attempt=0 backoff=5
-  while true; do
-    attempt=$((attempt + 1))
-
-    # Selection is by USB vendor id from sysfs (pick_lidar_port.sh): this
-    # container gets no /dev/serial/by-id, so the old by-id sniff always came
-    # up empty and the blind /dev/ttyUSB* fallback behind it opened whichever
-    # node came first -- which, the day the adapters renumbered, was the motor
-    # board's CH340 while the base bridge was driving through it. The picker
-    # answers only ever a CP2102, and answers nothing rather than gambling;
-    # this loop already retries forever, so an adapter that comes and goes is
-    # picked up when it returns. Re-evaluated every attempt because the two
-    # adapters swap numbers between boots.
-    local lidar_port="${YDLIDAR_PORT:-}"
-    if [[ -z "${lidar_port}" ]]; then
-      lidar_port=$(bash /app/pick_lidar_port.sh)
-    fi
-
-    if [[ -z "${lidar_port}" || ! -e "${lidar_port}" ]]; then
-      echo "LIDAR_SUPERVISOR attempt=${attempt} no CP2102 LiDAR adapter present (a CH340 is never claimed), retrying in ${backoff}s" >&2
-      sleep "${backoff}"
-      backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
-      continue
-    fi
-
-    echo "LIDAR_SUPERVISOR attempt=${attempt} using ${lidar_port}"
-    if [[ -w "${lidar_params}" ]]; then
-      sed -i "s|port: .*|port: \"${lidar_port}\"|" "${lidar_params}"
-    fi
-
-    /opt/ros/humble/bin/ros2 launch ydlidar_ros2_driver ydlidar_launch.py \
-      params_file:="${lidar_params}"
-    echo "LIDAR_SUPERVISOR driver exited status=$? after attempt=${attempt}; retrying in ${backoff}s" >&2
-    sleep "${backoff}"
-    backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
-  done
-}
-
-lidar_supervisor &
+# treating the first failure as permanent: lidar_supervisor.sh re-picks the
+# port and relaunches the driver -- run directly as its child, not through
+# `ros2 launch` -- every time the driver exits, forever.
+YDLIDAR_PARAMS="${lidar_params}" bash /app/lidar_supervisor.sh \
+  "${lidar_driver}" --ros-args --params-file "${lidar_params}" &
 lidar_pid=$!
+echo "YDLIDAR driver supervisor started (pid ${lidar_pid})"
 
-if [[ -n "${lidar_pid:-}" ]] && kill -0 "${lidar_pid}" 2>/dev/null; then
-  echo "YDLIDAR scan publisher is running for diagnostics."
-fi
-if [[ -n "${lidar_pid:-}" ]]; then
-  wait "${sensor_probe_pid}" "${lidar_pid}"
-else
-  wait "${sensor_probe_pid}"
-fi
+wait "${sensor_probe_pid}" "${lidar_pid}" "${tf_pid}"
