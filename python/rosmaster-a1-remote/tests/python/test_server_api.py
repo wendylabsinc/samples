@@ -1904,7 +1904,7 @@ class ReverseEscapeBoundTests(unittest.TestCase):
                 update_state=True,
                 feedback=self._feedback(),
             )
-            samples.append({"dt": dt, "linear_x": msg.linear.x, "state": decision["auto_state"], "action": decision["action"], "reason": decision["reason"]})
+            samples.append({"dt": dt, "linear_x": msg.linear.x, "steering_y": msg.linear.y, "state": decision["auto_state"], "action": decision["action"], "reason": decision["reason"]})
         return samples
 
     @staticmethod
@@ -1921,6 +1921,19 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         # sweep measured 0.25 commanded as 0.227 travelled, 0.50 as 0.480, and
         # never faster than asked.
         return sum(abs(sample["linear_x"]) * sample["dt"] for sample in cls._reversing(samples))
+
+    def test_the_planner_never_steers_past_the_firmware_range(self):
+        """Twist.linear.y is the Ackermann steering angle and the board clamps
+        it at 0.045 (see SteeringRangeTests). The planner's escape arcs and
+        corridor steers must live inside that range, or every one of them --
+        gentle and hard alike -- lands as full lock and the car can only
+        drive bang-bang.
+        """
+        with self._driving():
+            samples = self._drive(6.0, self.BOXED_IN_M)
+        steered = [abs(sample["steering_y"]) for sample in samples if sample["steering_y"] != 0.0]
+        self.assertTrue(steered, "a boxed-in episode should command some steering")
+        self.assertLessEqual(max(steered), 0.045)
 
     def test_one_reverse_is_bounded_in_both_time_and_distance(self):
         with self._driving():
