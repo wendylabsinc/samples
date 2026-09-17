@@ -9,6 +9,8 @@ Run: .venv/bin/python -m unittest tests.python.test_odometry
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
 import sys
@@ -147,7 +149,7 @@ class GyroBiasTests(unittest.TestCase):
         reckoner.bias = 0.3                                    # a bad value from before the rules above existed
         run(reckoner, clock, seconds=1.0, vx=0.5, gyro=0.02)   # a drive resets the window
         run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.049)
-        self.assertAlmostEqual(reckoner.bias, 0.05, places=6)   # 0.8*0.3 + 0.2*0.049 = 0.25, clamped to 0.05
+        self.assertAlmostEqual(reckoner.bias, 0.09, places=6)   # 0.8*0.3 + 0.2*0.049 = 0.2498, clamped to 0.09
 
     def test_the_quiet_and_clamp_thresholds_are_constructor_knobs(self):
         clock = FakeClock()
@@ -380,6 +382,41 @@ class NodeTests(unittest.TestCase):
             ["bias_rad_s", "dropped", "dropped_bias_windows", "frames", "imu_age_s", "imu_stale", "state", "vel_age_s", "x", "y", "yaw"],
         )
         self.assertEqual(status["dropped_bias_windows"], 0)
+
+    def test_a_dropped_bias_window_is_logged_exactly_once(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drive(1.0, vx=0.0, gyro=1.2)   # turned by hand, encoders see nothing
+            self._drive(1.2, vx=0.0, gyro=0.0)   # then still: one 2.2 s window with a turn in it
+        self.assertEqual(self.reckoner.dropped_bias_windows, 1)
+        lines = [line for line in out.getvalue().splitlines() if "dropped a still window" in line]
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertIn("dropped=1", lines[0])
+
+    def test_a_long_calibration_is_logged_at_most_once_every_ten_seconds(self):
+        hz = 20
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            for i in range(11 * hz):
+                gyro = 0.0 if i % 2 == 0 else 0.2   # never quiet: no window is ever adopted
+                if self.reckoner.frames == 0:
+                    self.node.on_imu(imu(gyro))
+                    self.node.on_velocity(twist(0.0))
+                else:
+                    self.clock.t += 1.0 / hz
+                    self.node.on_imu(imu(gyro))
+                    self.node.on_velocity(twist(0.0))
+                if i % hz == hz - 1:
+                    self.node.publish_status()
+        self.assertEqual(self.reckoner.state, "calibrating_gyro")
+        lines = [line for line in out.getvalue().splitlines() if "still calibrating the gyro" in line]
+        self.assertEqual(len(lines), 1, out.getvalue())
+        self.assertIn("dropped=", lines[0])
+
+    def test_a_normal_calibration_logs_nothing(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drive(2.1, vx=0.0, gyro=0.02)
+            self.node.publish_status()
+        self.assertEqual(self.reckoner.state, "tracking")
+        self.assertEqual(out.getvalue(), "")
 
     def test_env_float_falls_back_on_blank_garbage_and_non_finite(self):
         for raw in ("", "  ", "abc", "nan", "inf"):
