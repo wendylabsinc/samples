@@ -253,7 +253,13 @@ def best_lag(rows, odom, t_bag0, taus):
 
 def summarise(rows) -> dict:
     if not rows:
-        return {"windows": 0, "verdicts": ["no moving windows"]}
+        return {
+            "windows": 0,
+            "fwd_same": 0, "fwd_opposite": 0, "speed_ratio": float("nan"),
+            "rot_same": 0, "rot_opposite": 0, "rot_ratio": float("nan"),
+            "lateral_m": float("nan"), "residual_m": float("nan"),
+            "verdicts": ["no moving windows"],
+        }
     fwd = [(r[2], r[5]) for r in rows if abs(r[5]) > MOVING_FWD_M]
     rot = [(r[1], r[4]) for r in rows if abs(r[4]) > TURNING_RAD]
     fwd_same = sum(1 for a, b in fwd if a * b > 0)
@@ -261,6 +267,10 @@ def summarise(rows) -> dict:
     speed_ratio = statistics.median(abs(a) / abs(b) for a, b in fwd) if fwd else float("nan")
     rot_ratio = statistics.median(a / b for a, b in rot) if rot else float("nan")
     verdicts = []
+    if not fwd:
+        verdicts.append(f"no forward evidence ({len(rows)} windows below {MOVING_FWD_M} m)")
+    if not rot:
+        verdicts.append(f"no rotation evidence ({len(rows)} windows below {TURNING_RAD} rad)")
     if fwd and fwd_same < 0.5 * len(fwd):
         verdicts.append("scan rotated 180 deg or speed sign inverted")
     if rot and rot_same < 0.5 * len(rot):

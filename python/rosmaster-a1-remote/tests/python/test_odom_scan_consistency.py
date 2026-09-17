@@ -178,7 +178,25 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("rotation scale off (ratio 0.60)", s["verdicts"])
 
     def test_no_windows_is_its_own_verdict(self):
-        self.assertEqual(osc.summarise([])["verdicts"], ["no moving windows"])
+        s = osc.summarise([])
+        self.assertEqual(s["verdicts"], ["no moving windows"])
+        self.assertEqual(
+            sorted(s),
+            ["fwd_opposite", "fwd_same", "lateral_m", "residual_m", "rot_opposite", "rot_ratio", "rot_same", "speed_ratio", "verdicts", "windows"],
+        )
+        self.assertEqual(s["windows"], 0)
+        self.assertEqual((s["fwd_same"], s["fwd_opposite"], s["rot_same"], s["rot_opposite"]), (0, 0, 0, 0))
+        for key in ("speed_ratio", "rot_ratio", "lateral_m", "residual_m"):
+            self.assertTrue(math.isnan(s[key]), key)
+
+    def test_no_evidence_either_way_is_not_consistent(self):
+        # fwd 0.10 m < MOVING_FWD_M (0.15), dth 0.05 rad < TURNING_RAD (0.12):
+        # every window is too small to say anything either way.
+        rows = [(k * 0.5, 0.05, 0.10, 0.0, 0.05, 0.10, 0.01) for k in range(10)]
+        s = osc.summarise(rows)
+        self.assertIn("no forward evidence (10 windows below 0.15 m)", s["verdicts"])
+        self.assertIn("no rotation evidence (10 windows below 0.12 rad)", s["verdicts"])
+        self.assertNotIn("consistent", s["verdicts"])
 
 
 class LagTests(unittest.TestCase):
@@ -200,16 +218,19 @@ class MainTests(unittest.TestCase):
     verdict composition and the exit status, without a bag on disk."""
 
     def synthetic_bag(self, vx_sign=1):
-        """A car driving at 0.32 m/s past a 6 x 6 grid of posts while gently
-        yawing (+-0.04 rad): 12 scans at 10 Hz, odometry at 20 Hz. Each scan is
-        the posts seen from the car, so ICP between scans recovers the car's
-        own motion exactly; vx_sign=-1 records the odometry with the speed
-        sign inverted, the defect the tool exists to catch."""
+        """A car driving straight for 0.6 s (forward evidence), then turning
+        in place (rotation evidence): 12 scans at 10 Hz, odometry at 20 Hz.
+        Each scan is the posts seen from the car, so ICP between scans
+        recovers the car's own motion exactly; vx_sign=-1 records the
+        odometry with the speed sign inverted, the defect the tool exists to
+        catch."""
         posts = post_grid()
 
         def pose(t):
             s = t - 100.0
-            return 0.32 * s, 0.0, 0.04 * math.sin(2 * math.pi * s / 1.2)
+            if s <= 0.6:
+                return 0.32 * s, 0.0, 0.0                    # straight at 0.32 m/s: forward evidence
+            return 0.192, 0.0, 0.26 * (s - 0.6)              # then turning in place at 0.26 rad/s: rotation evidence
 
         scans = []
         for k in range(12):
