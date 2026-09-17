@@ -92,7 +92,7 @@ class SessionStore:
                 meta = json.loads((latest / "session.json").read_text())
                 if float(meta["started_at"]) > node_started_at:
                     return Session(meta["name"], latest, float(meta["started_at"]))
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError):
                 pass
         return self.start(now_wall)
 
