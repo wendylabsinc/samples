@@ -16,3 +16,9 @@ class Float32:
 
 class String:
     pass
+
+
+class Header:
+    def __init__(self) -> None:
+        self.stamp = None
+        self.frame_id: str = ""
