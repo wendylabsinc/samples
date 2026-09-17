@@ -194,6 +194,13 @@ again.
 - **RealSense infrared needs its own profile.** `enable_infra1` and
   `enable_infra2` alone advertise the topics and publish nothing;
   `depth_module.infra_profile` is also required.
+- **The T-mini scan came up rotated 180 degrees.** The driver's shipped
+  params set `reversion: true` ("rotate 180"), so laser angle 0 was the car's
+  tail and the web planner's "front" sector watched behind the car (left and
+  right swapped too); only the forward-facing depth veto protected the floor
+  drives before 2026-09-17. The lidar service now forces `reversion: false`
+  (`app/write_lidar_params.sh`). Any autonomy result from before that date
+  was measured with the sectors reversed.
 - **CycloneDDS needs a raised participant limit.** With several ROS apps on one
   device, a new node fails with "no free participant index" on loopback.
 - **Preview encoding is rationed.** JPEG encoding shares a thread with the

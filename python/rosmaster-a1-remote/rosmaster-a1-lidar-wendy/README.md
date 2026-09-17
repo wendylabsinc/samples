@@ -11,6 +11,13 @@ LiDAR's port is chosen by elimination: whichever adapter that symlink does
 not resolve to. A supervisor loop retries forever with backoff so a flaky
 adapter dropping off the bus stops the driver, not the container.
 
+The scan is published with the driver's `reversion` parameter forced off
+(`app/write_lidar_params.sh`). The shipped T-mini params rotate the scan by
+180 degrees, which on this car put angle 0 at the tail; angle 0 is the nose
+now, and `base_link -> laser_frame` is the identity rotation. Check it after
+any driver or params change: hold a hand 30 cm in front of the nose and
+`lidar.sectors.front.near_m` in the web service's `/api/status` must drop.
+
 Deploy from the parent directory, alongside the other three services:
 
 ```bash

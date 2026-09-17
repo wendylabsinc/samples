@@ -138,9 +138,10 @@ lidar_supervisor() {
     fi
 
     echo "LIDAR_SUPERVISOR attempt=${attempt} using ${lidar_port}"
-    if [[ -w "${lidar_params}" ]]; then
-      sed -i "s|port: .*|port: \"${lidar_port}\"|" "${lidar_params}"
-    fi
+    # Port for this attempt, and reversion off (the scan came up rotated 180
+    # degrees with the driver's shipped T-mini params; see the script).
+    bash /app/write_lidar_params.sh "${lidar_params}" "${lidar_port}" || \
+      echo "LIDAR_SUPERVISOR could not rewrite ${lidar_params}; launching with its current contents" >&2
 
     /opt/ros/humble/bin/ros2 launch ydlidar_ros2_driver ydlidar_launch.py \
       params_file:="${lidar_params}"
