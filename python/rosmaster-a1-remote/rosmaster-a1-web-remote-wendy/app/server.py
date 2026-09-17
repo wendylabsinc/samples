@@ -63,7 +63,12 @@ MAX_ANGULAR_Z = float(os.environ.get("MAX_ANGULAR_Z", "1.0"))
 AUTO_SPEED = float(os.environ.get("AUTO_SPEED", "1.00"))
 AUTO_STOP_DISTANCE = float(os.environ.get("AUTO_STOP_DISTANCE", "0.35"))
 AUTO_AVOID_DISTANCE = float(os.environ.get("AUTO_AVOID_DISTANCE", "0.85"))
-AUTO_MAX_STEERING = float(os.environ.get("AUTO_MAX_STEERING", "0.12"))
+# The planner's steering ceiling is the same firmware range as the stick's.
+# It was left at 0.12 when MAX_STEERING_Y came down, so every auto steer --
+# the 0.45 and 0.55 "gentle" corridor fractions included -- exceeded 0.045
+# and landed as full lock: the first floor run drove bang-bang, braked for
+# hazards it had steered itself into, and gave up as "blocked".
+AUTO_MAX_STEERING = float(os.environ.get("AUTO_MAX_STEERING", "0.045"))
 AUTO_CLEAR_DISTANCE = float(os.environ.get("AUTO_CLEAR_DISTANCE", "1.60"))
 AUTO_BRAKE_S = float(os.environ.get("AUTO_BRAKE_S", "0.20"))
 AUTO_TURN_OUT_S = float(os.environ.get("AUTO_TURN_OUT_S", "1.45"))
