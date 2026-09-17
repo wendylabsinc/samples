@@ -92,7 +92,7 @@ All in `rosmaster-a1-wendy/app/odometry.py`, TDD against
 
 1. **Gyro-quiet still windows.** A still window is adopted as bias only if
    every gyro sample in it satisfies |gz - mean| <= `ODOM_BIAS_QUIET_RAD_S`
-   (0.05) and |mean| <= `ODOM_BIAS_MAX_RAD_S` (0.05; the ICM20948 zero-rate
+   (0.05) and |mean| <= `ODOM_BIAS_MAX_RAD_S` (0.09; the ICM20948 zero-rate
    spec is +-0.087 rad/s, typical < 0.02). A window that fails is discarded and
    the window restarts; `dropped_bias_windows` is counted in `/odometry/status`.
    The bias is additionally clamped to +-`ODOM_BIAS_MAX_RAD_S` as a last line.
@@ -113,8 +113,9 @@ All in `rosmaster-a1-wendy/app/odometry.py`, TDD against
    the ICP check (pure Python + numpy, reads the rosbag2 sqlite directly, no
    ROS): prints forward-sign agreement, speed ratio, rotation-sign agreement,
    rotation ratio and scan/odometry lag. Expected on a good bag: sign agreement
-   > 95 % both ways, ratios 0.9-1.1, lag < 0.1 s. It is the acceptance tool for
-   any future odometry change and for the re-recorded bag.
+   > 95 % both ways, ratios 0.9-1.1, lag within +-0.15 s (about +0.1 s is this
+   car's normal offset: start-of-sweep stamp plus odometry latency). It is the
+   acceptance tool for any future odometry change and for the re-recorded bag.
 
 Deferred (documented, not built): `ODOM_GYRO_SCALE` (default 1.0) with a
 measured-360-degree calibration, only if SLAM shows steady yaw drift after 1-2.
