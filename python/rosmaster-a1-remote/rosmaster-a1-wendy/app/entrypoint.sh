@@ -152,4 +152,11 @@ echo "Starting direct Rosmaster base bridge with ROSMASTER_SERIAL_PORT=${ROSMAST
 supervise_python BASE_BRIDGE_SUPERVISOR /app/base_bridge.py &
 driver_pid=$!
 
-wait "${sensor_probe_pid}" "${driver_pid}"
+# Dead-reckoning from /vel_raw + the IMU into /odom and odom -> base_link.
+# Pure consumer of the bridge's topics, so it simply idles until the bridge
+# is up and resumes across bridge restarts.
+echo "Starting odometry (ODOM_PUBLISH_TF=${ODOM_PUBLISH_TF:-1})"
+supervise_python ODOMETRY_SUPERVISOR /app/odometry.py &
+odometry_pid=$!
+
+wait "${sensor_probe_pid}" "${driver_pid}" "${odometry_pid}"
