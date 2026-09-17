@@ -40,6 +40,7 @@ RANGE_MIN_M, RANGE_MAX_M = 0.15, 8.0
 MOVING_FWD_M = 0.15     # a window counts for the forward checks above this
 TURNING_RAD = 0.12      # ...and for the rotation checks above this
 LAG_LIMIT_S = 0.15  # the T-mini's start-of-sweep stamp plus odometry latency put a healthy bag near +0.1 s
+SIGN_AGREEMENT_MIN = 0.95
 Row = tuple            # (t_rel, icp_dth, icp_fwd, icp_lat, odom_dth, odom_fwd, residual)
 
 
@@ -273,8 +274,12 @@ def summarise(rows) -> dict:
         verdicts.append(f"no rotation evidence ({len(rows)} windows below {TURNING_RAD} rad)")
     if fwd and fwd_same < 0.5 * len(fwd):
         verdicts.append("scan rotated 180 deg or speed sign inverted")
+    elif fwd and fwd_same < SIGN_AGREEMENT_MIN * len(fwd):
+        verdicts.append(f"forward sign agreement only {round(100 * fwd_same / len(fwd))} %")
     if rot and rot_same < 0.5 * len(rot):
         verdicts.append("scan mirrored or gyro sign inverted")
+    elif rot and rot_same < SIGN_AGREEMENT_MIN * len(rot):
+        verdicts.append(f"rotation sign agreement only {round(100 * rot_same / len(rot))} %")
     if fwd and not (0.9 <= speed_ratio <= 1.1):
         verdicts.append(f"speed scale off (ratio {speed_ratio:.2f})")
     if rot and not (0.9 <= rot_ratio <= 1.1):

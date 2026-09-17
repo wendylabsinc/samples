@@ -189,6 +189,20 @@ class SummaryTests(unittest.TestCase):
         for key in ("speed_ratio", "rot_ratio", "lateral_m", "residual_m"):
             self.assertTrue(math.isnan(s[key]), key)
 
+    def test_partial_forward_agreement_is_called_out(self):
+        # 12 of 20 windows agree in sign (60 %): below SIGN_AGREEMENT_MIN
+        # (0.95) but not below the 50 % "inverted" threshold, so this is the
+        # new, softer verdict, not "scan rotated 180 deg". Real-bag numbers
+        # (task-3): forward 3 agree vs 200 opposite (~1.5 %) stays below 50 %
+        # and keeps the "inverted" verdict; rotation 172 agree vs 6 opposite
+        # (~97 %) is above 95 % and fires no rotation verdict at all.
+        rows = [(k * 0.5, 0.2, 0.35 if k < 12 else -0.35, 0.02, 0.2, 0.35, 0.02) for k in range(20)]
+        s = osc.summarise(rows)
+        self.assertEqual((s["fwd_same"], s["fwd_opposite"]), (12, 8))
+        self.assertIn("forward sign agreement only 60 %", s["verdicts"])
+        self.assertNotIn("scan rotated 180 deg or speed sign inverted", s["verdicts"])
+        self.assertNotIn("consistent", s["verdicts"])
+
     def test_no_evidence_either_way_is_not_consistent(self):
         # fwd 0.10 m < MOVING_FWD_M (0.15), dth 0.05 rad < TURNING_RAD (0.12):
         # every window is too small to say anything either way.
