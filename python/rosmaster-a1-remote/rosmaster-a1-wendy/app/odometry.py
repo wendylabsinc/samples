@@ -87,7 +87,7 @@ class DeadReckoner:
         self.frames += 1
         still = abs(vx) < self.still_speed_mps
         self._update_bias(now, still)
-        yaw_rate = 0.0
+        yaw_rate = 0.0 if still else self._yaw_rate(now)
         if dt > 0.0:
             yaw_mid = self.yaw + yaw_rate * dt / 2.0
             self.x += vx * math.cos(yaw_mid) * dt
@@ -118,3 +118,12 @@ class DeadReckoner:
             self._still_since = now
             self._still_sum = 0.0
             self._still_count = 0
+
+    def _yaw_rate(self, now: float) -> float:
+        """Bias-corrected gyro, or 0 when there is no bias yet or the IMU is
+        stale: better to integrate a straight line than stale spin."""
+        stale = self._gyro_at is None or now - self._gyro_at > self.imu_stale_s
+        self.imu_stale = stale
+        if stale or self.bias is None:
+            return 0.0
+        return self._gyro - self.bias
