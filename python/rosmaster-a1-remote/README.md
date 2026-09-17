@@ -176,6 +176,12 @@ python3 -m venv .venv && .venv/bin/pip install numpy Pillow
 .venv/bin/python -m unittest discover -s tests/python -t .
 ```
 
+`scripts/odom_scan_consistency.py` checks a drive bag's odometry against its
+LiDAR scans with no ROS installed, and verdicts either `consistent` or one
+of `scan rotated 180 deg or speed sign inverted`, `scan mirrored or gyro
+sign inverted`, `speed scale off (ratio ...)`, `rotation scale off (ratio
+...)`, or a `timing offset ... s`.
+
 ## Notes and gotchas
 
 Things that cost real time to find, recorded so they do not have to be found
