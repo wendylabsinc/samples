@@ -141,7 +141,7 @@ class DeadReckoner:
         bias_still_s: float = 2.0,
         still_speed_mps: float = 0.01,
         bias_quiet_rad_s: float = 0.05,
-        bias_max_rad_s: float = 0.05,
+        bias_max_rad_s: float = 0.09,
     ) -> None:
         self._clock = clock
         self.max_dt_s = max_dt_s
@@ -247,6 +247,11 @@ class DeadReckoner:
         self._still_min = math.inf
         self._still_max = -math.inf
 
+    def now(self) -> float:
+        """The reckoner's own clock, for callers (the node's logging) that
+        need to time things against the same clock as everything else."""
+        return self._clock()
+
     def status(self) -> dict:
         now = self._clock()
         return {
@@ -287,7 +292,7 @@ class OdometryNode(Node):
             bias_still_s=_env_float("ODOM_BIAS_STILL_S", 2.0),
             still_speed_mps=_env_float("ODOM_STILL_SPEED_MPS", 0.01),
             bias_quiet_rad_s=_env_float("ODOM_BIAS_QUIET_RAD_S", 0.05),
-            bias_max_rad_s=_env_float("ODOM_BIAS_MAX_RAD_S", 0.05),
+            bias_max_rad_s=_env_float("ODOM_BIAS_MAX_RAD_S", 0.09),
         )
         self.frame = frame or os.environ.get("ODOM_FRAME", "odom")
         self.child_frame = child_frame or os.environ.get("ODOM_CHILD_FRAME", "base_link")
@@ -298,12 +303,23 @@ class OdometryNode(Node):
         self.create_subscription(Imu, "/imu/data_raw", self.on_imu, qos_profile_sensor_data)
         self.create_subscription(Twist, "/vel_raw", self.on_velocity, 10)
         self.create_timer(1.0, self.publish_status)
+        self._dropped_bias_windows_seen = 0
+        self._first_vel_at: float | None = None
+        self._last_calibrating_log_at: float | None = None
 
     def on_imu(self, msg) -> None:
         self.reckoner.imu(float(msg.angular_velocity.z))
 
     def on_velocity(self, msg) -> None:
         pose = self.reckoner.velocity(float(msg.linear.x))
+        if self._first_vel_at is None and self.reckoner.frames > 0:
+            self._first_vel_at = self.reckoner.now()
+        if self.reckoner.dropped_bias_windows != self._dropped_bias_windows_seen:
+            self._dropped_bias_windows_seen = self.reckoner.dropped_bias_windows
+            print(
+                f"ODOMETRY dropped a still window as gyro bias: not quiet (dropped={self._dropped_bias_windows_seen})",
+                flush=True,
+            )
         if pose is None:
             return
         stamp = self.get_clock().now().to_msg()
@@ -312,8 +328,19 @@ class OdometryNode(Node):
             self.tf_broadcaster.sendTransform(transform_message(pose, self.frame, self.child_frame, stamp))
 
     def publish_status(self) -> None:
+        status = self.reckoner.status()
+        if status["state"] == "calibrating_gyro" and self._first_vel_at is not None:
+            now = self.reckoner.now()
+            elapsed = now - self._first_vel_at
+            since_last_log = math.inf if self._last_calibrating_log_at is None else now - self._last_calibrating_log_at
+            if elapsed >= 10.0 and since_last_log >= 10.0:
+                print(
+                    f"ODOMETRY still calibrating the gyro after {elapsed:.1f} s (dropped={status['dropped_bias_windows']})",
+                    flush=True,
+                )
+                self._last_calibrating_log_at = now
         msg = String()
-        msg.data = json.dumps(self.reckoner.status(), sort_keys=True)
+        msg.data = json.dumps(status, sort_keys=True)
         self.status_pub.publish(msg)
 
 
