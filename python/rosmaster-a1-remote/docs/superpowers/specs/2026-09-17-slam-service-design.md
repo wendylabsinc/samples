@@ -1,7 +1,8 @@
 # SLAM service for the Rosmaster A1 — design
 
-Date: 2026-09-17. Status: **draft, awaiting Ethan's review** (written unattended;
-every decision below is stated with its evidence so it can be overturned).
+Date: 2026-09-17. Status: **approved by Ethan** (design reviewed 2026-09-17
+evening; the laser-facing question was settled live the same evening, see
+"Reading B", and this revision folds that in).
 Linear: second step of WDY-1636 (SLAM data pipeline); produces the topics
 WDY-1637 (bridge), WDY-1638 (viewer) and WDY-1640 (end-to-end demo) consume.
 Branch `slam-service`, stacked on `odometry-node` (Samples PR #27).
@@ -31,7 +32,7 @@ artefacts and scripts are in `~/Documents/rosmaster-bags/slam-offline-2026-09-17
 | bag with the laser yawed 180 deg | 9.4 m, pi | noise |
 | bag with vx negated (both laser yaws) | identical to the two above | noise |
 | no odometry at all (every scan, wide search) | n/a; bounded, ends near start | plausible room |
-| vx negated **and** yaw from the raw gyro, default gated params | **2.5 m, 0.96 rad over the full 4 min** | **clean: straight walls, ~12 x 7 m room** |
+| vx negated **and** yaw from the raw gyro, default gated params (kinematically identical to "laser yawed 180 deg + raw gyro", i.e. reading B below) | **2.5 m, 0.96 rad over the full 4 min** | **clean: straight walls, ~12 x 7 m room** |
 
 Root causes, both in the odometry, both proven:
 
@@ -46,15 +47,21 @@ Root causes, both in the odometry, both proven:
    `DeadReckoner` with a fake clock reproduces the adoption sequence exactly.
    The 0.8/0.2 blending needs ~15 clean windows (30 s) to forget it. The
    "gyro over-scale ~0.71" noted in the odometry validation was this bias.
-2. **Forward-speed sign.** ICP says the car moves toward laser angle pi
-   whenever the bag's vx > 0 (200 of 203 windows; speed magnitude ratio 0.97).
-   The web planner, the README and the RealSense colour frame all put the
-   car's nose at laser angle 0, so the firmware's vx would be negative when
-   driving nose-first. This is **not proven remotely**: at the car's current
-   parking spot the scan is symmetric under a 180-degree flip in every sector
-   the camera sees, and the bag has three times more vx > 0 than vx < 0 frames,
-   which mildly favours the other reading (laser facing the tail, vx fine).
-   See "Live check" below; both readings are one-knob fixes.
+2. **The LiDAR scan is rotated 180 degrees ("reading B", confirmed live).**
+   ICP says the car moves toward laser angle pi whenever the bag's vx > 0
+   (200 of 203 windows; speed magnitude ratio 0.97). The live hand test on
+   2026-09-17 evening settled which side is wrong: a hand 30 cm in front of
+   the nose showed up at laser 180 deg (0.57 -> 0.33 m, laser 0 deg unchanged)
+   and a hand behind the tail at laser 0 deg (1.85 -> 0.40 m). So laser angle
+   0 is the car's tail, and the firmware's forward speed sign is fine. The
+   cause is the driver parameter `reversion: true` in the T-mini params the
+   lidar service uses (the driver source documents it as "rotate 180").
+   **Safety finding:** the web planner's "front" LiDAR sector (within 35 deg
+   of laser 0) has therefore been the car's rear and its left/right sectors
+   swapped; corridor following and the LiDAR stop distance watched behind the
+   car, and only the forward-facing depth veto protected the floor drives.
+   The autonomy validation done so far (WDY-1634, WDY-1647) is void until the
+   fix below is deployed and re-tested.
 
 Verified fine: raw gyro scale (ICP/gyro rotation ratio ~1 once the bias offset
 is removed; residual scale on the clean replay ~0.8, absorbed by SLAM),
@@ -92,11 +99,16 @@ All in `rosmaster-a1-wendy/app/odometry.py`, TDD against
    Tests: (a) a 2 s window containing a 1 s hand-turn at 1.2 rad/s is rejected
    and the bias stays at its previous value; (b) a clean window is still
    adopted; (c) the clamp; (d) status counts the rejection.
-2. **Forward-speed sign knob.** `ODOM_VX_SIGN` (float, default **-1** if the
-   live check below confirms reading A, otherwise 1) multiplies `/vel_raw`
-   linear.x before integration and in the published twist. Documented in the
-   base README next to the other knobs. Test: sign -1 mirrors the straight-line
-   and quarter-turn cases.
+2. **Un-rotate the scan (lidar service, not the odometry).** Set
+   `reversion: false` in the T-mini params the driver is launched with, next
+   to the existing `sed` that writes the port (`lidar_supervisor` in
+   `rosmaster-a1-lidar-wendy/app/entrypoint.sh`; the same line goes on PR #25's
+   `lidar_supervisor.sh`). The `base_link -> laser_frame` transform stays the
+   identity. Test: a shell test that runs the params-rewrite function on a copy
+   of `Tmini.yaml` and asserts `reversion: false` and the port. Live
+   acceptance: repeat the hand test, `front.near_m` must drop this time. The
+   web planner's sectors are then correct without code changes; the README's
+   gotchas record the finding.
 3. **Consistency tool, kept:** `scripts/odom_scan_consistency.py <bag.db3>` —
    the ICP check (pure Python + numpy, reads the rosbag2 sqlite directly, no
    ROS): prints forward-sign agreement, speed ratio, rotation-sign agreement,
@@ -107,18 +119,14 @@ All in `rosmaster-a1-wendy/app/odometry.py`, TDD against
 Deferred (documented, not built): `ODOM_GYRO_SCALE` (default 1.0) with a
 measured-360-degree calibration, only if SLAM shows steady yaw drift after 1-2.
 
-### Live check (30 s, needs hands on the car; decides `ODOM_VX_SIGN`)
+### Live check (done 2026-09-17 evening)
 
-With the web service running, open `/api/status` and hold a hand 30 cm in
-front of the car's nose: if `lidar.sectors.front.near_m` drops, the laser
-faces the nose (reading **A**: set `ODOM_VX_SIGN=-1`, nothing else changes).
-If `rear.near_m` drops instead (reading **B**): the laser faces the tail —
-leave `ODOM_VX_SIGN=1`, publish `base_link -> laser_frame` with yaw pi in the
-lidar service (`tf_supervisor` on PR #25), and raise separately that the web
-planner's "front" sector has been the car's rear (its depth veto still faces
-forward). Cross-check either way by pushing the car nose-first by hand and
-reading the sign of `/vel_raw` linear.x. Then re-record a drive bag and run
-the consistency tool before deploying the slam service.
+Hand 30 cm in front of the nose, 20 s of `/api/status` samples over USB-C:
+beams within 12 deg of laser 180 deg read 0.33 m (0.57 m before), beams
+within 12 deg of laser 0 deg stayed at 1.85 m. Hand behind the tail: laser
+0 deg dropped to 0.40 m, laser 180 deg back to 0.56 m. Reading B. After the
+`reversion` fix is deployed, re-record a drive bag and run the consistency
+tool before deploying the slam service.
 
 ## Part 2 — the `slam` service
 
@@ -333,14 +341,17 @@ a temp volume) with a static `base_link -> laser_frame`, and writes
 `map.pgm/yaml`, `map_overlay.png` and `stats.json` (max map->odom correction,
 poses, CPU). Acceptance on the corrected bag: max correction < 3 m and < 1 rad
 and a saved session directory with all five files. Until a re-recorded bag
-exists it replays the 2026-09-17 bag through a relay that applies the two
-corrections (the relay from the analysis, committed under `scripts/`).
+exists it replays the 2026-09-17 bag, whose scans were recorded rotated, with
+`base_link -> laser_frame` at yaw pi and yaw re-integrated from the raw gyro
+(the relay from the analysis, committed under `scripts/`); bags recorded after
+the fix use the identity transform and the bag's own `/tf`.
 
 Live validation on the car (acceptance for the deploy):
 
-- Live check (Part 1) done and the odometry node redeployed with the chosen
-  sign; `scripts/odom_scan_consistency.py` on a fresh 1-minute drive bag
-  passes.
+- Lidar service redeployed with `reversion: false` and the hand test now
+  shows the hand in `front`; odometry node redeployed with the bias fix;
+  `scripts/odom_scan_consistency.py` on a fresh 1-minute drive bag passes
+  (forward sign agreement, no yaw-pi static transform needed any more).
 - `wendy device ros2 topics` lists `/map`, `/pose`, `/slam/status`,
   `/slam/trajectory`; `ros2 echo /slam/status` shows `mapping`, `saves` > 0.
 - A floor drive: the map has straight walls (Foxglove via
@@ -359,12 +370,15 @@ Live validation on the car (acceptance for the deploy):
 - `ODOM_GYRO_SCALE` with a measured-turn calibration; scan de-skewing if
   drives get faster than ~1 rad/s.
 - Localization mode for WDY-1634.
-- Fold the odometry corrections into PR #27 or keep them as the first commits
-  of this branch: Ethan's call.
+- Fold the odometry correction into PR #27 or keep it as the first commit
+  of this branch: Ethan's call. The lidar `reversion` fix touches the file
+  PR #25 rewrites; land it on PR #25's branch or rebase this branch after
+  #23-#26 merge.
+- Re-run the autonomy floor tests (WDY-1634, WDY-1647) once the scan is
+  un-rotated: the planner's sectors have been reversed until now.
 
 ## Open questions for Ethan
 
-1. Reading A or B (the live check). The spec defaults to A.
-2. Re-enrol the car (restores mTLS, `device shell`, `foxglove serve`) before
+1. Re-enrol the car (restores mTLS, `device shell`, `foxglove serve`) before
    the live validation, or validate via `save_map` + copied files.
-3. Session retention (5) and autosave interval (30 s) are guesses.
+2. Session retention (5) and autosave interval (30 s) are guesses.
