@@ -324,5 +324,173 @@ class KeeperState:
         }
 
 
+LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL, history=HistoryPolicy.KEEP_LAST)
+
+
+def _yaw_of(q) -> float:
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+class RosMapSaver:
+    """The saver protocol over slam_toolbox's two services: one call writes
+    the pose graph (`<base>.posegraph` + `.data`), the other the occupancy
+    grid (`<base>.pgm` + `.yaml`). `done(ok)` fires once both answered."""
+
+    def __init__(self, node: Node) -> None:
+        self.serialize = node.create_client(SerializePoseGraph, "/slam_toolbox/serialize_map")
+        self.save_grid = node.create_client(SaveMap, "/slam_toolbox/save_map")
+
+    def save(self, base: str, done) -> None:
+        graph_req = SerializePoseGraph.Request()
+        graph_req.filename = base
+        grid_req = SaveMap.Request()
+        grid_req.name.data = base
+        pending = {"graph": None, "grid": None}
+
+        def finish(kind, future):
+            try:
+                pending[kind] = future.result().result == 0
+            except Exception:  # noqa: BLE001 - a service failure is a failed save, not a crash
+                pending[kind] = False
+            if None not in pending.values():
+                done(all(pending.values()))
+
+        self.serialize.call_async(graph_req).add_done_callback(lambda f: finish("graph", f))
+        self.save_grid.call_async(grid_req).add_done_callback(lambda f: finish("grid", f))
+
+
 class SlamKeeper(Node):
-    """Placeholder until Task 4; exists so the import test passes."""
+    """Thin rclpy wrapper: subscriptions in, /slam/status + /slam/trajectory out,
+    saves through the saver, session bookkeeping through the store."""
+
+    def __init__(self, *, cfg: KeeperConfig, store: SessionStore, saver, clock=time.monotonic, wall_clock=time.time, node_started_at: float | None = None) -> None:
+        super().__init__("slam_keeper")
+        self.cfg = cfg
+        self.store = store
+        self.saver = saver
+        self._clock = clock
+        self._wall = wall_clock
+        self.state = KeeperState(cfg, clock=clock)
+        self.session: Session | None = None
+        try:
+            self.session = store.attach_or_start(wall_clock(), node_started_at)
+        except OSError as exc:
+            # A missing or read-only volume must not take the heartbeat and
+            # the trajectory down with it: mapping continues, saves report false.
+            print(f"SLAM_KEEPER cannot use {store.root}: {exc}; running without saves", flush=True)
+            self.state.save_finished(False, None)
+        self.exit_status: int | None = None
+        self.status_pub = self.create_publisher(String, "/slam/status", 10)
+        self.trajectory_pub = self.create_publisher(PathMsg, "/slam/trajectory", LATCHED)
+        # Not `self.subscriptions`: that is a read-only property on the real rclpy Node.
+        self.subs = [
+            self.create_subscription(LaserScan, "/scan", self.on_scan, qos_profile_sensor_data),
+            self.create_subscription(Odometry, "/odom", self.on_odom, 10),
+            self.create_subscription(TFMessage, "/tf", self.on_tf, 100),
+            self.create_subscription(OccupancyGrid, "/map", self.on_map, LATCHED),
+            self.create_subscription(PoseWithCovarianceStamped, "/pose", self.on_pose, 10),
+        ]
+        self.create_timer(1.0, self.tick)
+
+    # --- callbacks --------------------------------------------------------
+    def on_scan(self, msg) -> None:
+        self.state.on_scan()
+
+    def on_odom(self, msg) -> None:
+        p = msg.pose.pose
+        if self.state.on_odom(p.position.x, p.position.y, _yaw_of(p.orientation)):
+            print(f"SLAM_KEEPER odometry jumped: requesting a slam restart (resets={self.state.odom_resets})", flush=True)
+            if self.session is not None:
+                self.store.update_session_json(self.session, odom_resets=self.state.odom_resets)
+            self.exit_status = ODOM_RESET_EXIT_STATUS
+
+    def on_tf(self, msg) -> None:
+        for t in msg.transforms:
+            if t.header.frame_id == "map" and t.child_frame_id == "odom":
+                self.state.on_map_odom(t.transform.translation.x, t.transform.translation.y, _yaw_of(t.transform.rotation))
+
+    def on_map(self, msg) -> None:
+        data = msg.data
+        occupied, free, unknown = data.count(100), data.count(0), data.count(-1)
+        self.state.on_map(int(msg.info.width), int(msg.info.height), float(msg.info.resolution), occupied, free, unknown)
+
+    def on_pose(self, msg) -> None:
+        p = msg.pose.pose
+        if self.state.on_pose(p.position.x, p.position.y, _yaw_of(p.orientation), msg.header.stamp):
+            self.publish_trajectory(msg.header.stamp)
+
+    def tick(self) -> None:
+        if self.state.expire_save():
+            print("SLAM_KEEPER save timed out", flush=True)
+        elif self.state.wants_save() and self.session is not None:
+            self.start_save()
+        self.publish_status()
+
+    # --- outputs ----------------------------------------------------------
+    def publish_trajectory(self, latest_stamp) -> None:
+        path = PathMsg()
+        path.header.frame_id = "map"
+        path.header.stamp = latest_stamp
+        for x, y, yaw, at in self.state.trajectory:
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            pose.header.stamp = at
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.orientation.z = math.sin(yaw / 2.0)
+            pose.pose.orientation.w = math.cos(yaw / 2.0)
+            path.poses.append(pose)
+        self.trajectory_pub.publish(path)
+
+    def publish_status(self) -> None:
+        session = None if self.session is None else {"name": self.session.name, "started_at": self.session.started_at, "dir": str(self.session.dir)}
+        msg = String()
+        msg.data = json.dumps(self.state.status(session), sort_keys=True)
+        self.status_pub.publish(msg)
+
+    def start_save(self) -> None:
+        base = self.store.staging_base(self.session)
+        self.state.save_started()
+        self.saver.save(base, self._on_save_done)
+
+    def _on_save_done(self, ok: bool) -> None:
+        if self.state.save_in_flight_since is None:
+            return          # the save already expired; a late answer must not count twice
+        moved = []
+        if ok:
+            moved = self.store.commit_save(self.session, "graph") + self.store.commit_save(self.session, "grid")
+            ok = len(moved) == 4
+        grid = next((str(p) for p in moved if p.name == "map.pgm"), None)
+        self.state.save_finished(ok, grid)
+        if ok:
+            self.store.update_session_json(self.session, saves=self.state.saves, scans=self.state.scans, last_pose=self.state.pose)
+        else:
+            print("SLAM_KEEPER save failed", flush=True)
+
+
+def _read_node_started_at() -> float | None:
+    try:
+        return float(Path("/tmp/slam_node_started_at").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def main(argv=None) -> int:
+    cfg = KeeperConfig.from_env()
+    rclpy.init(args=argv)
+    node = SlamKeeper(cfg=cfg, store=SessionStore(Path(cfg.maps_dir), cfg.keep_sessions), saver=None, node_started_at=_read_node_started_at())
+    node.saver = RosMapSaver(node)
+    print(f"SLAM_KEEPER session={node.session.name} maps_dir={cfg.maps_dir} autosave_s={cfg.autosave_s} keep={cfg.keep_sessions}", flush=True)
+    try:
+        while rclpy.ok() and node.exit_status is None:
+            rclpy.spin_once(node, timeout_sec=0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    return node.exit_status or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
