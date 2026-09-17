@@ -118,5 +118,47 @@ class GyroBiasTests(unittest.TestCase):
         self.assertIsNone(reckoner.bias, "1.5 s + 1.5 s of stillness is not one 2 s window")
 
 
+def settle(reckoner, clock, gyro=0.0):
+    """Two still seconds so the bias exists and the reckoner is tracking."""
+    run(reckoner, clock, seconds=2.1, vx=0.0, gyro=gyro)
+    assert reckoner.state == "tracking"
+
+
+class TurningTests(unittest.TestCase):
+    def test_a_quarter_turn_lands_on_the_arc(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        settle(reckoner, clock)
+        vx, w = 0.5, math.pi / 4.0
+        pose = run(reckoner, clock, seconds=2.0, vx=vx, gyro=w)
+        radius = vx / w
+        self.assertAlmostEqual(pose.yaw, math.pi / 2.0, places=3)
+        self.assertAlmostEqual(pose.x, radius, places=2)
+        self.assertAlmostEqual(pose.y, radius, places=2)
+        self.assertAlmostEqual(pose.yaw_rate, w, places=6)
+
+    def test_the_bias_is_subtracted_from_the_gyro(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        settle(reckoner, clock, gyro=0.02)
+        pose = run(reckoner, clock, seconds=1.0, vx=0.5, gyro=0.02)
+        self.assertAlmostEqual(pose.yaw, 0.0, places=6)
+        self.assertAlmostEqual(pose.yaw_rate, 0.0, places=6)
+
+    def test_yaw_wraps_past_pi(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        settle(reckoner, clock)
+        pose = run(reckoner, clock, seconds=4.0, vx=0.2, gyro=1.0)  # 4 rad > pi
+        self.assertAlmostEqual(pose.yaw, 4.0 - 2.0 * math.pi, places=3)
+
+    def test_no_yaw_is_integrated_before_the_bias_exists(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        pose = run(reckoner, clock, seconds=1.0, vx=0.5, gyro=0.5)
+        self.assertEqual(pose.yaw, 0.0)
+        self.assertAlmostEqual(pose.x, 0.5, places=3)
+
+
 if __name__ == "__main__":
     unittest.main()
