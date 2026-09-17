@@ -35,13 +35,14 @@ import numpy as np
 
 STEP_SCANS = 5          # scan k vs k+5: 0.5 s at the T-mini's 10 Hz
 STRIDE_SCANS = 2
+SCAN_HZ = 10.0          # the T-mini's scan rate; STEP_SCANS / SCAN_HZ is the window length in seconds
 REJECT_M = 0.6          # nearest-neighbour pairs farther than this are ignored
 RANGE_MIN_M, RANGE_MAX_M = 0.15, 8.0
 MOVING_FWD_M = 0.15     # a window counts for the forward checks above this
 TURNING_RAD = 0.12      # ...and for the rotation checks above this
 LAG_LIMIT_S = 0.15  # the T-mini's start-of-sweep stamp plus odometry latency put a healthy bag near +0.1 s
 SIGN_AGREEMENT_MIN = 0.95
-Row = tuple            # (t_rel, icp_dth, icp_fwd, icp_lat, odom_dth, odom_fwd, residual)
+Row = tuple            # (t_rel, icp_dth, icp_fwd, icp_lat, odom_dth, odom_fwd, residual, span)
 
 
 class _CDR:
@@ -229,7 +230,7 @@ def pair_windows(scans, odom, step=STEP_SCANS, stride=STRIDE_SCANS, t_from=None,
         if result is None:
             continue
         theta, t, residual = result
-        rows.append((t_rel, theta, float(t[0]), float(t[1]), odom_dth, odom_fwd, residual))
+        rows.append((t_rel, theta, float(t[0]), float(t[1]), odom_dth, odom_fwd, residual, t1 - t0))
     return rows
 
 
@@ -244,9 +245,9 @@ def best_lag(rows, odom, t_bag0, taus):
     best = None
     for tau in taus:
         err = 0.0
-        for t_rel, icp_dth, *_rest in rows:
+        for t_rel, icp_dth, *_rest, span in rows:
             ts = t_bag0 + t_rel + tau
-            err += abs(icp_dth - wrap(_yaw_interp(odom, stamps, ts + 0.5) - _yaw_interp(odom, stamps, ts)))
+            err += abs(icp_dth - wrap(_yaw_interp(odom, stamps, ts + span) - _yaw_interp(odom, stamps, ts)))
         if best is None or err < best[1] - 1e-9 or (abs(err - best[1]) <= 1e-9 and abs(tau) < abs(best[0])):
             best = (tau, err)
     return best
@@ -303,7 +304,7 @@ def main(argv=None) -> int:
     scans, odom = read_bag(args.bag)
     rows = pair_windows(scans, odom, t_from=args.t_from, t_to=args.t_to)
     s = summarise(rows)
-    print(f"{s['windows']} moving windows of {STEP_SCANS / 10:.1f} s")
+    print(f"{s['windows']} moving windows of {STEP_SCANS / SCAN_HZ:.1f} s")
     if s["windows"]:
         print(f"forward:  ICP agrees with odometry {s['fwd_same']}, opposite {s['fwd_opposite']}; |ICP|/|odom| median {s['speed_ratio']:.2f}")
         print(f"rotation: ICP agrees with gyro {s['rot_same']}, opposite {s['rot_opposite']}; ICP/gyro median {s['rot_ratio']:.2f}")

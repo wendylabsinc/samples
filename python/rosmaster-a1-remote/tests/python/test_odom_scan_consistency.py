@@ -157,8 +157,8 @@ class GeometryTests(unittest.TestCase):
 
 class SummaryTests(unittest.TestCase):
     def rows(self, sign, ratio=1.0):
-        # (t_rel, icp_dth, icp_fwd, icp_lat, odom_dth, odom_fwd, residual)
-        return [(k * 0.5, 0.2 * ratio, sign * 0.35 * ratio, 0.02, 0.2, 0.35, 0.02) for k in range(20)]
+        # (t_rel, icp_dth, icp_fwd, icp_lat, odom_dth, odom_fwd, residual, span)
+        return [(k * 0.5, 0.2 * ratio, sign * 0.35 * ratio, 0.02, 0.2, 0.35, 0.02, 0.5) for k in range(20)]
 
     def test_a_consistent_bag_is_reported_as_such(self):
         s = osc.summarise(self.rows(+1))
@@ -196,7 +196,7 @@ class SummaryTests(unittest.TestCase):
         # (task-3): forward 3 agree vs 200 opposite (~1.5 %) stays below 50 %
         # and keeps the "inverted" verdict; rotation 172 agree vs 6 opposite
         # (~97 %) is above 95 % and fires no rotation verdict at all.
-        rows = [(k * 0.5, 0.2, 0.35 if k < 12 else -0.35, 0.02, 0.2, 0.35, 0.02) for k in range(20)]
+        rows = [(k * 0.5, 0.2, 0.35 if k < 12 else -0.35, 0.02, 0.2, 0.35, 0.02, 0.5) for k in range(20)]
         s = osc.summarise(rows)
         self.assertEqual((s["fwd_same"], s["fwd_opposite"]), (12, 8))
         self.assertIn("forward sign agreement only 60 %", s["verdicts"])
@@ -206,7 +206,7 @@ class SummaryTests(unittest.TestCase):
     def test_no_evidence_either_way_is_not_consistent(self):
         # fwd 0.10 m < MOVING_FWD_M (0.15), dth 0.05 rad < TURNING_RAD (0.12):
         # every window is too small to say anything either way.
-        rows = [(k * 0.5, 0.05, 0.10, 0.0, 0.05, 0.10, 0.01) for k in range(10)]
+        rows = [(k * 0.5, 0.05, 0.10, 0.0, 0.05, 0.10, 0.01, 0.5) for k in range(10)]
         s = osc.summarise(rows)
         self.assertIn("no forward evidence (10 windows below 0.15 m)", s["verdicts"])
         self.assertIn("no rotation evidence (10 windows below 0.12 rad)", s["verdicts"])
@@ -222,9 +222,27 @@ class LagTests(unittest.TestCase):
         for k in range(0, 60):
             t0 = 8.0 + k * 0.1
             icp_dth = osc.yaw_at(odom, t0 + 0.5 - 0.2) - osc.yaw_at(odom, t0 - 0.2)
-            rows.append((t0, icp_dth, 0.3, 0.0, 0.0, 0.3, 0.01))
+            rows.append((t0, icp_dth, 0.3, 0.0, 0.0, 0.3, 0.01, 0.5))
         tau, _ = osc.best_lag(rows, odom, 0.0, [x / 20 for x in range(-10, 11)])
         self.assertAlmostEqual(tau, -0.2, places=6)
+
+    def test_best_lag_uses_each_rows_own_span_not_a_hardcoded_half_second(self):
+        # Same ramp and true offset as above, but the rows are built from a
+        # 1.0 s window (icp_dth spans t0-0.2 to t0+0.8), not 0.5 s. A
+        # best_lag that still assumes a fixed 0.5 s window compares against
+        # the wrong odometry delta and recovers tau=0.0 with a large error
+        # (confirmed against the old, unfixed best_lag before this change);
+        # reading each row's own `span` field must still recover -0.2 exactly.
+        odom = [(t / 10, 0.0, 0.0, max(0.0, min(1.0, (t / 10 - 10.0) * 0.5)), 0.5) for t in range(0, 200)]
+        span = 1.0
+        rows = []
+        for k in range(0, 60):
+            t0 = 8.0 + k * 0.1
+            icp_dth = osc.yaw_at(odom, t0 + span - 0.2) - osc.yaw_at(odom, t0 - 0.2)
+            rows.append((t0, icp_dth, 0.3, 0.0, 0.0, 0.3, 0.01, span))
+        tau, err = osc.best_lag(rows, odom, 0.0, [x / 20 for x in range(-10, 11)])
+        self.assertAlmostEqual(tau, -0.2, places=6)
+        self.assertAlmostEqual(err, 0.0, places=6)
 
 
 class MainTests(unittest.TestCase):
