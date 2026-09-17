@@ -117,6 +117,48 @@ class GyroBiasTests(unittest.TestCase):
         run(reckoner, clock, seconds=1.5, vx=0.0, gyro=0.02)
         self.assertIsNone(reckoner.bias, "1.5 s + 1.5 s of stillness is not one 2 s window")
 
+    def test_a_hand_turn_inside_a_still_window_is_rejected_not_adopted(self):
+        # 2026-09-17: the car was turned by hand 4 s before a drive. The
+        # encoders reported vx = 0, so the window looked "still", and its mean
+        # gyro (-1.2 rad/s) became the bias: +10 rad of phantom yaw in 45 s.
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=1.0, vx=0.0, gyro=1.2)   # turned by hand, encoders see nothing
+        run(reckoner, clock, seconds=1.2, vx=0.0, gyro=0.0)   # then still: one 2.2 s window with a turn in it
+        self.assertIsNone(reckoner.bias, "a window containing a turn must not become the bias")
+        self.assertEqual(reckoner.dropped_bias_windows, 1)
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.0002)  # the next, quiet window is adopted
+        self.assertIsNotNone(reckoner.bias)
+        self.assertLess(abs(reckoner.bias), 0.001)
+        self.assertEqual(reckoner.dropped_bias_windows, 1)
+        self.assertEqual(reckoner.status()["dropped_bias_windows"], 1)
+
+    def test_a_steady_but_large_still_window_is_rejected(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.2)   # perfectly quiet, but no MEMS gyro has a 0.2 rad/s bias
+        self.assertIsNone(reckoner.bias)
+        self.assertEqual(reckoner.dropped_bias_windows, 1)
+
+    def test_the_bias_is_clamped_to_the_gyro_spec(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.02)
+        reckoner.bias = 0.3                                    # a bad value from before the rules above existed
+        run(reckoner, clock, seconds=1.0, vx=0.5, gyro=0.02)   # a drive resets the window
+        run(reckoner, clock, seconds=2.1, vx=0.0, gyro=0.049)
+        self.assertAlmostEqual(reckoner.bias, 0.05, places=6)   # 0.8*0.3 + 0.2*0.049 = 0.25, clamped to 0.05
+
+    def test_the_quiet_and_clamp_thresholds_are_constructor_knobs(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock, bias_quiet_rad_s=2.0, bias_max_rad_s=1.0)
+        run(reckoner, clock, seconds=1.0, vx=0.0, gyro=1.2)
+        run(reckoner, clock, seconds=1.2, vx=0.0, gyro=0.0)
+        self.assertIsNotNone(reckoner.bias, "with the rules relaxed the old behaviour returns")
+        self.assertGreater(reckoner.bias, 0.5)   # the mean of the mixed window; the exact sample split
+        self.assertLess(reckoner.bias, 0.7)      # sits on a float-drifted 2.0 s boundary, so no exact value
+        self.assertEqual(reckoner.dropped_bias_windows, 0)
+
 
 def settle(reckoner, clock, gyro=0.0):
     """Two still seconds so the bias exists and the reckoner is tracking."""
@@ -333,7 +375,11 @@ class NodeTests(unittest.TestCase):
         self.assertFalse(status["imu_stale"])
         self.assertAlmostEqual(status["imu_age_s"], 0.0, places=3)
         self.assertAlmostEqual(status["vel_age_s"], 0.0, places=3)
-        self.assertEqual(sorted(status), ["bias_rad_s", "dropped", "frames", "imu_age_s", "imu_stale", "state", "vel_age_s", "x", "y", "yaw"])
+        self.assertEqual(
+            sorted(status),
+            ["bias_rad_s", "dropped", "dropped_bias_windows", "frames", "imu_age_s", "imu_stale", "state", "vel_age_s", "x", "y", "yaw"],
+        )
+        self.assertEqual(status["dropped_bias_windows"], 0)
 
     def test_env_float_falls_back_on_blank_garbage_and_non_finite(self):
         for raw in ("", "  ", "abc", "nan", "inf"):
@@ -347,7 +393,14 @@ class NodeTests(unittest.TestCase):
     def test_a_default_constructed_node_reads_its_knobs_from_the_environment(self):
         with mock.patch.dict(
             "os.environ",
-            {"ODOM_MAX_DT_S": "0.1", "ODOM_IMU_STALE_S": "0.2", "ODOM_BIAS_STILL_S": "3.0", "ODOM_STILL_SPEED_MPS": "0.02"},
+            {
+                "ODOM_MAX_DT_S": "0.1",
+                "ODOM_IMU_STALE_S": "0.2",
+                "ODOM_BIAS_STILL_S": "3.0",
+                "ODOM_STILL_SPEED_MPS": "0.02",
+                "ODOM_BIAS_QUIET_RAD_S": "0.1",
+                "ODOM_BIAS_MAX_RAD_S": "0.08",
+            },
         ):
             node = odometry.OdometryNode()
         self.assertIsInstance(node.reckoner, odometry.DeadReckoner)
@@ -355,6 +408,8 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(node.reckoner.imu_stale_s, 0.2)
         self.assertEqual(node.reckoner.bias_still_s, 3.0)
         self.assertEqual(node.reckoner.still_speed_mps, 0.02)
+        self.assertEqual(node.reckoner.bias_quiet_rad_s, 0.1)
+        self.assertEqual(node.reckoner.bias_max_rad_s, 0.08)
 
 
 if __name__ == "__main__":
