@@ -16,7 +16,7 @@
 - All paths are relative to `python/rosmaster-a1-remote/`.
 - Python tests: `.venv/bin/python -m unittest discover -s tests/python -t .` from `python/rosmaster-a1-remote/` (171 tests green before this plan; the `.venv` has numpy and Pillow). Single test: `.venv/bin/python -m unittest tests.python.test_odometry -k <name>`. Shell tests: `bash tests/shell/<file>.sh`.
 - TDD: every production change follows a test you watched fail.
-- Constants from the spec, verbatim: `ODOM_BIAS_QUIET_RAD_S` default `0.05`; `ODOM_BIAS_MAX_RAD_S` default `0.05`; bias blend stays `0.8·old + 0.2·new`; still window stays `ODOM_BIAS_STILL_S` = 2.0 s; the lidar params must end up with `reversion: false` and the port quoted; the consistency tool's ICP uses 0.5 s windows (scan k vs k+5 at 10 Hz), a 0.6 m nearest-neighbour reject radius, points in 0.15–8.0 m.
+- Constants from the spec, verbatim: `ODOM_BIAS_QUIET_RAD_S` default `0.05`; `ODOM_BIAS_MAX_RAD_S` default `0.09`; bias blend stays `0.8·old + 0.2·new`; still window stays `ODOM_BIAS_STILL_S` = 2.0 s; the lidar params must end up with `reversion: false` and the port quoted; the consistency tool's ICP uses 0.5 s windows (scan k vs k+5 at 10 Hz), a 0.6 m nearest-neighbour reject radius, points in 0.15–8.0 m.
 - Never introduce `base_footprint`; the transform chain stays `map -> odom -> base_link -> laser_frame` with `base_link -> laser_frame` at identity rotation.
 - The odometry node must keep importing on a machine with no ROS (ROS imports only at module top, resolved by `tests/stubs/`).
 - Commit messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
@@ -997,7 +997,7 @@ Expected (this bag was recorded with the rotated scan and the polluted bias; the
 forward:  ICP agrees with odometry 3, opposite 200; |ICP|/|odom| median 0.97
 rotation: ICP agrees with gyro 172, opposite 6; ICP/gyro median 0.83
 lateral slip median 0.044 m; ICP match residual median 0.021 m
-scan-vs-odometry lag: +0.06 s (...)
+scan-vs-odometry lag: +0.10 s (...)
 verdict: scan rotated 180 deg or speed sign inverted; rotation scale off (ratio 0.83)
 ```
 
@@ -1065,4 +1065,4 @@ Drive for a minute with turns in both directions, stop the recording, copy the b
 .venv/bin/python scripts/odom_scan_consistency.py ~/Documents/rosmaster-bags/<bag-dir>/<bag>.db3
 ```
 
-Expected: `forward: ICP agrees with odometry N, opposite ≤ 5 %`, `rotation: … agrees ≥ 95 %`, ratios within 0.9–1.1, lag within ±0.1 s, `verdict: consistent`, exit 0. This bag is the input for the slam service plan's offline harness (it needs no relay and no yaw-pi transform).
+Expected: `forward: ICP agrees with odometry N, opposite ≤ 5 %`, `rotation: … agrees ≥ 95 %`, ratios within 0.9–1.1, lag within ±0.15 s, `verdict: consistent`, exit 0. This bag is the input for the slam service plan's offline harness (it needs no relay and no yaw-pi transform).

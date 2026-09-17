@@ -1,8 +1,8 @@
 # Tests
 
-Two independent suites live here. Neither depends on the other.
+Three independent suites live here. None depends on another.
 
-## Python: web remote HTTP API (`tests/python`)
+## Python: web remote, odometry and the bag tool (`tests/python`)
 
 Exercises `rosmaster-a1-web-remote-wendy/app/server.py` off the robot, with
 fake ROS packages (`tests/stubs`) standing in for `rclpy` and the ROS

@@ -249,13 +249,14 @@ class MainTests(unittest.TestCase):
     """main() through a patched read_bag: argument parsing, window filtering,
     verdict composition and the exit status, without a bag on disk."""
 
-    def synthetic_bag(self, vx_sign=1):
+    def synthetic_bag(self, vx_sign=1, t_shift=0.0):
         """A car driving straight for 0.6 s (forward evidence), then turning
         in place (rotation evidence): 12 scans at 10 Hz, odometry at 20 Hz.
         Each scan is the posts seen from the car, so ICP between scans
         recovers the car's own motion exactly; vx_sign=-1 records the
         odometry with the speed sign inverted, the defect the tool exists to
-        catch."""
+        catch; t_shift offsets every odometry stamp, the defect that shows up
+        as a timing offset verdict."""
         posts = post_grid()
 
         def pose(t):
@@ -273,7 +274,7 @@ class MainTests(unittest.TestCase):
         for k in range(24):
             t = 100.0 + 0.05 * k
             x, y, yaw = pose(t)
-            odom.append((t, vx_sign * x, y, yaw, vx_sign * 0.32))
+            odom.append((t + t_shift, vx_sign * x, y, yaw, vx_sign * 0.32))
         return scans, odom
 
     def run_main(self, argv, bag):
@@ -296,6 +297,14 @@ class MainTests(unittest.TestCase):
     def test_from_and_to_limit_the_windows(self):
         status, out = self.run_main(["fake.db3", "--from", "0.3", "--to", "0.45"], self.synthetic_bag())
         self.assertTrue(out.startswith("1 moving windows"), out.splitlines()[0])
+
+    def test_a_timing_offset_exits_two(self):
+        status, out = self.run_main(["fake.db3"], self.synthetic_bag(t_shift=0.3))
+        self.assertEqual(status, 2)
+        self.assertIn("timing offset", out)
+        lag_line = next(line for line in out.splitlines() if "scan-vs-odometry lag" in line)
+        lag = float(lag_line.split("lag:")[1].split("s")[0].strip())
+        self.assertLess(abs(abs(lag) - 0.3), 0.05, lag_line)
 
 
 if __name__ == "__main__":
