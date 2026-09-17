@@ -116,7 +116,7 @@ fi
 # resolve from /usr/lib/python310.zip, so the failure arrives as a confusing
 # ModuleNotFoundError for termios or similar. Restore before every launch and
 # relaunch on exit instead of letting a lost race kill the process for good.
-# The flock serializes concurrent restores (the two supervisors below launch
+# The flock serializes concurrent restores (the three supervisors below launch
 # back-to-back, and the ros2 shim uses the same lock): an rm -rf landing while
 # another restore's tar is mid-extract leaves the tree transiently incomplete.
 restore_stdlib() {

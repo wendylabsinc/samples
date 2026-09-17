@@ -9,6 +9,8 @@ directly.
 """
 from __future__ import annotations
 
+import types
+
 
 class _Publisher:
     """Records every message handed to publish() so tests can assert on
@@ -36,7 +38,10 @@ class _Inert:
 
 class _ClockTime:
     def to_msg(self):
-        return None
+        """A fresh, distinct object each call, so tests that check whether
+        two messages share one stamp (vs. each fetching their own) get a
+        real answer instead of comparing None to itself."""
+        return types.SimpleNamespace(sec=0, nanosec=0)
 
 
 class _Clock:

@@ -309,9 +309,9 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(node.tf_broadcaster.sent, [])
 
     def test_frames_come_from_the_environment(self):
-        with mock.patch.dict("os.environ", {"ODOM_FRAME": "odom_raw", "ODOM_CHILD_FRAME": "base_footprint", "ODOM_PUBLISH_TF": "0"}):
+        with mock.patch.dict("os.environ", {"ODOM_FRAME": "odom_raw", "ODOM_CHILD_FRAME": "base_test", "ODOM_PUBLISH_TF": "0"}):
             node = odometry.OdometryNode(reckoner=self.reckoner)
-        self.assertEqual((node.frame, node.child_frame, node.publish_tf), ("odom_raw", "base_footprint", False))
+        self.assertEqual((node.frame, node.child_frame, node.publish_tf), ("odom_raw", "base_test", False))
 
     def test_status_reports_the_state_machine_and_pose(self):
         self.node.publish_status()

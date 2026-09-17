@@ -236,7 +236,10 @@ class DeadReckoner:
 
     def _yaw_rate(self, now: float) -> float:
         """Bias-corrected gyro, or 0 when there is no bias yet or the IMU is
-        stale: better to integrate a straight line than stale spin."""
+        stale: better to integrate a straight line than stale spin.
+
+        Also records `imu_stale` for the status heartbeat, so it runs on
+        still frames too."""
         stale = self._gyro_at is None or now - self._gyro_at > self.imu_stale_s
         self.imu_stale = stale
         if stale or self.bias is None:
