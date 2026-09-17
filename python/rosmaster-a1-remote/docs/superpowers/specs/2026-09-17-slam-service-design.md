@@ -65,7 +65,7 @@ Root causes, both in the odometry, both proven:
 
 Verified fine: raw gyro scale (ICP/gyro rotation ratio ~1 once the bias offset
 is removed; residual scale on the clean replay ~0.8, absorbed by SLAM),
-scan-vs-odometry timing (best lag +0.06 s = mid-sweep), scan handedness
+scan-vs-odometry timing (best lag +0.10 s: the start-of-sweep stamp plus odometry latency), scan handedness
 (right-handed, 290:14), stamps (scan stamp = receive - 0.100 s, TF 1 ms).
 The T-mini has a permanently blocked ~5 deg sector at -175 deg (car-mounted
 obstruction); karto paints such beams as free space, visible as streaks.

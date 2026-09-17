@@ -713,7 +713,8 @@ time offset that best aligns the two.
 Written 2026-09-17 after slam_toolbox failed on a drive bag: this found the
 scan rotated 180 degrees (forward sign opposite in 200 of 203 windows) and,
 via the rotation ratio, the polluted gyro bias. Expected on a good bag:
-sign agreement above 95 % both ways, ratios within 0.9-1.1, lag below 0.1 s.
+sign agreement above 95 % both ways, ratios within 0.9-1.1, lag below 0.15 s
+(about +0.1 s is this car's normal offset: start-of-sweep stamp plus odometry latency).
 
 Usage:
   .venv/bin/python scripts/odom_scan_consistency.py <bag>.db3 [--from S] [--to S]
