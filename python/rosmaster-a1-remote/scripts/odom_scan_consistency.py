@@ -11,7 +11,9 @@ time offset that best aligns the two.
 Written 2026-09-17 after slam_toolbox failed on a drive bag: this found the
 scan rotated 180 degrees (forward sign opposite in 200 of 203 windows) and,
 via the rotation ratio, the polluted gyro bias. Expected on a good bag:
-sign agreement above 95 % both ways, ratios within 0.9-1.1, lag below 0.1 s.
+sign agreement above 95 % both ways, ratios within 0.9-1.1, lag below
+0.15 s (about +0.1 s is this car's normal offset: start-of-sweep stamp
+plus odometry latency).
 
 Usage:
   .venv/bin/python scripts/odom_scan_consistency.py <bag>.db3 [--from S] [--to S]
@@ -37,6 +39,7 @@ REJECT_M = 0.6          # nearest-neighbour pairs farther than this are ignored
 RANGE_MIN_M, RANGE_MAX_M = 0.15, 8.0
 MOVING_FWD_M = 0.15     # a window counts for the forward checks above this
 TURNING_RAD = 0.12      # ...and for the rotation checks above this
+LAG_LIMIT_S = 0.15  # the T-mini's start-of-sweep stamp plus odometry latency put a healthy bag near +0.1 s
 Row = tuple            # (t_rel, icp_dth, icp_fwd, icp_lat, odom_dth, odom_fwd, residual)
 
 
@@ -184,8 +187,26 @@ def _odom_at(odom, t):
     return odom[i]
 
 
+def _stamps(odom):
+    return [o[0] for o in odom]
+
+
+def _yaw_interp(odom, stamps, t: float) -> float:
+    """Odometry yaw at t, linearly interpolated (wrap-aware) between the samples
+    around it; clamped to the first/last sample outside the recording."""
+    i = bisect.bisect_left(stamps, t)
+    if i <= 0:
+        return odom[0][3]
+    if i >= len(odom):
+        return odom[-1][3]
+    t0, t1 = stamps[i - 1], stamps[i]
+    y0, y1 = odom[i - 1][3], odom[i][3]
+    f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+    return y0 + f * wrap(y1 - y0)
+
+
 def yaw_at(odom, t: float) -> float:
-    return _odom_at(odom, t)[3]
+    return _yaw_interp(odom, _stamps(odom), t)
 
 
 def pair_windows(scans, odom, step=STEP_SCANS, stride=STRIDE_SCANS, t_from=None, t_to=None):
@@ -213,15 +234,19 @@ def pair_windows(scans, odom, step=STEP_SCANS, stride=STRIDE_SCANS, t_from=None,
 
 def best_lag(rows, odom, t_bag0, taus):
     """Shift the odometry window by tau and return the tau minimising the summed
-    |icp rotation - odometry rotation|; a scan whose content lags its stamp
-    shows up as a positive tau."""
+    |icp rotation - odometry rotation|. Scan content corresponds to the
+    odometry state at stamp + tau: a scan stamped later than what it saw (a
+    delayed sensor pipeline) gives a negative tau; the T-mini's start-of-sweep
+    stamp gives about +0.1 s on this car (mid-sweep plus the odometry's own
+    latency). Ties go to the smallest |tau|."""
+    stamps = _stamps(odom)
     best = None
     for tau in taus:
         err = 0.0
         for t_rel, icp_dth, *_rest in rows:
             ts = t_bag0 + t_rel + tau
-            err += abs(icp_dth - wrap(yaw_at(odom, ts + 0.5) - yaw_at(odom, ts)))
-        if best is None or err < best[1]:
+            err += abs(icp_dth - wrap(_yaw_interp(odom, stamps, ts + 0.5) - _yaw_interp(odom, stamps, ts)))
+        if best is None or err < best[1] - 1e-9 or (abs(err - best[1]) <= 1e-9 and abs(tau) < abs(best[0])):
             best = (tau, err)
     return best
 
@@ -270,7 +295,7 @@ def main(argv=None) -> int:
         print(f"lateral slip median {s['lateral_m']:.3f} m; ICP match residual median {s['residual_m']:.3f} m")
         tau, _err = best_lag(rows, odom, scans[0][0], [x / 50 for x in range(-25, 26)])
         print(f"scan-vs-odometry lag: {tau:+.2f} s (scan content corresponds to odometry at stamp+lag)")
-        if abs(tau) > 0.1:
+        if abs(tau) > LAG_LIMIT_S:
             s["verdicts"] = [v for v in s["verdicts"] if v != "consistent"] + [f"timing offset {tau:+.2f} s"]
     print("verdict:", "; ".join(s["verdicts"]))
     return 0 if s["verdicts"] == ["consistent"] else 2
