@@ -83,11 +83,13 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.sessions()), 2)
 
     def test_attach_falls_back_when_latest_session_json_is_malformed(self):
-        old = self.store.start(self.t0)
+        self.store.start(self.t0)
         for content in ("null", "[1, 2]", '{"started_at": null}', "{not json"):
-            (old.dir / "session.json").write_text(content)
+            latest = self.store.latest_dir()                   # the session attach_or_start will read
+            (latest / "session.json").write_text(content)
             fresh = self.store.attach_or_start(self.t0 + 5, node_started_at=self.t0 - 1)
-            self.assertNotEqual(fresh.name, old.name, content)
+            self.assertNotEqual(fresh.dir, latest, content)    # never attaches to the malformed one
+            self.assertTrue((fresh.dir / "session.json").is_file())
 
     def test_start_fresh_when_nothing_is_known(self):
         self.assertIsNone(self.store.latest_dir())
