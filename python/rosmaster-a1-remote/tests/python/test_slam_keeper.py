@@ -263,5 +263,176 @@ class KeeperStateTests(unittest.TestCase):
         json.dumps(status, sort_keys=True)  # must be JSON-serialisable as is
 
 
+class FakeSaver:
+    def __init__(self):
+        self.calls: list = []
+
+    def save(self, base, done):
+        self.calls.append((base, done))
+
+    def complete(self, index, ok, files=("posegraph", "data", "pgm", "yaml")):
+        base, done = self.calls[index]
+        if ok:
+            for ext in files:
+                Path(f"{base}.{ext}").write_text(ext)
+        done(ok)
+
+
+def stamp(sec=1, nanosec=0):
+    return types.SimpleNamespace(sec=sec, nanosec=nanosec)
+
+
+def scan_msg():
+    return types.SimpleNamespace(header=types.SimpleNamespace(stamp=stamp(), frame_id="laser_frame"), ranges=[1.0] * 400)
+
+
+def odom_msg(x, y, yaw):
+    q = types.SimpleNamespace(x=0.0, y=0.0, z=math.sin(yaw / 2), w=math.cos(yaw / 2))
+    return types.SimpleNamespace(header=types.SimpleNamespace(stamp=stamp(), frame_id="odom"), pose=types.SimpleNamespace(pose=types.SimpleNamespace(position=types.SimpleNamespace(x=x, y=y, z=0.0), orientation=q)))
+
+
+def tf_msg(pairs):
+    transforms = []
+    for parent, child, x, y, yaw in pairs:
+        q = types.SimpleNamespace(x=0.0, y=0.0, z=math.sin(yaw / 2), w=math.cos(yaw / 2))
+        transforms.append(types.SimpleNamespace(header=types.SimpleNamespace(stamp=stamp(), frame_id=parent), child_frame_id=child, transform=types.SimpleNamespace(translation=types.SimpleNamespace(x=x, y=y, z=0.0), rotation=q)))
+    return types.SimpleNamespace(transforms=transforms)
+
+
+def map_msg(width, height, data):
+    info = types.SimpleNamespace(resolution=0.05, width=width, height=height, origin=None)
+    return types.SimpleNamespace(header=types.SimpleNamespace(stamp=stamp(), frame_id="map"), info=info, data=data)
+
+
+def pose_msg(x, y, yaw, sec=1):
+    q = types.SimpleNamespace(x=0.0, y=0.0, z=math.sin(yaw / 2), w=math.cos(yaw / 2))
+    return types.SimpleNamespace(header=types.SimpleNamespace(stamp=stamp(sec), frame_id="map"), pose=types.SimpleNamespace(pose=types.SimpleNamespace(position=types.SimpleNamespace(x=x, y=y, z=0.0), orientation=q)))
+
+
+class NodeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.clock = FakeClock()
+        self.cfg = slam_keeper.KeeperConfig(maps_dir=self.tmp.name, autosave_s=30.0, keep_sessions=2, trajectory_min_step_m=0.05)
+        self.store = slam_keeper.SessionStore(Path(self.tmp.name), keep=2)
+        self.saver = FakeSaver()
+        self.node = slam_keeper.SlamKeeper(cfg=self.cfg, store=self.store, saver=self.saver, clock=self.clock, wall_clock=lambda: 1_800_000_000.0)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def last_status(self):
+        return json.loads(self.node.status_pub.messages[-1].data)
+
+    def test_construction_starts_a_session_and_the_first_tick_publishes_status(self):
+        self.assertTrue(self.node.session.dir.is_dir())
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual(status["state"], "waiting_for_scan")
+        self.assertEqual(status["session"]["name"], self.node.session.name)
+        self.assertEqual(status["session"]["dir"], str(self.node.session.dir))
+
+    def test_inputs_drive_the_state_and_the_map_counts(self):
+        self.node.on_scan(scan_msg())
+        self.node.on_odom(odom_msg(0.0, 0.0, 0.0))
+        self.node.on_tf(tf_msg([("odom", "base_link", 0.0, 0.0, 0.0), ("map", "odom", 0.5, -0.25, 0.1)]))
+        self.node.on_map(map_msg(3, 2, [-1, -1, 0, 0, 100, 100]))
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual(status["state"], "mapping")
+        self.assertEqual(status["map"], {"width": 3, "height": 2, "resolution": 0.05, "occupied": 2, "free": 2, "unknown": 2, "age_s": 0.0})
+        self.assertEqual(status["map_odom"]["x"], 0.5)
+        self.assertAlmostEqual(status["map_odom"]["yaw"], 0.1, places=9)
+
+    def test_poses_build_a_latched_path_in_the_map_frame(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0, sec=1))
+        self.node.on_pose(pose_msg(0.02, 0.0, 0.0, sec=2))   # too close: no new path point, no new message
+        self.node.on_pose(pose_msg(0.5, 0.0, 0.3, sec=3))
+        self.assertEqual(len(self.node.trajectory_pub.messages), 2)
+        path = self.node.trajectory_pub.messages[-1]
+        self.assertEqual(path.header.frame_id, "map")
+        self.assertEqual(path.header.stamp.sec, 3)
+        self.assertEqual([p.pose.position.x for p in path.poses], [0.0, 0.5])
+        self.assertAlmostEqual(path.poses[-1].pose.orientation.z, math.sin(0.15), places=9)
+        self.assertEqual(path.poses[-1].header.stamp.sec, 3)
+        qos = self.node.trajectory_pub.args[2]
+        self.assertEqual(qos.durability, slam_keeper.DurabilityPolicy.TRANSIENT_LOCAL)
+
+    def test_autosave_stages_commits_and_records(self):
+        self.node.on_scan(scan_msg())
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        self.assertEqual(len(self.saver.calls), 1)
+        self.assertEqual(self.saver.calls[0][0], str(self.node.session.dir / ".saving" / "map"))
+        self.node.tick()
+        self.assertEqual(len(self.saver.calls), 1, "one save in flight at a time")
+        self.saver.complete(0, ok=True)
+        self.assertTrue((self.node.session.dir / "map.pgm").is_file())
+        self.assertTrue((self.node.session.dir / "map.posegraph").is_file())
+        meta = self.store.read_session_json(self.node.session)
+        self.assertEqual(meta["saves"], 1)
+        self.assertEqual(meta["scans"], 1)
+        self.assertEqual(meta["last_pose"], {"x": 0.0, "y": 0.0, "yaw": 0.0})
+        self.node.tick()
+        self.assertEqual(self.last_status()["last_save"]["ok"], True)
+        self.assertEqual(self.last_status()["last_save"]["path"], str(self.node.session.dir / "map.pgm"))
+
+    def test_a_failed_save_is_counted_and_retried_next_interval(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        self.saver.complete(0, ok=False)
+        self.node.tick()
+        self.assertEqual(self.last_status()["save_errors"], 1)
+        self.assertEqual(len(self.saver.calls), 1)
+        self.clock.t += 31.0
+        self.node.tick()
+        self.assertEqual(len(self.saver.calls), 2)
+
+    def test_an_odometry_jump_requests_the_exit_status_and_flushes_session_json(self):
+        self.node.on_odom(odom_msg(0.0, 0.0, 0.0))
+        self.assertIsNone(self.node.exit_status)
+        self.node.on_odom(odom_msg(5.0, 0.0, 0.0))
+        self.assertEqual(self.node.exit_status, slam_keeper.ODOM_RESET_EXIT_STATUS)
+        self.assertEqual(self.store.read_session_json(self.node.session)["odom_resets"], 1)
+
+    def test_a_restarted_keeper_attaches_to_a_young_session(self):
+        first = self.node.session
+        second = slam_keeper.SlamKeeper(cfg=self.cfg, store=self.store, saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_100.0, node_started_at=1_799_999_999.0)
+        self.assertEqual(second.session.name, first.name)
+        third = slam_keeper.SlamKeeper(cfg=self.cfg, store=self.store, saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_200.0, node_started_at=1_800_000_150.0)
+        self.assertNotEqual(third.session.name, first.name)
+
+    def test_a_save_that_answers_after_its_timeout_is_ignored(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        self.clock.t += 21.0
+        self.node.tick()                       # expired: counted as an error
+        self.saver.complete(0, ok=True)        # the late answer
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual((status["saves"], status["save_errors"]), (0, 1))
+        self.assertFalse((self.node.session.dir / "map.pgm").exists(), "nothing is committed from a late answer")
+
+    def test_an_unwritable_volume_keeps_status_and_trajectory_alive(self):
+        blocker = Path(self.tmp.name) / "blocked"
+        blocker.write_text("not a directory")
+        store = slam_keeper.SessionStore(blocker / "maps", keep=2)   # mkdir under a file: OSError
+        node = slam_keeper.SlamKeeper(cfg=self.cfg, store=store, saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_000.0)
+        self.assertIsNone(node.session)
+        node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        node.tick()
+        status = json.loads(node.status_pub.messages[-1].data)
+        self.assertIsNone(status["session"])
+        self.assertEqual(status["last_save"]["ok"], False)
+        self.assertEqual(status["trajectory_poses"], 1)
+        self.assertEqual(len(node.trajectory_pub.messages), 1)
+
+    def test_subscriptions_and_publishers_use_the_spec_topics(self):
+        topics = sorted(sub.args[1] for sub in self.node.subs)
+        self.assertEqual(topics, ["/map", "/odom", "/pose", "/scan", "/tf"])
+        self.assertEqual(self.node.status_pub.args[1], "/slam/status")
+        self.assertEqual(self.node.trajectory_pub.args[1], "/slam/trajectory")
+
+
 if __name__ == "__main__":
     unittest.main()
