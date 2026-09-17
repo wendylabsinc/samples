@@ -17,6 +17,9 @@
 #
 # Usage: write_lidar_params.sh <params.yaml> <port>
 # Exit 1 without touching anything when the file is missing or read-only.
+# Exit 1, after the port rewrite, when the file never had a `reversion:` key
+# to force off -- a driver that quietly keeps `reversion: true` is a scan
+# rotated 180 degrees, not a no-op worth ignoring.
 set -u
 params=${1:?params file}
 port=${2:?port}
@@ -25,5 +28,10 @@ if [[ ! -f "${params}" || ! -w "${params}" ]]; then
   exit 1
 fi
 tmp="${params}.tmp.$$"
-sed -e "s|port: .*|port: \"${port}\"|" -e "s|reversion: .*|reversion: false|" "${params}" > "${tmp}" \
-  && mv "${tmp}" "${params}"
+sed -e "s|^\([[:space:]]*\)port: .*|\1port: \"${port}\"|" -e "s|^\([[:space:]]*\)reversion: .*|\1reversion: false|" "${params}" > "${tmp}" \
+  || { rm -f "${tmp}"; exit 1; }
+mv "${tmp}" "${params}"
+if ! grep -q '^[[:space:]]*reversion: false' "${params}"; then
+  echo "write_lidar_params: no reversion key in ${params}; the driver would default to reversion: true" >&2
+  exit 1
+fi
