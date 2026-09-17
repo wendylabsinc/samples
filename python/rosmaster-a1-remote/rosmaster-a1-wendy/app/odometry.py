@@ -87,7 +87,8 @@ class DeadReckoner:
         self.frames += 1
         still = abs(vx) < self.still_speed_mps
         self._update_bias(now, still)
-        yaw_rate = 0.0 if still else self._yaw_rate(now)
+        w = self._yaw_rate(now)
+        yaw_rate = 0.0 if still else w
         if dt > 0.0:
             yaw_mid = self.yaw + yaw_rate * dt / 2.0
             self.x += vx * math.cos(yaw_mid) * dt

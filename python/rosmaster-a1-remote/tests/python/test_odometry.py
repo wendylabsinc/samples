@@ -159,6 +159,17 @@ class TurningTests(unittest.TestCase):
         self.assertEqual(pose.yaw, 0.0)
         self.assertAlmostEqual(pose.x, 0.5, places=3)
 
+    def test_a_stale_imu_is_reported_while_the_car_is_still(self):
+        clock = FakeClock()
+        reckoner = odometry.DeadReckoner(clock=clock)
+        settle(reckoner, clock)
+        reckoner.imu(0.0)
+        clock.t += 0.6
+        pose = reckoner.velocity(0.0)
+        self.assertTrue(reckoner.imu_stale)
+        self.assertEqual(pose.yaw_rate, 0.0)
+        self.assertEqual(pose.yaw, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
