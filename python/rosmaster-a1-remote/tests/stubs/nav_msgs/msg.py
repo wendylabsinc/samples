@@ -16,3 +16,27 @@ class Odometry:
         self.child_frame_id: str = ""
         self.pose = PoseWithCovariance()
         self.twist = TwistWithCovariance()
+
+
+from geometry_msgs.msg import Pose, PoseStamped  # noqa: E402
+
+
+class MapMetaData:
+    def __init__(self) -> None:
+        self.resolution: float = 0.0
+        self.width: int = 0
+        self.height: int = 0
+        self.origin = Pose()
+
+
+class OccupancyGrid:
+    def __init__(self) -> None:
+        self.header = Header()
+        self.info = MapMetaData()
+        self.data: list = []
+
+
+class Path:
+    def __init__(self) -> None:
+        self.header = Header()
+        self.poses: list = []

@@ -15,7 +15,8 @@ class Float32:
 
 
 class String:
-    pass
+    def __init__(self, data: str = "") -> None:
+        self.data = data
 
 
 class Header:

@@ -30,3 +30,8 @@ qos_profile_sensor_data = QoSProfile(
     depth=5,
     reliability=ReliabilityPolicy.BEST_EFFORT,
 )
+
+
+class DurabilityPolicy:
+    TRANSIENT_LOCAL = 1
+    VOLATILE = 2

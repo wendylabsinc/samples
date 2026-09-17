@@ -67,3 +67,19 @@ class TransformStamped:
         self.header = Header()
         self.child_frame_id: str = ""
         self.transform = Transform()
+
+
+class PoseStamped:
+    def __init__(self) -> None:
+        from std_msgs.msg import Header
+
+        self.header = Header()
+        self.pose = Pose()
+
+
+class PoseWithCovarianceStamped:
+    def __init__(self) -> None:
+        from std_msgs.msg import Header
+
+        self.header = Header()
+        self.pose = PoseWithCovariance()
