@@ -63,16 +63,30 @@ class DeadReckoner:
         self._gyro: float | None = None
         self._gyro_at: float | None = None
         self._last_vel_at: float | None = None
+        self._still_since: float | None = None
+        self._still_sum = 0.0
+        self._still_count = 0
+
+    @property
+    def state(self) -> str:
+        if self._last_vel_at is None:
+            return "waiting_for_vel_raw"
+        return "tracking" if self.bias is not None else "calibrating_gyro"
 
     def imu(self, yaw_rate: float) -> None:
         self._gyro = yaw_rate
         self._gyro_at = self._clock()
+        if self._still_since is not None:
+            self._still_sum += yaw_rate
+            self._still_count += 1
 
     def velocity(self, vx: float) -> Pose | None:
         now = self._clock()
         dt = 0.0 if self._last_vel_at is None else min(now - self._last_vel_at, self.max_dt_s)
         self._last_vel_at = now
         self.frames += 1
+        still = abs(vx) < self.still_speed_mps
+        self._update_bias(now, still)
         yaw_rate = 0.0
         if dt > 0.0:
             yaw_mid = self.yaw + yaw_rate * dt / 2.0
@@ -80,3 +94,27 @@ class DeadReckoner:
             self.y += vx * math.sin(yaw_mid) * dt
             self.yaw = wrap_angle(self.yaw + yaw_rate * dt)
         return Pose(self.x, self.y, self.yaw, vx, yaw_rate, now)
+
+    def _update_bias(self, now: float, still: bool) -> None:
+        """Adopt the mean gyro reading over a full still window as the bias.
+
+        The window restarts on motion and after every adoption, so each
+        estimate comes from fresh samples; later windows blend 20 % in so a
+        single odd window cannot swing the bias.
+        """
+        if not still:
+            self._still_since = None
+            self._still_sum = 0.0
+            self._still_count = 0
+            return
+        if self._still_since is None:
+            self._still_since = now
+            self._still_sum = 0.0
+            self._still_count = 0
+            return
+        if now - self._still_since >= self.bias_still_s and self._still_count > 0:
+            mean = self._still_sum / self._still_count
+            self.bias = mean if self.bias is None else 0.8 * self.bias + 0.2 * mean
+            self._still_since = now
+            self._still_sum = 0.0
+            self._still_count = 0
