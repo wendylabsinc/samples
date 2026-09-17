@@ -248,9 +248,9 @@ odometry node then restarts at (0, 0, 0) and `odom -> base_link` jumps. To
 slam_toolbox a jump is a huge "motion" outside its search window and the map
 degrades from there. The keeper watches consecutive `/odom` poses; a jump
 larger than `SLAM_ODOM_JUMP_M` (1.0) or `SLAM_ODOM_JUMP_RAD` (1.0) between
-consecutive messages counts an `odom_reset`, forces a final autosave, and
-asks the entrypoint to relaunch slam_toolbox: the keeper exits with status
-75, which the entrypoint's keeper supervisor maps to "kill the slam node and
+consecutive messages counts an `odom_reset`, writes it to `session.json` (no extra save: the
+last autosave is at most `SLAM_AUTOSAVE_S` old), and asks the entrypoint to
+relaunch slam_toolbox: the keeper exits with status 75, which the entrypoint's keeper supervisor maps to "kill the slam node and
 let its supervisor relaunch it" before relaunching the keeper; a new session
 begins. Continuing the old session from its autosave with
 `map_start_pose` is the follow-up that would make this seamless.
@@ -287,8 +287,9 @@ averaged over the bag, ~35 MB RSS; the Jetson Orin Nano has headroom.
   session's `session.json` is newer than `/tmp/slam_node_started_at` (a file
   the entrypoint touches on every slam_toolbox launch); otherwise it starts a
   new session.
-- Volume missing or read-only: the keeper logs once, keeps publishing status
-  and trajectory, and reports `last_save.ok = false`.
+- Volume missing or read-only: the keeper logs once, runs with no session
+  (`session` null in the status), keeps publishing status and trajectory,
+  and reports `last_save.ok = false`.
 - Service calls time out (`SLAM_SAVE_TIMEOUT_S` 20): counted as
   `save_errors`; the map in memory is unaffected.
 
