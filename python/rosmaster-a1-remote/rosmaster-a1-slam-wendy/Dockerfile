@@ -47,6 +47,12 @@ with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive
 PY
 RUN tar -C /usr/lib -czf /opt/python3.10-stdlib.tar.gz python3.10
 
+# The rosmaster-a1-maps persist volume mounts over /maps and hides this
+# marker. A keeper that still sees it knows the volume is missing and says so
+# (UNMOUNTED_MARKER in app/slam_keeper.py), instead of filling the container
+# layer with sessions nobody will find again.
+RUN mkdir -p /maps && touch /maps/.unmounted
+
 WORKDIR /app
 COPY app/slam_params.yaml /app/slam_params.yaml
 COPY app/slam_args.sh /app/slam_args.sh

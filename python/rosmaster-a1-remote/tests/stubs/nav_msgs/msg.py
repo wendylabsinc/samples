@@ -18,7 +18,7 @@ class Odometry:
         self.twist = TwistWithCovariance()
 
 
-from geometry_msgs.msg import Pose, PoseStamped  # noqa: E402
+from geometry_msgs.msg import Pose  # noqa: E402
 
 
 class MapMetaData:

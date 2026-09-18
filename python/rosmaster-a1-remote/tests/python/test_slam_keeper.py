@@ -18,6 +18,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STUBS_DIR = REPO_ROOT / "tests" / "stubs"
@@ -110,10 +111,29 @@ class SessionStoreTests(unittest.TestCase):
             Path(f"{base}.{ext}").write_text(ext)
         self.assertEqual([p.name for p in self.store.commit_save(session, "grid")], ["map.pgm", "map.yaml"])
 
+    def test_a_new_attempt_starts_from_an_empty_staging_directory(self):
+        session = self.store.start(self.t0)
+        base = self.store.staging_base(session)
+        Path(f"{base}.pgm").write_text("what a half-failed attempt left behind")
+        self.assertEqual(self.store.staging_base(session), base)
+        self.assertEqual(list(self.store.staging_dir(session).iterdir()), [], "leftovers must not satisfy a later attempt's all-four check")
+
     def test_commit_reports_missing_outputs_without_raising(self):
         session = self.store.start(self.t0)
         self.store.staging_base(session)
         self.assertEqual(self.store.commit_save(session, "grid"), [])
+
+    def test_the_image_ships_the_unmounted_marker_the_store_looks_for(self):
+        # mkdir(parents=True, exist_ok=True) happily writes sessions into the
+        # container layer when the persist volume is missing. The image ships
+        # the marker; a mounted volume hides it. The two names must agree.
+        dockerfile = (REPO_ROOT / "rosmaster-a1-slam-wendy" / "Dockerfile").read_text()
+        self.assertIn(f"touch /maps/{slam_keeper.UNMOUNTED_MARKER}", dockerfile)
+        self.assertFalse(self.store.is_unmounted(), "no root at all is not the same as an unmounted one")
+        self.root.mkdir(parents=True)
+        self.assertFalse(self.store.is_unmounted())
+        (self.root / slam_keeper.UNMOUNTED_MARKER).touch()
+        self.assertTrue(self.store.is_unmounted())
 
     def test_session_json_updates_are_merged_and_atomic(self):
         session = self.store.start(self.t0)
@@ -144,14 +164,13 @@ class KeeperConfigTests(unittest.TestCase):
         self.assertEqual((cfg.maps_dir, cfg.autosave_s, cfg.keep_sessions, cfg.map_file), ("/maps", 30.0, 5, ""))
         self.assertEqual((cfg.trajectory_min_step_m, cfg.trajectory_max_poses), (0.05, 5000))
         self.assertEqual((cfg.odom_jump_m, cfg.odom_jump_rad, cfg.down_s, cfg.save_timeout_s), (1.0, 1.0, 10.0, 20.0))
+        self.assertEqual(cfg.min_free_mb, 256)
 
     def test_from_env_reads_knobs_and_ignores_garbage(self):
-        from unittest import mock
-
-        with mock.patch.dict("os.environ", {"SLAM_MAPS_DIR": "/tmp/m", "SLAM_AUTOSAVE_S": "5", "SLAM_KEEP_SESSIONS": "2", "SLAM_MAP_FILE": "/maps/x/map", "SLAM_ODOM_JUMP_M": "abc", "SLAM_DOWN_S": ""}, clear=True):
+        with mock.patch.dict("os.environ", {"SLAM_MAPS_DIR": "/tmp/m", "SLAM_AUTOSAVE_S": "5", "SLAM_KEEP_SESSIONS": "2", "SLAM_MAP_FILE": "/maps/x/map", "SLAM_ODOM_JUMP_M": "abc", "SLAM_DOWN_S": "", "SLAM_MIN_FREE_MB": "64"}, clear=True):
             cfg = slam_keeper.KeeperConfig.from_env()
         self.assertEqual((cfg.maps_dir, cfg.autosave_s, cfg.keep_sessions, cfg.map_file), ("/tmp/m", 5.0, 2, "/maps/x/map"))
-        self.assertEqual((cfg.odom_jump_m, cfg.down_s), (1.0, 10.0))
+        self.assertEqual((cfg.odom_jump_m, cfg.down_s, cfg.min_free_mb), (1.0, 10.0, 64))
 
 
 class KeeperStateTests(unittest.TestCase):
@@ -160,12 +179,24 @@ class KeeperStateTests(unittest.TestCase):
         self.assertEqual(state.state(), "waiting_for_scan")
         state.on_scan()
         self.assertEqual(state.state(), "waiting_for_odom_tf")
-        state.on_odom(0.0, 0.0, 0.0)
+        state.on_odom_tf()
+        self.assertEqual(state.state(), "mapping")
+
+    def test_the_odom_topic_alone_is_not_the_transform_slam_toolbox_consumes(self):
+        # The status table's odom_tf_age_s is the age of odom -> base_link;
+        # with ODOM_PUBLISH_TF=0 or a broken broadcaster the /odom topic keeps
+        # flowing while nothing maps, and "mapping" would be a lie.
+        state, clock = keeper_state()
+        state.on_scan(); state.on_odom(0.0, 0.0, 0.0)
+        self.assertIsNone(state.status(None)["odom_tf_age_s"])
+        self.assertEqual(state.state(), "waiting_for_odom_tf")
+        state.on_odom_tf()
+        self.assertEqual(state.status(None)["odom_tf_age_s"], 0.0)
         self.assertEqual(state.state(), "mapping")
 
     def test_scan_and_odom_go_stale_after_two_seconds(self):
         state, clock = keeper_state()
-        state.on_scan(); state.on_odom(0.0, 0.0, 0.0); state.on_map_odom(0.0, 0.0, 0.0)
+        state.on_scan(); state.on_odom_tf(); state.on_map_odom(0.0, 0.0, 0.0)
         clock.t += 2.5
         self.assertEqual(state.state(), "waiting_for_scan")
         state.on_scan()
@@ -173,18 +204,18 @@ class KeeperStateTests(unittest.TestCase):
 
     def test_slam_down_when_the_map_odom_transform_stops(self):
         state, clock = keeper_state(down_s=10.0)
-        state.on_scan(); state.on_odom(0.0, 0.0, 0.0); state.on_map_odom(0.1, 0.0, 0.0)
-        clock.t += 9.0; state.on_scan(); state.on_odom(0.0, 0.0, 0.0)
+        state.on_scan(); state.on_odom_tf(); state.on_map_odom(0.1, 0.0, 0.0)
+        clock.t += 9.0; state.on_scan(); state.on_odom_tf()
         self.assertEqual(state.state(), "mapping")
-        clock.t += 2.0; state.on_scan(); state.on_odom(0.0, 0.0, 0.0)
+        clock.t += 2.0; state.on_scan(); state.on_odom_tf()
         self.assertEqual(state.state(), "slam_down")
 
     def test_slam_down_when_no_transform_ever_arrives_within_a_minute(self):
         state, clock = keeper_state()
-        state.on_scan(); state.on_odom(0.0, 0.0, 0.0)
-        clock.t += 59.0; state.on_scan(); state.on_odom(0.0, 0.0, 0.0)
+        state.on_scan(); state.on_odom_tf()
+        clock.t += 59.0; state.on_scan(); state.on_odom_tf()
         self.assertEqual(state.state(), "mapping")
-        clock.t += 2.0; state.on_scan(); state.on_odom(0.0, 0.0, 0.0)
+        clock.t += 2.0; state.on_scan(); state.on_odom_tf()
         self.assertEqual(state.state(), "slam_down")
 
     def test_trajectory_decimates_and_caps(self):
@@ -217,21 +248,32 @@ class KeeperStateTests(unittest.TestCase):
         self.assertFalse(state.wants_save())
 
     def test_a_save_that_never_completes_expires_as_an_error(self):
-        state, clock = keeper_state(save_timeout_s=20.0)
+        state, clock = keeper_state(save_timeout_s=20.0, autosave_s=30.0)
         state.on_pose(0.0, 0.0, 0.0, "s0")
+        state.save_started(); state.save_finished(True, "/maps/s/map.pgm")
+        clock.t += 30.0
+        state.on_pose(1.0, 0.0, 0.0, "s1")
         state.save_started()
         clock.t += 19.0
         self.assertFalse(state.expire_save())
         clock.t += 2.0
         self.assertTrue(state.expire_save())
-        self.assertEqual((state.saves, state.save_errors), (0, 1))
+        self.assertEqual((state.saves, state.save_errors), (1, 1))
+        # The expiry is the failure the status must show: leaving the last
+        # successful save's path and age there reads as a healthy save.
+        self.assertEqual(state.status(None)["last_save"], {"age_s": 0.0, "ok": False, "path": None, "reason": "save timed out after 20 s"})
+        self.assertFalse(state.wants_save(), "a timeout waits the autosave interval, like any other failure")
+        clock.t += 30.0
         self.assertTrue(state.wants_save(), "the pose is still unsaved and nothing is in flight")
 
-    def test_a_failed_save_is_counted_and_the_pose_stays_unsaved(self):
+    def test_a_failed_save_is_counted_with_its_reason_and_the_pose_stays_unsaved(self):
         state, clock = keeper_state()
         state.on_pose(0.0, 0.0, 0.0, "s0")
-        state.save_started(); state.save_finished(False, None)
+        state.save_started(); state.save_finished(False, None, reason="save_map failed")
         self.assertEqual((state.saves, state.save_errors, state.poses_since_save), (0, 1, 1))
+        self.assertEqual(state.status(None)["last_save"]["reason"], "save_map failed")
+        state.save_started(); state.save_finished(True, "/maps/s/map.pgm")
+        self.assertIsNone(state.status(None)["last_save"]["reason"], "a success has nothing to explain")
 
     def test_note_save_unavailable_reports_a_failure_without_counting_it(self):
         state, clock = keeper_state()
@@ -255,7 +297,7 @@ class KeeperStateTests(unittest.TestCase):
         self.assertEqual(sorted(empty), ["last_save", "map", "map_odom", "map_odom_age_s", "odom_resets", "odom_tf_age_s", "pose", "save_errors", "saves", "scan_age_s", "session", "state", "trajectory_poses"])
         self.assertEqual(empty["state"], "waiting_for_scan")
         self.assertIsNone(empty["scan_age_s"]); self.assertIsNone(empty["map"]); self.assertIsNone(empty["session"])
-        state.on_scan(); state.on_odom(0.0, 0.0, 0.0); state.on_map_odom(0.1, -0.2, 0.05)
+        state.on_scan(); state.on_odom_tf(); state.on_map_odom(0.1, -0.2, 0.05)
         state.on_map(200, 100, 0.05, 30, 500, 19470); state.on_pose(1.0, 2.0, 0.5, "s0")
         state.save_started(); state.save_finished(True, "/maps/s/map.pgm")
         clock.t += 1.5
@@ -328,7 +370,7 @@ class RosMapSaverTests(unittest.TestCase):
         self.node = FakeSaverNode()
         self.saver = slam_keeper.RosMapSaver(self.node)
         self.calls: list = []
-        self.saver.save("/tmp/session/.saving/map", self.calls.append)
+        self.saver.save("/tmp/session/.saving/map", lambda ok, reason: self.calls.append((ok, reason)))
 
     def _futures(self):
         graph = self.node.clients["/slam_toolbox/serialize_map"].futures[-1]
@@ -340,19 +382,25 @@ class RosMapSaverTests(unittest.TestCase):
         graph.resolve(result=save_result(0))
         self.assertEqual(self.calls, [], "only one of the two services has answered so far")
         grid.resolve(result=save_result(0))
-        self.assertEqual(self.calls, [True])
+        self.assertEqual(self.calls, [(True, None)])
 
-    def test_a_failing_result_code_calls_done_false(self):
+    def test_a_failing_result_code_names_the_service_that_failed(self):
         graph, grid = self._futures()
         graph.resolve(result=save_result(0))
         grid.resolve(result=save_result(1))    # a non-zero result code is a failure
-        self.assertEqual(self.calls, [False])
+        self.assertEqual(self.calls, [(False, "save_map failed")])
 
-    def test_a_raising_future_calls_done_false_instead_of_raising(self):
+    def test_a_raising_future_names_the_service_instead_of_raising(self):
         graph, grid = self._futures()
         graph.resolve(exc=RuntimeError("service unavailable"))
         grid.resolve(result=save_result(0))
-        self.assertEqual(self.calls, [False])
+        self.assertEqual(self.calls, [(False, "serialize_map failed")])
+
+    def test_both_halves_failing_are_both_named(self):
+        graph, grid = self._futures()
+        graph.resolve(result=save_result(1))
+        grid.resolve(exc=RuntimeError("service unavailable"))
+        self.assertEqual(self.calls, [(False, "serialize_map and save_map failed")])
 
     def test_done_fires_exactly_once_per_attempt(self):
         graph, grid = self._futures()
@@ -368,12 +416,12 @@ class FakeSaver:
     def save(self, base, done):
         self.calls.append((base, done))
 
-    def complete(self, index, ok, files=("posegraph", "data", "pgm", "yaml")):
+    def complete(self, index, ok, files=("posegraph", "data", "pgm", "yaml"), reason=None):
         base, done = self.calls[index]
         if ok:
             for ext in files:
                 Path(f"{base}.{ext}").write_text(ext)
-        done(ok)
+        done(ok, reason)
 
 
 def stamp(sec=1, nanosec=0):
@@ -414,10 +462,21 @@ class NodeTests(unittest.TestCase):
         self.cfg = slam_keeper.KeeperConfig(maps_dir=self.tmp.name, autosave_s=30.0, keep_sessions=2, trajectory_min_step_m=0.05)
         self.store = slam_keeper.SessionStore(Path(self.tmp.name), keep=2)
         self.saver = FakeSaver()
+        self.restore_perms: list = []
         self.node = slam_keeper.SlamKeeper(cfg=self.cfg, store=self.store, saver=self.saver, clock=self.clock, wall_clock=lambda: 1_800_000_000.0)
 
     def tearDown(self):
+        for path in self.restore_perms:
+            os.chmod(path, 0o700)
         self.tmp.cleanup()
+
+    def turn_the_volume_read_only(self):
+        """What a full or remounted-read-only persist volume looks like to a
+        keeper that already has a session: writes fail, reads still work."""
+        if os.geteuid() == 0:
+            self.skipTest("root writes into a read-only directory regardless")
+        os.chmod(self.node.session.dir, 0o500)
+        self.restore_perms.append(self.node.session.dir)
 
     def last_status(self):
         return json.loads(self.node.status_pub.messages[-1].data)
@@ -445,6 +504,22 @@ class NodeTests(unittest.TestCase):
         self.assertIs(self.node.get_clock(), self.node._clock)
         self.assertIsNot(self.node._clock, self.clock)
 
+    def test_only_the_odom_to_base_link_transform_makes_the_keeper_call_it_mapping(self):
+        self.node.on_scan(scan_msg())
+        self.node.on_odom(odom_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        self.assertEqual(self.last_status()["state"], "waiting_for_odom_tf", "/odom is not the transform")
+        self.assertIsNone(self.last_status()["odom_tf_age_s"])
+        self.node.on_tf(tf_msg([("odom", "base_link", 0.1, 0.0, 0.0)]))
+        self.node.tick()
+        self.assertEqual(self.last_status()["state"], "mapping")
+        self.assertEqual(self.last_status()["odom_tf_age_s"], 0.0)
+        self.clock.t += 2.5                                        # the broadcaster stops
+        self.node.on_scan(scan_msg())
+        self.node.on_tf(tf_msg([("map", "odom", 0.5, 0.0, 0.0)]))  # slam_toolbox's own transform is not it
+        self.node.tick()
+        self.assertEqual(self.last_status()["state"], "waiting_for_odom_tf")
+
     def test_inputs_drive_the_state_and_the_map_counts(self):
         self.node.on_scan(scan_msg())
         self.node.on_odom(odom_msg(0.0, 0.0, 0.0))
@@ -457,11 +532,16 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(status["map_odom"]["x"], 0.5)
         self.assertAlmostEqual(status["map_odom"]["yaw"], 0.1, places=9)
 
-    def test_poses_build_a_latched_path_in_the_map_frame(self):
+    def test_poses_build_a_latched_path_published_at_most_once_per_tick(self):
+        # Rebuilding a 5000-pose Path per accepted pose, at up to 3.5 Hz, cost
+        # hundreds of ms on the executor thread. The Path is kept and appended
+        # to; the tick publishes it when there is something new.
         self.node.on_pose(pose_msg(0.0, 0.0, 0.0, sec=1))
-        self.node.on_pose(pose_msg(0.02, 0.0, 0.0, sec=2))   # too close: no new path point, no new message
+        self.node.on_pose(pose_msg(0.02, 0.0, 0.0, sec=2))   # too close: not a new path point
         self.node.on_pose(pose_msg(0.5, 0.0, 0.3, sec=3))
-        self.assertEqual(len(self.node.trajectory_pub.messages), 2)
+        self.assertEqual(self.node.trajectory_pub.messages, [], "the poses accumulate; the tick publishes")
+        self.node.tick()
+        self.assertEqual(len(self.node.trajectory_pub.messages), 1, "two accepted poses in one second are one publish")
         path = self.node.trajectory_pub.messages[-1]
         self.assertEqual(path.header.frame_id, "map")
         self.assertEqual(path.header.stamp.sec, 3)
@@ -470,6 +550,21 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(path.poses[-1].header.stamp.sec, 3)
         qos = self.node.trajectory_pub.args[2]
         self.assertEqual(qos.durability, slam_keeper.DurabilityPolicy.TRANSIENT_LOCAL)
+        self.node.tick()
+        self.assertEqual(len(self.node.trajectory_pub.messages), 1, "no new pose, nothing to publish")
+        self.node.on_pose(pose_msg(1.0, 0.0, 0.3, sec=4))
+        self.node.tick()
+        self.assertEqual(len(self.node.trajectory_pub.messages), 2)
+
+    def test_the_published_path_never_grows_past_the_cap(self):
+        cfg = slam_keeper.KeeperConfig(maps_dir=self.tmp.name, autosave_s=0.0, trajectory_min_step_m=0.05, trajectory_max_poses=3)
+        node = slam_keeper.SlamKeeper(cfg=cfg, store=self.store, saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_010.0)
+        for k in range(6):
+            node.on_pose(pose_msg(k * 0.5, 0.0, 0.0, sec=k))
+            node.tick()
+        path = node.trajectory_pub.messages[-1]
+        self.assertEqual([p.header.stamp.sec for p in path.poses], [3, 4, 5], "oldest dropped, newest kept")
+        self.assertEqual(len(path.poses), json.loads(node.status_pub.messages[-1].data)["trajectory_poses"])
 
     def test_autosave_stages_commits_and_records(self):
         self.node.on_scan(scan_msg())
@@ -489,13 +584,15 @@ class NodeTests(unittest.TestCase):
         self.node.tick()
         self.assertEqual(self.last_status()["last_save"]["ok"], True)
         self.assertEqual(self.last_status()["last_save"]["path"], str(self.node.session.dir / "map.pgm"))
+        self.assertIsNone(self.last_status()["last_save"]["reason"])
 
-    def test_a_failed_save_is_counted_and_retried_next_interval(self):
+    def test_a_failed_save_is_counted_with_the_savers_reason_and_retried_next_interval(self):
         self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
         self.node.tick()
-        self.saver.complete(0, ok=False)
+        self.saver.complete(0, ok=False, reason="serialize_map failed")
         self.node.tick()
         self.assertEqual(self.last_status()["save_errors"], 1)
+        self.assertEqual(self.last_status()["last_save"], {"age_s": 0.0, "ok": False, "path": None, "reason": "serialize_map failed"})
         self.assertEqual(len(self.saver.calls), 1)
         self.clock.t += 31.0
         self.node.tick()
@@ -515,6 +612,40 @@ class NodeTests(unittest.TestCase):
         third = slam_keeper.SlamKeeper(cfg=self.cfg, store=self.store, saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_200.0, node_started_at=1_800_000_150.0)
         self.assertNotEqual(third.session.name, first.name)
 
+    def stamped_keeper(self, node_started_at=1_800_000_000.0):
+        """A keeper watching an injected /tmp/slam_node_started_at stand-in."""
+        stamp_path = Path(self.tmp.name) / "slam_node_started_at"
+        stamp_path.write_text(f"{node_started_at:.0f}\n")
+        node = slam_keeper.SlamKeeper(cfg=self.cfg, store=self.store, saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_050.0, node_started_at=node_started_at, node_started_at_path=stamp_path)
+        return node, stamp_path
+
+    def test_a_slam_node_restart_ends_the_keeper_so_a_new_session_opens(self):
+        # slam_toolbox crashed and its supervisor relaunched it with an empty
+        # graph: autosaving on into this session would overwrite the drive's
+        # map with a near-empty one. Exit 0 instead; the keeper supervisor
+        # relaunches, and attach_or_start then opens a new session.
+        node, stamp_path = self.stamped_keeper()
+        node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        stamp_path.write_text("1800000010\n")
+        node.tick()
+        self.assertEqual(node.exit_status, 0)
+        self.assertEqual(node.saver.calls, [], "the keeper is on its way out: no save is started in that tick")
+
+    def test_an_unchanged_or_older_node_stamp_leaves_the_keeper_mapping(self):
+        node, stamp_path = self.stamped_keeper()
+        node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        node.tick()                                    # the stamp it was built with
+        self.assertIsNone(node.exit_status)
+        stamp_path.write_text("1799999990\n")          # an older stamp: not a restart
+        self.clock.t += 1.0
+        node.tick()
+        self.assertIsNone(node.exit_status)
+        stamp_path.unlink()                            # no stamp at all: not a restart
+        self.clock.t += 1.0
+        node.tick()
+        self.assertIsNone(node.exit_status)
+        self.assertEqual(len(node.saver.calls), 1, "saves carry on across the unchanged stamps")
+
     def test_a_save_that_answers_after_its_timeout_is_ignored(self):
         self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
         self.node.tick()
@@ -531,7 +662,8 @@ class NodeTests(unittest.TestCase):
         self.node.tick()                        # starts the first save attempt
         self.clock.t += 21.0
         self.node.tick()                        # expires: counted as an error, no retry this tick
-        self.node.tick()                        # retries: a second attempt starts
+        self.clock.t += 31.0
+        self.node.tick()                        # retries after the autosave interval: a second attempt starts
         self.assertEqual(len(self.saver.calls), 2)
         self.saver.complete(0, ok=True)         # the first attempt's late answer arrives while the second is in flight
         self.node.tick()
@@ -551,10 +683,65 @@ class NodeTests(unittest.TestCase):
         self.node.tick()
         status = self.last_status()
         self.assertEqual((status["saves"], status["save_errors"]), (0, 1))
+        self.assertEqual(status["last_save"]["reason"], "incomplete save: map.posegraph, map.data missing")
         self.assertFalse((self.node.session.dir / "map.pgm").exists(), "nothing is committed from a partial save")
         self.assertFalse((self.node.session.dir / "map.yaml").exists())
         staging = self.node.session.dir / ".saving"
         self.assertEqual(list(staging.iterdir()), [], "the partial staged files must not leak into the next attempt")
+
+    def test_a_later_attempt_does_not_commit_the_previous_attempts_leftovers(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()                                              # the first attempt
+        base = self.saver.calls[0][0]
+        for ext in ("posegraph", "data"):                             # the serialize half landed...
+            Path(f"{base}.{ext}").write_text(ext)
+        self.saver.complete(0, ok=False, reason="save_map failed")    # ...but the save failed
+        self.clock.t += 31.0
+        self.node.tick()                                              # the retry
+        self.saver.complete(1, ok=True, files=("pgm", "yaml"))        # only the grid half this time
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual((status["saves"], status["save_errors"]), (0, 2), "the first attempt's files must not complete the second")
+        self.assertFalse((self.node.session.dir / "map.posegraph").exists())
+
+    def test_a_volume_that_turns_read_only_degrades_instead_of_crashing(self):
+        # Only the startup path was guarded: a volume that fills or remounts
+        # read-only later raised out of the timer callback, through spin_once
+        # and main(), and the keeper was restarted into the same condition
+        # with no status published in between.
+        self.turn_the_volume_read_only()
+        self.node.on_scan(scan_msg())
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual(self.saver.calls, [], "no save can be staged, so none is attempted")
+        self.assertEqual(status["last_save"]["ok"], False)
+        self.assertIsNotNone(status["last_save"]["reason"])
+        self.assertEqual(status["save_errors"], 0, "an unusable volume is not a failed save attempt")
+        self.assertEqual(status["state"], "waiting_for_odom_tf", "the heartbeat carries on")
+        self.clock.t += 31.0
+        self.node.tick()
+        self.assertEqual(self.last_status()["save_errors"], 0)
+        self.assertEqual(len(self.node.status_pub.messages), 2)
+
+    def test_a_volume_that_turns_read_only_mid_save_records_a_failed_save(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        self.turn_the_volume_read_only()
+        self.saver.complete(0, ok=True)          # the staged files cannot be moved into place
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual((status["saves"], status["save_errors"]), (0, 1))
+        self.assertTrue(status["last_save"]["reason"].startswith("cannot commit the save"), status["last_save"]["reason"])
+
+    def test_an_odometry_jump_still_asks_for_the_restart_when_session_json_is_unwritable(self):
+        # The exit status was set after the session.json write, so a jump that
+        # coincided with a full volume never restarted the slam node.
+        self.turn_the_volume_read_only()
+        self.node.on_odom(odom_msg(0.0, 0.0, 0.0))
+        self.node.on_odom(odom_msg(5.0, 0.0, 0.0))
+        self.assertEqual(self.node.exit_status, slam_keeper.ODOM_RESET_EXIT_STATUS)
+        self.assertEqual(self.node.state.odom_resets, 1)
 
     def test_an_unwritable_volume_keeps_status_and_trajectory_alive(self):
         blocker = Path(self.tmp.name) / "blocked"
@@ -571,6 +758,39 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(status["trajectory_poses"], 1)
         self.assertEqual(len(node.trajectory_pub.messages), 1)
 
+    def test_saves_pause_while_the_volume_is_nearly_full(self):
+        # ~100 KB per pose-graph node, rewritten whole every autosave: a
+        # 10-minute drive is 150-200 MB a save, and a volume that fills
+        # leaves a half-written map instead of the last good one.
+        def free(megabytes):
+            return mock.patch.object(slam_keeper.shutil, "disk_usage", return_value=types.SimpleNamespace(total=0, used=0, free=megabytes * 1024 * 1024))
+
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        with free(100):
+            self.node.tick()
+        self.assertEqual(self.saver.calls, [], "a save that cannot fit is never started")
+        status = self.last_status()
+        self.assertEqual(status["last_save"], {"age_s": 0.0, "ok": False, "path": None, "reason": "low disk: 100 MB free"})
+        self.assertEqual((status["saves"], status["save_errors"]), (0, 0), "a skipped save is not a failed attempt")
+        self.clock.t += 31.0
+        with free(900):
+            self.node.tick()
+        self.assertEqual(len(self.saver.calls), 1, "saving resumes once there is room")
+
+    def test_an_unmounted_maps_volume_runs_without_saves_and_says_so(self):
+        root = Path(self.tmp.name) / "never-mounted"
+        root.mkdir()
+        (root / slam_keeper.UNMOUNTED_MARKER).touch()
+        node = slam_keeper.SlamKeeper(cfg=self.cfg, store=slam_keeper.SessionStore(root, keep=2), saver=FakeSaver(), clock=self.clock, wall_clock=lambda: 1_800_000_000.0)
+        node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        node.tick()
+        status = json.loads(node.status_pub.messages[-1].data)
+        self.assertIsNone(node.session)
+        self.assertIsNone(status["session"])
+        self.assertEqual(status["last_save"], {"age_s": 0.0, "ok": False, "path": None, "reason": "maps volume not mounted"})
+        self.assertEqual(status["save_errors"], 0, "nothing was attempted")
+        self.assertEqual([p.name for p in root.iterdir()], [slam_keeper.UNMOUNTED_MARKER], "no session is written into the container layer")
+
     def test_subscriptions_and_publishers_use_the_spec_topics(self):
         topics = sorted(sub.args[1] for sub in self.node.subs)
         self.assertEqual(topics, ["/map", "/odom", "/pose", "/scan", "/tf"])
@@ -580,8 +800,6 @@ class NodeTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def test_main_does_not_crash_when_the_maps_volume_is_unwritable_at_startup(self):
-        from unittest import mock
-
         tmp = tempfile.TemporaryDirectory()
         try:
             blocker = Path(tmp.name) / "blocked"

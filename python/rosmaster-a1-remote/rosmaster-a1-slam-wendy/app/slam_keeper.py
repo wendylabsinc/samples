@@ -34,8 +34,18 @@ from tf2_msgs.msg import TFMessage
 # service restart), and slam_toolbox cannot recover from a jump.
 ODOM_RESET_EXIT_STATUS = 75
 
+# The slam node's supervisor stamps this file with the wall-clock second of
+# every async_slam_toolbox_node launch; the keeper reads it to tell whether
+# the node it is mapping with is still the one it started against.
+NODE_STARTED_AT_PATH = "/tmp/slam_node_started_at"
+
 SESSION_NAME_FORMAT = "%Y%m%d-%H%M%S"
 SAVE_OUTPUTS = {"graph": ("map.posegraph", "map.data"), "grid": ("map.pgm", "map.yaml")}
+
+# The image creates /maps/<this file>; the persist mount hides it. Seeing it
+# means the volume is missing, and writing sessions into the container layer
+# under a green status is worse than not saving at all.
+UNMOUNTED_MARKER = ".unmounted"
 
 
 @dataclass
@@ -63,6 +73,9 @@ class SessionStore:
         if not self.root.is_dir():
             return []
         return sorted(p.name for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and (p / "session.json").is_file())
+
+    def is_unmounted(self) -> bool:
+        return (self.root / UNMOUNTED_MARKER).exists()
 
     def latest_dir(self) -> Path | None:
         link = self.root / "latest"
@@ -96,15 +109,22 @@ class SessionStore:
                 pass
         return self.start(now_wall)
 
+    def staging_dir(self, session: Session) -> Path:
+        return session.dir / ".saving"
+
     def staging_base(self, session: Session) -> str:
-        staging = session.dir / ".saving"
-        staging.mkdir(exist_ok=True)
+        """An empty staging directory for one save attempt. It is emptied
+        first: leftovers from an attempt that failed half-way would satisfy
+        the all-four check of a later attempt and get committed as a map."""
+        staging = self.staging_dir(session)
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
         return str(staging / "map")
 
     def commit_save(self, session: Session, kind: str) -> list[Path]:
         moved = []
         for name in SAVE_OUTPUTS[kind]:
-            src = session.dir / ".saving" / name
+            src = self.staging_dir(session) / name
             if src.is_file():
                 os.replace(src, session.dir / name)
                 moved.append(session.dir / name)
@@ -169,6 +189,7 @@ class KeeperConfig:
     odom_jump_rad: float = 1.0
     down_s: float = 10.0
     save_timeout_s: float = 20.0
+    min_free_mb: int = 256
 
     @classmethod
     def from_env(cls) -> "KeeperConfig":
@@ -183,6 +204,7 @@ class KeeperConfig:
             odom_jump_rad=_env_float("SLAM_ODOM_JUMP_RAD", 1.0),
             down_s=_env_float("SLAM_DOWN_S", 10.0),
             save_timeout_s=_env_float("SLAM_SAVE_TIMEOUT_S", 20.0),
+            min_free_mb=_env_int("SLAM_MIN_FREE_MB", 256),
         )
 
 
@@ -203,7 +225,7 @@ class KeeperState:
         self.last_scan_at: float | None = None
         self.first_scan_at: float | None = None
         self.scans = 0
-        self.last_odom_at: float | None = None
+        self.last_odom_tf_at: float | None = None
         self.last_odom_pose: tuple[float, float, float] | None = None
         self.last_map_odom_at: float | None = None
         self.map_odom: dict | None = None
@@ -230,8 +252,15 @@ class KeeperState:
         if self.first_scan_at is None:
             self.first_scan_at = now
 
+    def on_odom_tf(self) -> None:
+        """`odom -> base_link`, the transform slam_toolbox actually consumes.
+        The /odom topic is not a substitute: it keeps flowing when the
+        broadcaster is off (ODOM_PUBLISH_TF=0) and nothing is being mapped."""
+        self.last_odom_tf_at = self._clock()
+
     def on_odom(self, x: float, y: float, yaw: float) -> bool:
-        self.last_odom_at = self._clock()
+        """The /odom topic: the jump watchdog and the last odometry pose.
+        Freshness is `on_odom_tf`'s business."""
         jumped = False
         if self.last_odom_pose is not None:
             px, py, pyaw = self.last_odom_pose
@@ -269,12 +298,12 @@ class KeeperState:
     def save_started(self) -> None:
         self.save_in_flight_since = self._clock()
 
-    def save_finished(self, ok: bool, path: str | None) -> None:
+    def save_finished(self, ok: bool, path: str | None, reason: str | None = None) -> None:
         self.save_in_flight_since = None
         self.last_save_at = self._clock()
         self.last_save_ok = ok
         self.last_save_path = path
-        self.last_save_reason = None
+        self.last_save_reason = reason
         if ok:
             self.saves += 1
             self.poses_since_save = 0
@@ -284,9 +313,16 @@ class KeeperState:
     def expire_save(self) -> bool:
         if self.save_in_flight_since is None or self._clock() - self.save_in_flight_since <= self.cfg.save_timeout_s:
             return False
+        # The timeout IS the last save: leaving the previous success's path
+        # and timestamp in place shows a stale green path next to ok=false,
+        # and would let the next tick retry immediately instead of waiting
+        # the autosave interval every other failure waits.
         self.save_in_flight_since = None
         self.save_errors += 1
+        self.last_save_at = self._clock()
         self.last_save_ok = False
+        self.last_save_path = None
+        self.last_save_reason = f"save timed out after {self.cfg.save_timeout_s:g} s"
         return True
 
     def note_save_unavailable(self, reason: str) -> None:
@@ -307,7 +343,7 @@ class KeeperState:
         now = self._clock()
         if self.last_scan_at is None or now - self.last_scan_at > STALE_INPUT_S:
             return "waiting_for_scan"
-        if self.last_odom_at is None or now - self.last_odom_at > STALE_INPUT_S:
+        if self.last_odom_tf_at is None or now - self.last_odom_tf_at > STALE_INPUT_S:
             return "waiting_for_odom_tf"
         if self.last_map_odom_at is not None and now - self.last_map_odom_at > self.cfg.down_s:
             return "slam_down"
@@ -327,7 +363,7 @@ class KeeperState:
         return {
             "state": self.state(),
             "scan_age_s": self._age(self.last_scan_at),
-            "odom_tf_age_s": self._age(self.last_odom_at),
+            "odom_tf_age_s": self._age(self.last_odom_tf_at),
             "map_odom_age_s": self._age(self.last_map_odom_at),
             "map": map_info,
             "pose": pose,
@@ -351,11 +387,14 @@ def _yaw_of(q) -> float:
 class RosMapSaver:
     """The saver protocol over slam_toolbox's two services: one call writes
     the pose graph (`<base>.posegraph` + `.data`), the other the occupancy
-    grid (`<base>.pgm` + `.yaml`). `done(ok)` fires once both answered."""
+    grid (`<base>.pgm` + `.yaml`). `done(ok, reason)` fires once both
+    answered; `reason` names the half that failed, or is None on success."""
+
+    SERVICES = {"graph": "/slam_toolbox/serialize_map", "grid": "/slam_toolbox/save_map"}
 
     def __init__(self, node: Node) -> None:
-        self.serialize = node.create_client(SerializePoseGraph, "/slam_toolbox/serialize_map")
-        self.save_grid = node.create_client(SaveMap, "/slam_toolbox/save_map")
+        self.serialize = node.create_client(SerializePoseGraph, self.SERVICES["graph"])
+        self.save_grid = node.create_client(SaveMap, self.SERVICES["grid"])
 
     def save(self, base: str, done) -> None:
         graph_req = SerializePoseGraph.Request()
@@ -370,7 +409,8 @@ class RosMapSaver:
             except Exception:  # noqa: BLE001 - a service failure is a failed save, not a crash
                 pending[kind] = False
             if None not in pending.values():
-                done(all(pending.values()))
+                failed = [self.SERVICES[k].rsplit("/", 1)[1] for k, ok in pending.items() if not ok]
+                done(not failed, " and ".join(failed) + " failed" if failed else None)
 
         self.serialize.call_async(graph_req).add_done_callback(lambda f: finish("graph", f))
         self.save_grid.call_async(grid_req).add_done_callback(lambda f: finish("grid", f))
@@ -380,30 +420,39 @@ class SlamKeeper(Node):
     """Thin rclpy wrapper: subscriptions in, /slam/status + /slam/trajectory out,
     saves through the saver, session bookkeeping through the store."""
 
-    def __init__(self, *, cfg: KeeperConfig, store: SessionStore, saver, clock=time.monotonic, wall_clock=time.time, node_started_at: float | None = None) -> None:
+    def __init__(self, *, cfg: KeeperConfig, store: SessionStore, saver, clock=time.monotonic, wall_clock=time.time, node_started_at: float | None = None, node_started_at_path=NODE_STARTED_AT_PATH) -> None:
         super().__init__("slam_keeper")
         self.cfg = cfg
         self.store = store
         self.saver = saver
-        # Not self._clock: rclpy.node.Node.__init__ (our real base class)
-        # already owns that name for its own Clock, and Timer reads
-        # self._clock.handle. Shadowing it with this plain callable crashed
-        # every create_timer() call below against the real library (caught
-        # by the offline replay harness, scripts/slam_offline_check.sh).
-        self._now = clock
-        self._wall = wall_clock
+        self.node_started_at = node_started_at
+        self.node_started_at_path = node_started_at_path
+        # The injected age-clock goes to KeeperState and nowhere else. Under
+        # the name self._clock it would shadow the Clock that
+        # rclpy.node.Node.__init__ (our real base class) owns and that Timer
+        # reads as self._clock.handle, which crashed every create_timer()
+        # call below against the real library -- caught by the offline replay
+        # harness, scripts/slam_offline_check.sh.
         self.state = KeeperState(cfg, clock=clock)
         self.session: Session | None = None
-        try:
-            self.session = store.attach_or_start(wall_clock(), node_started_at)
-        except OSError as exc:
-            # A missing or read-only volume must not take the heartbeat and
-            # the trajectory down with it: mapping continues, saves report
-            # false. This is not a save attempt, so it must not count as one.
-            print(f"SLAM_KEEPER cannot use {store.root}: {exc}; running without saves", flush=True)
-            self.state.note_save_unavailable(str(exc))
+        # A volume that cannot hold a session must not take the heartbeat and
+        # the trajectory down with it: mapping continues, saves report false.
+        # Neither case is a save attempt, so neither counts as one.
+        if store.is_unmounted():
+            print(f"SLAM_KEEPER {store.root / UNMOUNTED_MARKER} is still there: the persist volume is not mounted; running without saves", flush=True)
+            self.state.note_save_unavailable("maps volume not mounted")
+        else:
+            try:
+                self.session = store.attach_or_start(wall_clock(), node_started_at)
+            except OSError as exc:
+                print(f"SLAM_KEEPER cannot use {store.root}: {exc}; running without saves", flush=True)
+                self.state.note_save_unavailable(str(exc))
         self.exit_status: int | None = None
         self._save_token = 0
+        self._low_disk = False
+        self.trajectory_msg = PathMsg()
+        self.trajectory_msg.header.frame_id = "map"
+        self._trajectory_dirty = False
         self.status_pub = self.create_publisher(String, "/slam/status", 10)
         self.trajectory_pub = self.create_publisher(PathMsg, "/slam/trajectory", LATCHED)
         # Not `self.subscriptions`: that is a read-only property on the real rclpy Node.
@@ -424,14 +473,17 @@ class SlamKeeper(Node):
         p = msg.pose.pose
         if self.state.on_odom(p.position.x, p.position.y, _yaw_of(p.orientation)):
             print(f"SLAM_KEEPER odometry jumped: requesting a slam restart (resets={self.state.odom_resets})", flush=True)
-            if self.session is not None:
-                self.store.update_session_json(self.session, odom_resets=self.state.odom_resets)
+            # Before the bookkeeping, never after: a jump that coincides with
+            # an unwritable volume must still restart the slam node.
             self.exit_status = ODOM_RESET_EXIT_STATUS
+            self.update_session_json(odom_resets=self.state.odom_resets)
 
     def on_tf(self, msg) -> None:
         for t in msg.transforms:
             if t.header.frame_id == "map" and t.child_frame_id == "odom":
                 self.state.on_map_odom(t.transform.translation.x, t.transform.translation.y, _yaw_of(t.transform.rotation))
+            elif t.header.frame_id == "odom" and t.child_frame_id == "base_link":
+                self.state.on_odom_tf()
 
     def on_map(self, msg) -> None:
         data = msg.data
@@ -440,31 +492,62 @@ class SlamKeeper(Node):
 
     def on_pose(self, msg) -> None:
         p = msg.pose.pose
-        if self.state.on_pose(p.position.x, p.position.y, _yaw_of(p.orientation), msg.header.stamp):
-            self.publish_trajectory(msg.header.stamp)
+        x, y, yaw = p.position.x, p.position.y, _yaw_of(p.orientation)
+        if self.state.on_pose(x, y, yaw, msg.header.stamp):
+            self.extend_trajectory(x, y, yaw, msg.header.stamp)
+
+    def restarted_slam_node_stamp(self) -> float | None:
+        """The launch stamp of a slam node newer than the one this keeper
+        started against, else None. A newer stamp means slam_toolbox exited
+        and its supervisor relaunched it with an empty graph: the session
+        this keeper has been autosaving into belongs to the dead instance,
+        and saving on into it overwrites the drive's map with a near-empty one."""
+        if self.node_started_at is None:
+            return None
+        stamp = _read_node_started_at(self.node_started_at_path)
+        return stamp if stamp is not None and stamp > self.node_started_at else None
 
     def tick(self) -> None:
+        restarted_at = self.restarted_slam_node_stamp()
+        if restarted_at is not None:
+            # Exit 0: the keeper supervisor relaunches us, and attach_or_start
+            # sees the stamp is newer than /maps/latest and opens a new session.
+            print(f"SLAM_KEEPER slam node restarted at {restarted_at:.0f}; reopening the session", flush=True)
+            self.exit_status = 0
+            return
         if self.state.expire_save():
             print("SLAM_KEEPER save timed out", flush=True)
         elif self.state.wants_save() and self.session is not None:
             self.start_save()
+        self.publish_trajectory()
         self.publish_status()
 
     # --- outputs ----------------------------------------------------------
-    def publish_trajectory(self, latest_stamp) -> None:
-        path = PathMsg()
-        path.header.frame_id = "map"
-        path.header.stamp = latest_stamp
-        for x, y, yaw, at in self.state.trajectory:
-            pose = PoseStamped()
-            pose.header.frame_id = "map"
-            pose.header.stamp = at
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.orientation.z = math.sin(yaw / 2.0)
-            pose.pose.orientation.w = math.cos(yaw / 2.0)
-            path.poses.append(pose)
-        self.trajectory_pub.publish(path)
+    def extend_trajectory(self, x: float, y: float, yaw: float, stamp) -> None:
+        """One PoseStamped appended to the Path the keeper keeps; tick()
+        publishes it. Rebuilding the whole Path per accepted pose was O(n) on
+        the executor thread at up to 3.5 Hz -- hundreds of ms per pose at
+        SLAM_TRAJECTORY_MAX_POSES on the Orin Nano."""
+        pose = PoseStamped()
+        pose.header.frame_id = "map"
+        pose.header.stamp = stamp
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        self.trajectory_msg.poses.append(pose)
+        del self.trajectory_msg.poses[: max(0, len(self.trajectory_msg.poses) - self.cfg.trajectory_max_poses)]
+        self.trajectory_msg.header.stamp = stamp
+        self._trajectory_dirty = True
+
+    def publish_trajectory(self) -> None:
+        """The publisher is transient local, so a late joiner still gets the
+        whole path from the last publish; at most one a second is plenty.
+        The same message goes out every time: rclpy serialises at publish."""
+        if not self._trajectory_dirty:
+            return
+        self.trajectory_pub.publish(self.trajectory_msg)
+        self._trajectory_dirty = False
 
     def publish_status(self) -> None:
         session = None if self.session is None else {"name": self.session.name, "started_at": self.session.started_at, "dir": str(self.session.dir)}
@@ -472,39 +555,75 @@ class SlamKeeper(Node):
         msg.data = json.dumps(self.state.status(session), sort_keys=True)
         self.status_pub.publish(msg)
 
+    def update_session_json(self, **fields) -> None:
+        """Bookkeeping, not a promise: a volume that cannot take the update
+        must not take the callback that asked for it down with it."""
+        if self.session is None:
+            return
+        try:
+            self.store.update_session_json(self.session, **fields)
+        except OSError as exc:
+            print(f"SLAM_KEEPER cannot update {self.session.dir}/session.json: {exc}", flush=True)
+
     def start_save(self) -> None:
-        base = self.store.staging_base(self.session)
+        try:
+            # A save rewrites the whole pose graph (~100 KB per node, so
+            # 150-200 MB for a 10-minute drive) every autosave interval. A
+            # volume that fills mid-write leaves a truncated graph where the
+            # last good one was, so stop before it, not during it.
+            free_mb = int(shutil.disk_usage(self.store.root).free // (1024 * 1024))
+            if free_mb < self.cfg.min_free_mb:
+                if not self._low_disk:
+                    print(f"SLAM_KEEPER low disk under {self.store.root}: {free_mb} MB free, below SLAM_MIN_FREE_MB={self.cfg.min_free_mb}; pausing saves", flush=True)
+                    self._low_disk = True
+                self.state.note_save_unavailable(f"low disk: {free_mb} MB free")
+                return
+            if self._low_disk:
+                print(f"SLAM_KEEPER disk has room again: {free_mb} MB free; resuming saves", flush=True)
+                self._low_disk = False
+            base = self.store.staging_base(self.session)
+        except OSError as exc:
+            print(f"SLAM_KEEPER cannot stage a save in {self.session.dir}: {exc}", flush=True)
+            self.state.note_save_unavailable(f"cannot stage a save: {exc}")
+            return
         self.state.save_started()
         self._save_token += 1
         token = self._save_token
-        self.saver.save(base, lambda ok: self._on_save_done(token, ok))
+        self.saver.save(base, lambda ok, reason: self._on_save_done(token, ok, reason))
 
-    def _on_save_done(self, token: int, ok: bool) -> None:
+    def _on_save_done(self, token: int, ok: bool, reason: str | None) -> None:
         if token != self._save_token or self.state.save_in_flight_since is None:
             return          # a stale answer: an expired or already-superseded attempt
         grid_path = None
         if ok:
-            staging_dir = Path(self.store.staging_base(self.session)).parent
-            staged = [staging_dir / name for names in SAVE_OUTPUTS.values() for name in names]
-            if all(p.is_file() for p in staged):
-                moved = self.store.commit_save(self.session, "graph") + self.store.commit_save(self.session, "grid")
-                grid_path = next((str(p) for p in moved if p.name == "map.pgm"), None)
+            # A pure path, never staging_base(): that one clears the directory
+            # for a fresh attempt and would delete the outputs being committed.
+            staged = [self.store.staging_dir(self.session) / name for names in SAVE_OUTPUTS.values() for name in names]
+            missing = [p.name for p in staged if not p.is_file()]
+            if not missing:
+                try:
+                    moved = self.store.commit_save(self.session, "graph") + self.store.commit_save(self.session, "grid")
+                    grid_path = next((str(p) for p in moved if p.name == "map.pgm"), None)
+                except OSError as exc:
+                    ok = False
+                    reason = f"cannot commit the save: {exc}"
             else:
                 # Not all four outputs landed: commit none of them, and drop
                 # whatever did land so it cannot leak into the next attempt.
                 ok = False
+                reason = f"incomplete save: {', '.join(missing)} missing"
                 for p in staged:
                     p.unlink(missing_ok=True)
-        self.state.save_finished(ok, grid_path)
+        self.state.save_finished(ok, grid_path, reason)
         if ok:
-            self.store.update_session_json(self.session, saves=self.state.saves, scans=self.state.scans, last_pose=self.state.pose)
+            self.update_session_json(saves=self.state.saves, scans=self.state.scans, last_pose=self.state.pose)
         else:
-            print("SLAM_KEEPER save failed", flush=True)
+            print(f"SLAM_KEEPER save failed: {reason}", flush=True)
 
 
-def _read_node_started_at() -> float | None:
+def _read_node_started_at(path=NODE_STARTED_AT_PATH) -> float | None:
     try:
-        return float(Path("/tmp/slam_node_started_at").read_text().strip())
+        return float(Path(path).read_text().strip())
     except (OSError, ValueError):
         return None
 
