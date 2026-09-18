@@ -62,9 +62,11 @@ slam_supervisor() {
 
 # Exit status 75 from the keeper means the odometry frame jumped (base
 # service restart). slam_toolbox cannot absorb a jump, so the node is killed
-# (its supervisor relaunches it, fresh graph) and the start stamp is renewed
-# first so the relaunched keeper opens a new session instead of attaching to
-# the old one.
+# and its supervisor relaunches it with a fresh graph, renewing the start
+# stamp as it does for every launch. The stamp has exactly one writer: the
+# relaunched keeper attaches to the old session until it sees the new stamp,
+# then ends itself and the next keeper opens a new session. Renewing the
+# stamp here as well made every reset open two sessions, one of them empty.
 keeper_supervisor() {
   local attempt=0 backoff=5 started status
   while true; do
@@ -77,7 +79,6 @@ keeper_supervisor() {
     if (( $(date +%s) - started > 60 )); then backoff=5; fi
     if [[ ${status} -eq 75 ]]; then
       echo "KEEPER_SUPERVISOR odometry reset reported: restarting the slam node" >&2
-      date +%s > /tmp/slam_node_started_at
       kill "$(cat /tmp/slam_node_pid 2>/dev/null)" 2>/dev/null || true
       sleep 1
       continue
