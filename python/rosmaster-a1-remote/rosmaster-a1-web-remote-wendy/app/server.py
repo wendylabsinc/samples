@@ -14,7 +14,7 @@ from io import BytesIO
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 from PIL import Image as PILImage
@@ -28,6 +28,7 @@ from sensor_msgs.msg import Imu, JointState, LaserScan, MagneticField, PointClou
 from std_msgs.msg import Float32, String
 
 from direct_gamepad import DirectGamepadWorker
+from slam_bridge import SlamBridge
 
 
 PORT = int(os.environ.get("PORT", "8091"))
@@ -2702,6 +2703,9 @@ class RosmasterControl(Node):
 
 rclpy.init()
 control = RosmasterControl()
+# The SLAM viewer's data source. It rides on the control node so the web
+# service still has exactly one DDS participant; see slam_bridge.py.
+slam_bridge = SlamBridge(control, log=log_line)
 direct_gamepad = DirectGamepadWorker(
     control,
     max_steering_y=MAX_STEERING_Y,
@@ -2897,6 +2901,17 @@ class CommandFreshness:
 command_freshness = CommandFreshness()
 
 
+def _query_int(query: dict, key: str) -> int | None:
+    """One integer query parameter, or None when absent or not an integer."""
+    values = query.get(key)
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except ValueError:
+        return None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "RosmasterWebRemote/0.3"
     # HTTP/1.0 closed the socket after every response, so each of the eight
@@ -2965,6 +2980,13 @@ class Handler(BaseHTTPRequestHandler):
             # sends nothing and closes, which is a great deal easier to read
             # than a 404 on a page that has just been told the feed exists.
             self._stream_camera(*CAMERA_STREAM_PATHS[parsed.path])
+        elif parsed.path == "/api/slam":
+            self._send_json(slam_bridge.snapshot())
+        elif parsed.path == "/api/slam/map.png":
+            self._send_slam_map()
+        elif parsed.path == "/api/slam/trajectory":
+            query = parse_qs(parsed.query)
+            self._send_json(slam_bridge.trajectory(_query_int(query, "epoch"), _query_int(query, "from")))
         elif parsed.path.startswith("/static/"):
             rel = parsed.path.removeprefix("/static/")
             self._send_file(STATIC_DIR / rel, self._content_type(rel))
@@ -3155,6 +3177,45 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(jpg)
+
+    def _send_slam_map(self) -> None:
+        """The bridge's cached map PNG, with its placement metadata as headers.
+
+        The Map panel places the image from these headers rather than from an
+        earlier /api/slam snapshot, so the picture and its metres can never
+        disagree. 304 on a matching If-None-Match, 404 before the first grid.
+        Finite and Content-Length'd like every other response on this server.
+        """
+        found = slam_bridge.map_png()
+        if found is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        png, meta = found
+        etag = f'"{meta["version"]}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(png)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("ETag", etag)
+        origin = meta["origin"]
+        for name, value in (
+            ("X-Map-Version", meta["version"]),
+            ("X-Map-Width", meta["width"]),
+            ("X-Map-Height", meta["height"]),
+            ("X-Map-Resolution", meta["resolution"]),
+            ("X-Map-Origin-X", origin["x"]),
+            ("X-Map-Origin-Y", origin["y"]),
+            ("X-Map-Origin-Yaw", origin["yaw"]),
+        ):
+            self.send_header(name, str(value))
+        self.end_headers()
+        self.wfile.write(png)
 
     def _stream_camera(self, camera: str, stream: str) -> None:
         """Serve one feed as MJPEG for as long as it has something to send.
