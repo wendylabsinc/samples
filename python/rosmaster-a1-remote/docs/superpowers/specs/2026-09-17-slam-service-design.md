@@ -213,7 +213,7 @@ pose             {"x","y","yaw","age_s"} from /pose, or null
 map_odom         {"x","y","yaw"} current correction, or null
 trajectory_poses n
 session          {"name","started_at","dir"} current session (see persistence)
-last_save        {"age_s","ok","path","reason"} or null ("reason" is a string when ok is false, else null); "saves", "save_errors" counters
+last_save        {"age_s","ok","path","reason"} or null ("reason" is a string explaining a failed or unavailable save when the keeper has one, else null); "saves", "save_errors" counters
 odom_resets      n (see watchdog)
 ```
 

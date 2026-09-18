@@ -171,8 +171,9 @@ publishes `map -> odom`), `map` (`width`, `height`, `resolution`,
 `occupied`, `free`, `unknown`, `age_s`, or null), `pose` (`x`, `y`, `yaw`,
 `age_s`, or null), `map_odom` (`x`, `y`, `yaw`, or null),
 `trajectory_poses`, `session` (`name`, `started_at`, `dir`), `last_save`
-(`age_s`, `ok`, `path`, `reason`, or null; `reason` is a string when `ok`
-is false, else null), `saves`, `save_errors`, `odom_resets`.
+(`age_s`, `ok`, `path`, `reason`, or null; `reason` is a string explaining a
+failed or unavailable save when the keeper has one, else null), `saves`,
+`save_errors`, `odom_resets`.
 
 Maps live on the car in the `rosmaster-a1-maps` volume (`/maps` in the
 container): one directory per session with `map.posegraph`, `map.data`,
