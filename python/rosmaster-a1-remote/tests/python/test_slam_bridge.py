@@ -99,6 +99,16 @@ def scan_message(ranges, angle_min=-math.pi, angle_increment=None, range_min=0.0
     )
 
 
+def path_message(points):
+    poses = []
+    for x, y in points:
+        poses.append(types.SimpleNamespace(
+            header=None,
+            pose=types.SimpleNamespace(position=types.SimpleNamespace(x=x, y=y, z=0.0), orientation=quaternion_yaw(0.0)),
+        ))
+    return types.SimpleNamespace(header=types.SimpleNamespace(frame_id="map", stamp=None), poses=poses)
+
+
 class ImportTests(unittest.TestCase):
     def test_the_bridge_subscribes_to_the_five_topics_on_the_given_node(self):
         bridge, _, _ = make_bridge()
@@ -321,6 +331,72 @@ class ScanTests(unittest.TestCase):
     def test_no_scan_is_null(self):
         bridge, _, _ = make_bridge()
         self.assertIsNone(bridge.snapshot()["scan"])
+
+
+class TrajectoryTests(unittest.TestCase):
+    def test_nothing_before_the_first_path(self):
+        bridge, _, _ = make_bridge()
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 0, "count": 0})
+        self.assertEqual(bridge.trajectory(None, None), {"epoch": 0, "from": 0, "total": 0, "points": []})
+
+    def test_the_first_path_opens_epoch_one(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0)]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 1, "count": 2})
+        self.assertEqual(bridge.trajectory(1, 0), {"epoch": 1, "from": 0, "total": 2, "points": [0.0, 0.0, 0.05, 0.0]})
+
+    def test_an_extending_path_appends_only_the_new_poses(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0)]))
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0), (0.1, 0.0), (0.15, 0.01)]))
+        self.assertEqual(bridge.trajectory(1, 2), {"epoch": 1, "from": 2, "total": 4, "points": [0.1, 0.0, 0.15, 0.01]})
+
+    def test_a_head_trimmed_path_still_appends(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0), (0.1, 0.0)]))
+        # The keeper dropped (0, 0) off the front and added one at the end.
+        bridge.on_trajectory(path_message([(0.05, 0.0), (0.1, 0.0), (0.15, 0.0)]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 1, "count": 4})
+
+    def test_a_path_without_the_last_point_starts_a_new_epoch(self):
+        bridge, _, lines = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0)]))
+        bridge.on_trajectory(path_message([(3.0, 3.0)]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 2, "count": 1})
+        self.assertEqual(bridge.trajectory(2, 0)["points"], [3.0, 3.0])
+        self.assertIn("slam_bridge: trajectory epoch 1 -> 2 (2 -> 1 poses)", lines)
+
+    def test_an_empty_path_resets_and_the_next_poses_extend_that_epoch(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0)]))
+        bridge.on_trajectory(path_message([]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 2, "count": 0})
+        bridge.on_trajectory(path_message([(1.0, 1.0)]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 2, "count": 1})
+
+    def test_a_republished_unchanged_path_adds_nothing(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0)]))
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0)]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 1, "count": 2})
+
+    def test_the_point_cap_starts_a_new_epoch(self):
+        bridge, _, _ = make_bridge()
+        with mock.patch.object(slam_bridge, "SLAM_TRAJECTORY_MAX_POINTS", 3):
+            bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0)]))
+            bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0), (0.1, 0.0), (0.15, 0.0)]))
+        self.assertEqual(bridge.snapshot()["trajectory"], {"epoch": 2, "count": 4})
+
+    def test_query_semantics(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_trajectory(path_message([(0.0, 0.0), (0.05, 0.0), (0.1, 0.0)]))
+        # A wrong or missing epoch resynchronises from 0 under the current epoch.
+        self.assertEqual(bridge.trajectory(7, 2), {"epoch": 1, "from": 0, "total": 3, "points": [0.0, 0.0, 0.05, 0.0, 0.1, 0.0]})
+        self.assertEqual(bridge.trajectory(None, 2)["from"], 0)
+        # from is clamped to [0, total].
+        self.assertEqual(bridge.trajectory(1, 99), {"epoch": 1, "from": 3, "total": 3, "points": []})
+        self.assertEqual(bridge.trajectory(1, -4)["from"], 0)
+        self.assertEqual(bridge.trajectory(1, None)["from"], 0)
 
 
 if __name__ == "__main__":

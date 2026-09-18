@@ -128,6 +128,21 @@ def downsample_scan(msg, max_points: int = SLAM_SCAN_MAX_POINTS) -> list[float]:
     return points
 
 
+def _rindex(points: list, target) -> int:
+    """Highest index whose point equals target, or -1."""
+    for idx in range(len(points) - 1, -1, -1):
+        if points[idx] == target:
+            return idx
+    return -1
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 class SlamBridge:
     def __init__(self, node, clock=time.monotonic, log=print) -> None:
         self._now = clock
@@ -229,7 +244,53 @@ class SlamBridge:
             self._scan = {"points": points, "at": now}
 
     def on_trajectory(self, msg) -> None:
-        return None
+        """Fold the keeper's whole-path republish into an append-only list per epoch.
+
+        The keeper's Path is append-only in normal operation, trimmed to its
+        newest 5000, and restarted when a session opens. Finding the stored
+        last point in the new message (exact floats: the keeper republishes
+        its own doubles) tells which poses are new; not finding it is a
+        reset, which opens a new epoch so client indices stay stable.
+        """
+        raw = [(float(p.pose.position.x), float(p.pose.position.y)) for p in msg.poses]
+        with self._lock:
+            old_epoch, old_count = self._trajectory_epoch, len(self._trajectory)
+            if self._trajectory_epoch == 0:
+                self._start_epoch_locked(raw)
+            elif self._trajectory_last_raw is None:
+                self._extend_locked(raw, raw)
+            else:
+                matched = _rindex(raw, self._trajectory_last_raw)
+                if matched < 0:
+                    self._start_epoch_locked(raw)
+                else:
+                    self._extend_locked(raw, raw[matched + 1:])
+            new_epoch, new_count = self._trajectory_epoch, len(self._trajectory)
+        if new_epoch != old_epoch:
+            self._log(f"slam_bridge: trajectory epoch {old_epoch} -> {new_epoch} ({old_count} -> {new_count} poses)")
+
+    def _start_epoch_locked(self, raw: list[tuple[float, float]]) -> None:
+        self._trajectory_epoch += 1
+        self._trajectory = [(_cm(x), _cm(y)) for x, y in raw]
+        self._trajectory_last_raw = raw[-1] if raw else None
+
+    def _extend_locked(self, raw: list[tuple[float, float]], new: list[tuple[float, float]]) -> None:
+        if not new:
+            return
+        if len(self._trajectory) + len(new) > SLAM_TRAJECTORY_MAX_POINTS:
+            self._start_epoch_locked(raw)
+            return
+        self._trajectory.extend((_cm(x), _cm(y)) for x, y in new)
+        self._trajectory_last_raw = raw[-1]
+
+    def trajectory(self, epoch, start) -> dict:
+        """points[start:] under a matching epoch; everything from 0 otherwise."""
+        with self._lock:
+            current = self._trajectory_epoch
+            total = len(self._trajectory)
+            begin = 0 if epoch != current else min(max(_as_int(start), 0), total)
+            flat = [coordinate for point in self._trajectory[begin:] for coordinate in point]
+        return {"epoch": current, "from": begin, "total": total, "points": flat}
 
     # Snapshots, on HTTP threads -------------------------------------------
 
