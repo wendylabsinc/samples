@@ -139,7 +139,9 @@ rosmaster-a1-slam-wendy/
                           + ros-humble-slam-toolbox, rmw-cyclonedds-cpp,
                           the stdlib tarball/zip pattern; ~+1.2 GB (rviz deps)
   README.md
-  app/entrypoint.sh       Cyclone override, stdlib restore, two supervisors
+  app/entrypoint.sh       cyclone_env pins, stdlib restore, two supervisors
+  app/cyclone_env.sh      byte-identical copy of the shared participant-index helper
+  app/slam_args.sh        the slam_toolbox argument list (adds use_sim_time)
   app/slam_params.yaml    the validated slam_toolbox parameters
   app/slam_keeper.py      status, trajectory, autosave, session store, watchdog
 ```
@@ -153,10 +155,16 @@ Two processes, each supervised the way the lidar service supervises its driver:
 - `slam_keeper.py` (rclpy, node `slam_keeper`) under `supervise_python`, same
   restore-and-relaunch loop as the base and lidar services.
 
-The entrypoint sets `CYCLONEDDS_URI` unconditionally, as the realsense
-service does (`MaxAutoParticipantIndex` 60, multicast off, shared memory off):
-the agent's injected config does not raise the index and the car's loopback
-domain is already near the default 10-slot limit (two more processes here).
+The entrypoint sources the shared `cyclone_env.sh` (the same file the base,
+lidar and web services carry; `tests/shell/test_cyclone_env.sh` keeps the
+copies byte-identical) and pins a Cyclone participant index per process:
+27 for the slam_toolbox node, 28 for the keeper. `cyclone_env` writes
+`CYCLONEDDS_URI` with multicast off, shared memory off and
+`MaxAutoParticipantIndex` raised to `DDS_MAX_PARTICIPANT_INDEX` (default 60):
+the agent's injected config does not raise the index, and the car's loopback
+domain already exhausted the default ten slots once (the web service
+crash-looped on "no free participant index"), so every process of ours takes
+a fixed slot above the auto range.
 
 ### Manifest
 
@@ -205,7 +213,7 @@ pose             {"x","y","yaw","age_s"} from /pose, or null
 map_odom         {"x","y","yaw"} current correction, or null
 trajectory_poses n
 session          {"name","started_at","dir"} current session (see persistence)
-last_save        {"age_s","ok","path"} or null; "saves", "save_errors" counters
+last_save        {"age_s","ok","path","reason"} or null ("reason" is a string when ok is false, else null); "saves", "save_errors" counters
 odom_resets      n (see watchdog)
 ```
 
@@ -301,7 +309,8 @@ Environment variables, read once at start, matching the sibling services:
 `SLAM_MAP_FILE=` (empty), `SLAM_TRAJECTORY_MIN_STEP_M=0.05`,
 `SLAM_TRAJECTORY_MAX_POSES=5000`, `SLAM_ODOM_JUMP_M=1.0`,
 `SLAM_ODOM_JUMP_RAD=1.0`, `SLAM_DOWN_S=10`, `SLAM_SAVE_TIMEOUT_S=20`,
-`SLAM_DDS_MAX_PARTICIPANTS=60`, `SLAM_USE_SIM_TIME=0` (1 makes both nodes
+`DDS_MAX_PARTICIPANT_INDEX=60` (read by the shared `cyclone_env.sh`, the
+same knob as the other services), `SLAM_USE_SIM_TIME=0` (1 makes both nodes
 use the bag clock; only the offline harness sets it).
 
 ### Integration with the Wendy environment
