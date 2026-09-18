@@ -256,7 +256,7 @@ again.
   | lidar | `sensor_probe.py` | 23 |
   | lidar | `ros2 launch` + driver | `auto` (they share one environment, so a fixed index would collide; the raised ceiling lets each take the lowest free one) |
   | web | `web_remote.py` | 26 |
-  | slam | `async_slam_toolbox_node` | 27 |
+  | slam | `async_slam_toolbox_node` (+ the `map_saver_cli` its save_map service shells out to) | `auto` (they share one environment, like the lidar launch) |
   | slam | `slam_keeper.py` | 28 |
 
   The ceiling is raised to 60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`,
