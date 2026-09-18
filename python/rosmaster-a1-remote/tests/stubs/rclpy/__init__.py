@@ -22,5 +22,9 @@ def spin(node) -> None:
     return None
 
 
+def spin_once(node, timeout_sec=None) -> None:
+    return None
+
+
 def ok() -> bool:
     return True

@@ -16,6 +16,7 @@ find /usr -path '*/encodings/__init__.py' -print 2>/dev/null | head -20 || true
 
 source /opt/ros/humble/setup.bash
 source /ros_ws/install/setup.bash
+source /app/cyclone_env.sh
 
 export AMENT_PREFIX_PATH="/ros_ws/install/ydlidar_ros2_driver:/ros_ws/install/yahboomcar_ctrl:/ros_ws/install/yahboomcar_bringup:/ros_ws/install/yahboomcar_msgs:/opt/ros/humble:${AMENT_PREFIX_PATH:-}"
 export CMAKE_PREFIX_PATH="${AMENT_PREFIX_PATH}"
@@ -92,6 +93,7 @@ export SENSOR_PROBE_STATUS_TOPIC="${SENSOR_PROBE_STATUS_TOPIC:-/lidar_sensor_pro
 export PROBE_CAMERA=0
 export PROBE_AUDIO=0
 unset PROBE_RAW_LIDAR
+cyclone_env 23
 supervise_python SENSOR_PROBE_SUPERVISOR /app/sensor_probe.py &
 sensor_probe_pid=$!
 
@@ -138,10 +140,15 @@ lidar_supervisor() {
     fi
 
     echo "LIDAR_SUPERVISOR attempt=${attempt} using ${lidar_port}"
-    if [[ -w "${lidar_params}" ]]; then
-      sed -i "s|port: .*|port: \"${lidar_port}\"|" "${lidar_params}"
-    fi
+    # Port for this attempt, and reversion off (the scan came up rotated 180
+    # degrees with the driver's shipped T-mini params; see the script).
+    bash /app/write_lidar_params.sh "${lidar_params}" "${lidar_port}" || \
+      echo "LIDAR_SUPERVISOR could not rewrite ${lidar_params}; launching with its current contents" >&2
 
+    # The launch process and the driver it spawns share one environment, so a
+    # fixed index would collide between them; "auto" with the raised ceiling
+    # lets each take the lowest free index instead.
+    cyclone_env auto
     /opt/ros/humble/bin/ros2 launch ydlidar_ros2_driver ydlidar_launch.py \
       params_file:="${lidar_params}"
     echo "LIDAR_SUPERVISOR driver exited status=$? after attempt=${attempt}; retrying in ${backoff}s" >&2

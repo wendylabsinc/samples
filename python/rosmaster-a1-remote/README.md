@@ -2,7 +2,7 @@
 
 Drive a Yahboom Rosmaster A1 from a browser, with an Xbox controller, watching
 four live camera feeds from an Intel RealSense D435i. Runs as one multi-container
-WendyOS app, `rosmaster-a1`, with four services, on the car's Jetson Orin Nano.
+WendyOS app, `rosmaster-a1`, with five services, on the car's Jetson Orin Nano.
 
 <!-- markdownlint-disable-next-line -->
 | | |
@@ -27,7 +27,7 @@ WendyOS app, `rosmaster-a1`, with four services, on the car's Jetson Orin Nano.
 
 ## The services
 
-One app, `rosmaster-a1`, with four services declared in a single root
+One app, `rosmaster-a1`, with five services declared in a single root
 `wendy.json`. Each service still lives in its own directory and builds from
 its own Dockerfile; the manifest is what ties them together.
 
@@ -37,12 +37,13 @@ its own Dockerfile; the manifest is what ties them together.
 | `lidar` | `rosmaster-a1-lidar-wendy/` | YDLIDAR driver, publishes `/scan` and a `/lidar_sensor_probe/status` heartbeat. Its probe skips camera and audio capture — `base` already owns those. |
 | `realsense` | `rosmaster-a1-realsense-wendy/` | RealSense driver, publishes depth, colour and both infrared streams. |
 | `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, MJPEG streams, controller handling, autonomy. |
+| `slam` | `rosmaster-a1-slam-wendy/` | `slam_toolbox` mapping from `/scan` and `/odom`: publishes `/map`, `/pose`, `map -> odom`, plus a keeper that publishes `/slam/trajectory` and `/slam/status` and autosaves each session to the `rosmaster-a1-maps` persist volume. |
 
 ```bash
 wendy run --yes --detach --device <car-hostname>.local:50052
 ```
 
-builds all four services in parallel and deploys them, run from this
+builds all five services in parallel and deploys them, run from this
 directory. None of the services declare `dependsOn`, so a single service can
 also be deployed on its own, which is useful when only the remote changed:
 
@@ -58,12 +59,12 @@ preferred way to deploy. It prunes `serial` entitlements for tty nodes that
 are not currently present, then runs `wendy run` for you. A serial
 entitlement naming an absent device does not degrade, it hard fails container
 creation, and USB serial adapters renumber between boots — and now that all
-four services share one app, one absent adapter can block the whole deploy
+five services share one app, one absent adapter can block the whole deploy
 rather than just the app that owned it (see "Notes and gotchas").
 
 ## Diagnosing serial devices
 
-`rosmaster-a1-devscan-wendy/` is a standalone sibling app, not one of the four
+`rosmaster-a1-devscan-wendy/` is a standalone sibling app, not one of the five
 services above. It declares zero serial entitlements, so it always deploys
 even when named tty nodes are missing, and prints a census of `/dev/serial/by-id`
 symlinks and every ttyUSB/ttyACM node it finds — which is exactly what you want
@@ -142,6 +143,37 @@ The Controller panel distinguishes the cases. In order of likelihood:
 5. **Not armed.** A detected pad still needs **A**. Commands flow either way, so
    check whether `control.command.enabled` is true in `/api/status`.
 
+## SLAM topics
+
+What the `slam` service publishes, for the bridge and viewer work
+(WDY-1637/1638). Frames: `map -> odom` (slam, 20 Hz) `-> base_link`
+(odometry) `-> laser_frame` (lidar, static identity). No `base_footprint`.
+
+| Topic | Type | QoS | Notes |
+|---|---|---|---|
+| `/map` | `nav_msgs/OccupancyGrid` | reliable, transient local | `map` frame, 0.05 m cells, republished about once a second while scans arrive; -1 unknown, 0 free, 100 occupied |
+| `/pose` | `geometry_msgs/PoseWithCovarianceStamped` | reliable | `map` frame; one per processed scan (every 0.2 m or 0.2 rad of travel), so none at rest |
+| `/tf` `map -> odom` | `tf2_msgs/TFMessage` | | 20 Hz; `map -> base_link` is the pose at scan rate plus odometry in between |
+| `/slam/trajectory` | `nav_msgs/Path` | reliable, transient local | `map` frame; `/pose` samples at least 5 cm apart, newest 5000; past poses are not retro-corrected after a loop closure |
+| `/slam/status` | `std_msgs/String` (JSON) | reliable, 1 Hz | keys below |
+
+`/slam/status` keys, always present, sorted: `state`
+(`waiting_for_scan`, `waiting_for_odom_tf`, `mapping`, `slam_down`),
+`scan_age_s`, `odom_tf_age_s`, `map_odom_age_s` (null until slam_toolbox
+publishes `map -> odom`), `map` (`width`, `height`, `resolution`,
+`occupied`, `free`, `unknown`, `age_s`, or null), `pose` (`x`, `y`, `yaw`,
+`age_s`, or null), `map_odom` (`x`, `y`, `yaw`, or null),
+`trajectory_poses`, `session` (`name`, `started_at`, `dir`), `last_save`
+(`age_s`, `ok`, `path`, `reason`, or null; `reason` is a string explaining a
+failed or unavailable save when the keeper has one, else null), `saves`,
+`save_errors`, `odom_resets`.
+
+Maps live on the car in the `rosmaster-a1-maps` volume (`/maps` in the
+container): one directory per session with `map.posegraph`, `map.data`,
+`map.pgm`, `map.yaml`, `session.json`; `latest` points at the current one.
+`wendy device ros2 exec --device <car> -- service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data: '/maps/keep-me'}}"`
+saves a named copy by hand.
+
 ## Safety model
 
 - **The car stops unless it is being told to move.** The server zeroes the
@@ -176,6 +208,12 @@ python3 -m venv .venv && .venv/bin/pip install numpy Pillow
 .venv/bin/python -m unittest discover -s tests/python -t .
 ```
 
+`scripts/odom_scan_consistency.py` checks a drive bag's odometry against its
+LiDAR scans with no ROS installed, and verdicts either `consistent` or one
+of `scan rotated 180 deg or speed sign inverted`, `scan mirrored or gyro
+sign inverted`, `speed scale off (ratio ...)`, `rotation scale off (ratio
+...)`, or a `timing offset ... s`.
+
 ## Notes and gotchas
 
 Things that cost real time to find, recorded so they do not have to be found
@@ -186,7 +224,7 @@ again.
   whichever adapter the motor board's `by-id` symlink does not resolve to.
 - **A serial entitlement for an absent device hard fails deployment.** It does
   not warn and continue, so a loose cable can make an app undeployable. With
-  all four services now sharing one `rosmaster-a1` app instead of four
+  all five services now sharing one `rosmaster-a1` app instead of four
   separate ones, an absent entitled device blocks that service's container
   for the whole-app deploy — a bigger blast radius than when each service
   deployed on its own. `scripts/deploy_car.sh` is the fix: it prunes serial
@@ -194,8 +232,46 @@ again.
 - **RealSense infrared needs its own profile.** `enable_infra1` and
   `enable_infra2` alone advertise the topics and publish nothing;
   `depth_module.infra_profile` is also required.
-- **CycloneDDS needs a raised participant limit.** With several ROS apps on one
-  device, a new node fails with "no free participant index" on loopback.
+- **The T-mini scan came up rotated 180 degrees.** The driver's shipped
+  params set `reversion: true` ("rotate 180"), so laser angle 0 was the car's
+  tail and the web planner's "front" sector watched behind the car (left and
+  right swapped too); only the forward-facing depth veto protected the floor
+  drives before 2026-09-17. The lidar service now forces `reversion: false`
+  (`app/write_lidar_params.sh`). Any autonomy result from before that date
+  was measured with the sectors reversed.
+- **CycloneDDS needs a raised participant limit.** The agent gives every app
+  container `ROS_LOCALHOST_ONLY=1`, so Cyclone binds loopback, where
+  discovery is unicast to "participant index" port pairs and the default
+  `MaxAutoParticipantIndex` of 9 leaves only ten slots per host. base, lidar
+  and the agent's own ROS tools can fill all ten between them, and the next
+  node to start fails with "no free participant index for domain 0". Each of
+  our processes takes its index from `cyclone_env.sh` (`app/cyclone_env.sh` in
+  each of the base, lidar, web and slam services): a fixed one, except where a
+  process spawns a ROS child that shares its environment and would collide
+  with it.
+
+  | service | process | index |
+  |---|---|---|
+  | base | `sensor_probe.py` | 20 |
+  | base | `base_bridge.py` | 21 |
+  | base | `odometry.py` | 22 |
+  | lidar | `sensor_probe.py` | 23 |
+  | lidar | `ros2 launch` + driver | `auto` (they share one environment, so a fixed index would collide; the raised ceiling lets each take the lowest free one) |
+  | web | `web_remote.py` | 26 |
+  | slam | `async_slam_toolbox_node` (+ the `map_saver_cli` its save_map service shells out to) | `auto` (they share one environment, like the lidar launch) |
+  | slam | `slam_keeper.py` | 28 |
+
+  Pinning above 9 does not reserve 0-9 for the agent: Cyclone's `auto`
+  allocation starts at 0 and takes the lowest free slot, and four long-lived
+  processes of ours are auto-indexed (the lidar launch, the lidar driver, the
+  realsense node and the slam node), plus a transient `map_saver_cli` on every
+  autosave — so they do land in the agent's range. What keeps every
+  participant discoverable, ours and the agent's alike, is the raised ceiling:
+  60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`, default 60), the realsense
+  service's own trick (`rosmaster-a1-realsense-wendy/app/entrypoint.sh`)
+  extended. If `wendy device ros2 echo` or `bag record` still report no free
+  index, run `wendy device ros2 exec -- daemon stop` first to free one more
+  slot.
 - **Preview encoding is rationed.** JPEG encoding shares a thread with the
   command publisher, and four tiles at full frame rate starved it enough that
   the motor watchdog cut in. `PREVIEW_MAX_FPS` caps it; depth statistics are

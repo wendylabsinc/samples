@@ -16,6 +16,7 @@ find /usr -path '*/encodings/__init__.py' -print 2>/dev/null | head -20 || true
 
 source /opt/ros/humble/setup.bash
 source /ros_ws/install/setup.bash
+source /app/cyclone_env.sh
 
 export AMENT_PREFIX_PATH="/ros_ws/install/ydlidar_ros2_driver:/ros_ws/install/yahboomcar_ctrl:/ros_ws/install/yahboomcar_bringup:/ros_ws/install/yahboomcar_msgs:/opt/ros/humble:${AMENT_PREFIX_PATH:-}"
 export CMAKE_PREFIX_PATH="${AMENT_PREFIX_PATH}"
@@ -145,10 +146,12 @@ supervise_python() {
 
 echo "Starting sensor-only probe"
 unset PROBE_RAW_LIDAR
+cyclone_env 20
 supervise_python SENSOR_PROBE_SUPERVISOR /app/sensor_probe.py &
 sensor_probe_pid=$!
 
 echo "Starting direct Rosmaster base bridge with ROSMASTER_SERIAL_PORT=${ROSMASTER_SERIAL_PORT}"
+cyclone_env 21
 supervise_python BASE_BRIDGE_SUPERVISOR /app/base_bridge.py &
 driver_pid=$!
 
@@ -156,6 +159,7 @@ driver_pid=$!
 # Pure consumer of the bridge's topics, so it simply idles until the bridge
 # is up and resumes across bridge restarts.
 echo "Starting odometry (ODOM_PUBLISH_TF=${ODOM_PUBLISH_TF:-1})"
+cyclone_env 22
 supervise_python ODOMETRY_SUPERVISOR /app/odometry.py &
 odometry_pid=$!
 

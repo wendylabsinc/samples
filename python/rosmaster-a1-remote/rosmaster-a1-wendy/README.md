@@ -38,7 +38,15 @@ yaw rate into `nav_msgs/Odometry` on `/odom` and the `odom -> base_link`
 transform, one message per velocity frame. The firmware's own `angular.z`
 is not used: on the Ackermann A1 it is meaningless (Yahboom's driver says
 so), and `linear.y` is the steer angle. Gyro bias is re-estimated whenever
-the car has stood still for two seconds, and a resting car never turns.
+the car has stood still for two seconds
+*and the gyro was quiet for those two seconds*: the encoders say "still"
+while the car is lifted or turned by hand, and one such window once became
+a -0.17 rad/s bias and ten radians of phantom yaw. A window whose samples
+spread more than `ODOM_BIAS_QUIET_RAD_S` or whose mean exceeds
+`ODOM_BIAS_MAX_RAD_S` is discarded and counted as `dropped_bias_windows` in
+the status. A resting car never turns. The node logs every dropped window as
+it happens, and, if calibration runs past 10 s, a reminder at most once every
+10 s while it stays uncalibrated.
 `/odometry/status` (JSON, 1 Hz) reports `waiting_for_vel_raw`,
 `calibrating_gyro` or `tracking`, the bias, sample ages and the pose.
 
@@ -46,4 +54,6 @@ Good enough for `slam_toolbox` to scan-match against; there is no sensor
 fusion. Knobs, all optional: `ODOM_PUBLISH_TF` (default `1`; set `0` when an
 EKF owns the transform), `ODOM_MAX_DT_S` (`0.25`), `ODOM_IMU_STALE_S`
 (`0.5`), `ODOM_BIAS_STILL_S` (`2.0`), `ODOM_STILL_SPEED_MPS` (`0.01`),
-`ODOM_FRAME` (`odom`), `ODOM_CHILD_FRAME` (`base_link`).
+`ODOM_BIAS_QUIET_RAD_S` (`0.05`), `ODOM_BIAS_MAX_RAD_S` (`0.09`, the
+ICM20948 zero-rate spec; also the clamp on the bias), `ODOM_FRAME` (`odom`),
+`ODOM_CHILD_FRAME` (`base_link`).

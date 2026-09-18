@@ -65,6 +65,7 @@ RUN openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
       -keyout /app/webremote-key.pem -out /app/webremote-cert.pem \
     && chmod 600 /app/webremote-key.pem
 
+COPY app/cyclone_env.sh /app/cyclone_env.sh
 COPY app/entrypoint.sh /app/entrypoint.sh
 COPY app/static/ /app/static/
 RUN chmod +x /app/entrypoint.sh
