@@ -22,6 +22,9 @@ WendyOS app, `rosmaster-a1`, with five services, on the car's Jetson Orin Nano.
   the RealSense stereo pair. Any tile expands to full width.
 - **Autonomous mode**: follow the widest LiDAR corridor, with depth as an
   obstacle veto and a bounded recovery manoeuvre.
+- **A live SLAM map** from the `slam` service: occupancy grid, robot pose,
+  LiDAR scan and trajectory in one panel, with pan, zoom and follow, and a
+  written reason whenever it has nothing to show.
 - **A diagnostics panel** that says why the controller is not working, which is
   usually the browser rather than the pad.
 
@@ -36,7 +39,7 @@ its own Dockerfile; the manifest is what ties them together.
 | `base` | `rosmaster-a1-wendy/` | Motor bridge and telemetry, plus the sensor probe that captures camera and audio. Owns the serial link to the motor board, subscribes to `/cmd_vel`, publishes encoders, IMU and voltage, and dead-reckons them into `/odom` and the `odom -> base_link` transform. |
 | `lidar` | `rosmaster-a1-lidar-wendy/` | YDLIDAR driver, publishes `/scan` and a `/lidar_sensor_probe/status` heartbeat. Its probe skips camera and audio capture — `base` already owns those. |
 | `realsense` | `rosmaster-a1-realsense-wendy/` | RealSense driver, publishes depth, colour and both infrared streams. |
-| `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, MJPEG streams, controller handling, autonomy. |
+| `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, camera frames, controller handling, autonomy, and the Map panel's bridge from the SLAM topics to three polled routes. |
 | `slam` | `rosmaster-a1-slam-wendy/` | `slam_toolbox` mapping from `/scan` and `/odom`: publishes `/map`, `/pose`, `map -> odom`, plus a keeper that publishes `/slam/trajectory` and `/slam/status` and autosaves each session to the `rosmaster-a1-maps` persist volume. |
 
 ```bash
@@ -86,6 +89,15 @@ https://<car-hostname>.local:8443
 
 Accept the self signed certificate once per machine. Then press a button on the
 controller, press **A** to arm, and drive.
+
+The Map panel under the cameras shows the `slam` service's map as it grows:
+the robot as a heading marker, the current LiDAR scan in green, the
+trajectory in amber. Drag to pan (which turns **Follow** off), scroll or use
+**+** / **−** to zoom, **Reset view** to frame the whole map, **Follow** to
+keep the robot centred, **Hide** to collapse the panel and stop its polling.
+When the panel has nothing to show it says why on the canvas: "SLAM service
+not running", "slam_toolbox restarting", "Waiting for LiDAR", "Waiting for
+odometry", "Waiting for first map", or "Car not reachable".
 
 For browser-free control, pair and trust the controller on WendyOS instead:
 
@@ -173,6 +185,46 @@ container): one directory per session with `map.posegraph`, `map.data`,
 `map.pgm`, `map.yaml`, `session.json`; `latest` points at the current one.
 `wendy device ros2 exec --device <car> -- service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data: '/maps/keep-me'}}"`
 saves a named copy by hand.
+
+### SLAM viewer routes
+
+The `web` service turns the topics above into three finite GET routes for
+the Map panel (WDY-1637). Every response sends `Content-Length` and
+`Cache-Control: no-store`; metres are rounded to centimetres, except the
+map origin, whose `x` and `y` carry millimetres and whose `yaw` carries four
+decimals. POST is 404.
+
+`GET /api/slam`, polled by the panel at 4 Hz, about 4 KB. The body always
+carries a top-level `ok: true`:
+
+| Key | Value |
+|---|---|
+| `bridge.state` | `slam_unreachable` (no `/slam/status` for 3 s), or the keeper's state passed through: `slam_down`, `waiting_for_scan`, `waiting_for_odom_tf`, `mapping`; a keeper `mapping` with no grid yet becomes `waiting_for_map`; an unknown keeper state string passes through unchanged |
+| `bridge.reason` | the stalest input over its threshold, e.g. `map -> odom 4.1 s old`, or null |
+| `slam`, `slam_age_s` | the keeper's `/slam/status` object verbatim, and its age; null before the first one |
+| `pose` | `{x, y, yaw, age_s}` for `map -> base_link`, composed from the two `/tf` transforms; null until both have arrived |
+| `map_odom` | `{x, y, yaw, age_s}` or null |
+| `map` | `{version, width, height, resolution, origin: {x, y, yaw}, age_s}` or null; only `version` should trigger a PNG fetch |
+| `scan` | `{age_s, points: [x0, y0, x1, y1, ...]}` in `base_link`, at most 360 points, or null |
+| `trajectory` | `{epoch, count}`; epoch 0 before the first path |
+
+`GET /api/slam/map.png`: the current grid as a paletted PNG, north-up (image
+row 0 is the grid's highest-y row), unknown `#101513`, free `#253029`,
+occupied `#dfe6e2` (cells at or above 50). Headers `ETag: "<version>"`,
+`X-Map-Version`, `X-Map-Width`, `X-Map-Height`, `X-Map-Resolution`,
+`X-Map-Origin-X`, `X-Map-Origin-Y`, `X-Map-Origin-Yaw`; place the image from
+these, never from an earlier snapshot. `If-None-Match` matching the ETag
+answers 304. 404 before the first grid.
+
+`GET /api/slam/trajectory?epoch=E&from=N`: `{epoch, from, total, points}`
+with `points` flat `[x0, y0, ...]`. The bridge keeps an append-only list per
+*epoch*; a new keeper session (odometry reset, slam_toolbox restart) opens a
+new epoch. A matching `epoch` returns `points[from:]` with `from` clamped to
+`[0, total]`; a missing or different `epoch` returns everything from 0 under
+the current epoch, which is how a client resynchronises in one request.
+
+The routes are the contract: a standalone viewer, or a second Wendy app
+running `slam_bridge.py` on its own node, consumes them unchanged.
 
 ## Safety model
 

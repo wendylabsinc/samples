@@ -45,13 +45,31 @@ function parseInputDefaults() {
 
 const INPUT_DEFAULTS = parseInputDefaults();
 
+// A 2D context that records every drawing call, so a test can assert on
+// what the Map panel drew (where the map image landed, what the overlay
+// said) rather than on pixels it cannot see. Property writes to globalAlpha
+// are recorded too, because dimming the scene under a state overlay is a
+// behaviour worth pinning.
 function makeCanvasContext() {
-  const noop = () => {};
-  return {
-    fillStyle: "", strokeStyle: "", lineWidth: 0,
-    clearRect: noop, fillRect: noop, beginPath: noop, arc: noop, stroke: noop,
-    moveTo: noop, lineTo: noop, closePath: noop, fill: noop,
+  const calls = [];
+  const record = (op) => (...args) => { calls.push({ op, args }); };
+  const context = {
+    calls,
+    fillStyle: "", strokeStyle: "", lineWidth: 0, font: "", textAlign: "", imageSmoothingEnabled: true,
+    measureText: (text) => ({ width: String(text).length * 7 }),
   };
+  let alpha = 1;
+  Object.defineProperty(context, "globalAlpha", {
+    get() { return alpha; },
+    set(value) { alpha = value; calls.push({ op: "globalAlpha", args: [value] }); },
+  });
+  for (const op of [
+    "clearRect", "fillRect", "strokeRect", "beginPath", "arc", "stroke", "moveTo", "lineTo", "closePath", "fill",
+    "drawImage", "save", "restore", "translate", "rotate", "scale", "setTransform", "fillText",
+  ]) {
+    context[op] = record(op);
+  }
+  return context;
 }
 
 function makeElement(id) {
@@ -100,7 +118,10 @@ function makeElement(id) {
     querySelector() { return makeElement(`${id}-child`); },
     getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; },
     setPointerCapture() {},
-    getContext() { return makeCanvasContext(); },
+    getContext() {
+      if (!this.context2d) this.context2d = makeCanvasContext();
+      return this.context2d;
+    },
   };
 }
 
@@ -141,6 +162,31 @@ function defaultStatus() {
     },
     commands: { max_age_ms: 400, rejected: { stale: 0, out_of_order: 0, total: 0 } },
   };
+}
+
+// What the bridge reports on a car whose slam service is up but has not
+// produced a grid yet: nothing for the panel to fetch beyond the snapshot,
+// so the load-time poll adds exactly one GET to every existing test.
+function defaultSlamSnapshot() {
+  return {
+    ok: true,
+    bridge: { state: "waiting_for_map", reason: null },
+    slam: { state: "mapping", saves: 0 },
+    slam_age_s: 0.3,
+    pose: null,
+    map_odom: null,
+    map: null,
+    scan: null,
+    trajectory: { epoch: 0, count: 0 },
+  };
+}
+
+// A scripted response for fake.responses: status, headers, and a JSON or a
+// binary body. A plain value in fake.responses still means "200 with this
+// JSON", which is what earlier tests rely on.
+const SCRIPTED = Symbol("scripted-response");
+export function response({ status = 200, headers = {}, json = null, blob = null } = {}) {
+  return { [SCRIPTED]: true, status, headers, json, blob };
 }
 
 // A WebHID device stand-in. There is no WebHID in Node, so the page's fallback
@@ -196,6 +242,7 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
   const calls = [];
   const fake = {
     status: defaultStatus(),
+    slam: defaultSlamSnapshot(),
     // Paths listed here reject, which is how the page sees an offline car.
     failing: new Set(),
     // Paths listed here have their response held until page.releaseHeld(),
@@ -211,13 +258,18 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
   // other (release after an abort already fired, or vice versa).
   const heldResponses = [];
 
+  const documentListeners = new Map();
   const document = {
+    hidden: false,
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, makeElement(id));
       return elements.get(id);
     },
     createElement(tag) { return makeElement(`created-${tag}`); },
-    addEventListener() {},
+    addEventListener(type, handler) {
+      if (!documentListeners.has(type)) documentListeners.set(type, []);
+      documentListeners.get(type).push(handler);
+    },
   };
 
   const windowListeners = new Map();
@@ -262,15 +314,35 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
 
   function fetchStub(path, init) {
     const method = (init && init.method) || "GET";
+    const base = path.split("?")[0];
     let body = null;
     if (init && typeof init.body === "string" && init.body.length) body = JSON.parse(init.body);
-    calls.push({ path, method, body });
-    if (fake.failing.has(path)) return Promise.reject(new Error(`offline ${path}`));
-    const payload = path === "/api/status"
-      ? fake.status
-      : fake.responses.has(path) ? fake.responses.get(path) : { ok: true };
-    const response = { ok: true, status: 200, json: () => Promise.resolve(payload) };
-    if (fake.held.has(path)) {
+    calls.push({ path, method, body, headers: (init && init.headers) || {} });
+    if (fake.failing.has(path) || fake.failing.has(base)) return Promise.reject(new Error(`offline ${path}`));
+    const scripted = fake.responses.has(path) ? fake.responses.get(path) : fake.responses.get(base);
+    let response;
+    if (scripted && scripted[SCRIPTED]) {
+      const headerMap = new Map(Object.entries(scripted.headers).map(([name, value]) => [name.toLowerCase(), String(value)]));
+      response = {
+        ok: scripted.status >= 200 && scripted.status < 300,
+        status: scripted.status,
+        headers: { get: (name) => (headerMap.has(name.toLowerCase()) ? headerMap.get(name.toLowerCase()) : null) },
+        json: () => Promise.resolve(scripted.json),
+        blob: () => Promise.resolve(scripted.blob),
+      };
+    } else {
+      const payload = base === "/api/status" ? fake.status
+        : scripted !== undefined ? scripted
+        : base === "/api/slam" ? fake.slam
+        : { ok: true };
+      response = {
+        ok: true, status: 200,
+        headers: { get: () => null },
+        json: () => Promise.resolve(payload),
+        blob: () => Promise.resolve(null),
+      };
+    }
+    if (fake.held.has(path) || fake.held.has(base)) {
       return new Promise((resolve, reject) => {
         const entry = { settled: false, resolve: () => resolve(response) };
         heldResponses.push(entry);
@@ -328,6 +400,9 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
     // host realm's own class is used as-is: nothing here does a cross-realm
     // instanceof check on it, only new AbortController() and .signal/.abort().
     AbortController,
+    // The panel decodes the map PNG with createImageBitmap when the browser
+    // has it. Here it yields a marker object a test can recognise.
+    createImageBitmap: async (blob) => ({ bitmap: true, blob }),
     setTimeout: (fn, ms) => {
       const delay = Number(ms) || 0;
       timeouts.push(delay);
@@ -343,6 +418,7 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(read("gamepad.js"), context, { filename: "gamepad.js" });
+  vm.runInContext(read("slam.js"), context, { filename: "slam.js" });
   vm.runInContext(read("app.js"), context, { filename: "app.js" });
 
   const page = {
@@ -402,6 +478,27 @@ export function loadPage({ hidDevices = [], hidRequest = null, hasWebHid = true 
       const element = document.getElementById(id);
       assert.ok(element.listeners.has(type), `#${id} has no ${type} listener`);
       element.dispatch(type, event);
+    },
+    fireDocument(type, event) {
+      const handlers = documentListeners.get(type) || [];
+      assert.notEqual(handlers.length, 0, `the page registered no document ${type} listener`);
+      for (const handler of handlers) handler(event);
+    },
+    setDocumentHidden(flag) {
+      document.hidden = Boolean(flag);
+      this.fireDocument("visibilitychange", {});
+    },
+    // The Map panel's model, as a host-realm copy like `state`.
+    get slam() { return JSON.parse(vm.runInContext("JSON.stringify(slamModel)", context)); },
+    gets(path) { return calls.filter((call) => call.method === "GET" && call.path.split("?")[0] === path); },
+    // Everything drawn into a canvas since the page loaded, and only the
+    // last frame (drawSlam starts every frame with setTransform).
+    canvasCalls(id) { return document.getElementById(id).getContext("2d").calls; },
+    canvasFrame(id) {
+      const all = this.canvasCalls(id);
+      let start = 0;
+      for (let i = 0; i < all.length; i += 1) if (all[i].op === "setTransform") start = i;
+      return all.slice(start);
     },
     posts(path) { return calls.filter((call) => call.path === path && call.method === "POST"); },
     clearCalls() { calls.length = 0; timeouts.length = 0; },

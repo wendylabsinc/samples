@@ -138,6 +138,17 @@ const els = {
   leftValue: document.getElementById("leftValue"),
   rightValue: document.getElementById("rightValue"),
   closestValue: document.getElementById("closestValue"),
+  slamCanvas: document.getElementById("slamCanvas"),
+  slamState: document.getElementById("slamState"),
+  slamStats: document.getElementById("slamStats"),
+  slamFollow: document.getElementById("slamFollow"),
+  slamReset: document.getElementById("slamReset"),
+  slamZoomIn: document.getElementById("slamZoomIn"),
+  slamZoomOut: document.getElementById("slamZoomOut"),
+  slamHide: document.getElementById("slamHide"),
+  slamBody: document.getElementById("slamBody"),
+  slamReadout: document.getElementById("slamReadout"),
+  slamReason: document.getElementById("slamReason"),
 };
 
 function meters(value) {
@@ -1500,6 +1511,13 @@ pollGamepad();
 updateReadouts();
 renderControllerPanel();
 renderGalleryLayout();
+// The Map panel polls its own three routes behind its own guard (slam.js);
+// its failures are not control failures and never feed the breaker above.
+try {
+  startSlamPanel(els);
+} catch (error) {
+  console.error("Map panel failed to start", error);
+}
 refreshStatus();
 // Last, and deliberately not awaited: a granted device reopens itself on load
 // so the operator authorises once, and a browser without WebHID at all simply
