@@ -3,8 +3,8 @@
 Date: 2026-09-18. Status: **approved by Ethan** (designed section by section
 on 2026-09-18; every section was confirmed before this file was written).
 Linear: WDY-1637 (bridge: expose map, pose, trajectory and scan to the web
-viewer), WDY-1638 (viewer UI, delivered as an embedded panel for now, see
-"Decisions"), WDY-1639 (served from the robot, met by construction).
+viewer), WDY-1638 (viewer UI, delivered as an embedded panel; Ethan confirmed with
+the initiative's creator on 2026-09-18 that a panel satisfies it), WDY-1639 (served from the robot, met by construction).
 Branch `slam-viewer-panel`, stacked on `slam-service` (Samples PR #28), which
 carries the `slam` service and the `/slam/*` contract this builds on.
 
@@ -21,10 +21,10 @@ panel says so within a few seconds and recovers on its own when it returns.
 
 ## Decisions that shaped this
 
-- **Embedded panel, not a standalone app.** WDY-1638 asks for a Vite React
-  Three Fiber app. Ethan is clarifying that scope with the initiative's
-  creator (the tickets date from June). Until then the viewer is a panel in
-  the existing remote page, and the design keeps the conversion cheap: the
+- **Embedded panel, not a standalone app.** WDY-1638's June wording asks for
+  a Vite React Three Fiber app; Ethan confirmed with the initiative's creator
+  on 2026-09-18 that a panel in the existing remote page satisfies the
+  initiative. The design still keeps a later conversion cheap: the
   bridge is a module with no dependency on the drive code, the panel's client
   code is a module with a pure layer and a thin render layer, and the HTTP
   API is documented as the contract. A standalone viewer consumes the same
@@ -413,10 +413,10 @@ placement always comes from the PNG response's headers.
   documented schema); one line each in "What it does", the `web` row of the
   services table, and "Driving it" for the Map panel controls.
 - **Linear**: WDY-1637 → In Progress at the start of implementation, Done
-  when deployed and documented. WDY-1638 → a comment stating what shipped
-  (embedded 2D canvas panel), the conversion path below, and that the
-  Vite/R3F scope question is with the initiative's creator; status is
-  Ethan's call after that conversation. WDY-1639 → a comment with URL and
+  when deployed and documented. WDY-1638 → In Progress with implementation, Done when
+  the panel is live-validated, with a comment stating what shipped (embedded
+  2D canvas panel, scope confirmed with the initiative's creator) and the
+  conversion path below. WDY-1639 → a comment with URL and
   port.
 - **Budget**: one extra browser socket; ~16 KB/s of snapshots, under 50 KB per
   map at ≤ 1 Hz, trajectory deltas negligible; one PNG encode per grid on the
