@@ -35,7 +35,7 @@ restore_stdlib() {
 # /tmp/slam_node_started_at so a restarted keeper can tell whether the
 # session in /maps/latest belongs to this node instance or an older one.
 slam_supervisor() {
-  local attempt=0 backoff=5
+  local attempt=0 backoff=5 started status
   while true; do
     attempt=$((attempt + 1))
     date +%s > /tmp/slam_node_started_at
@@ -46,10 +46,15 @@ slam_supervisor() {
     # between the two; "auto" under the raised ceiling lets each take the
     # lowest free index instead.
     cyclone_env auto
+    started=$(date +%s)
     /opt/ros/humble/lib/slam_toolbox/async_slam_toolbox_node --ros-args --params-file /app/slam_params.yaml "${slam_extra_args[@]}" &
-    echo $! > /tmp/slam_node_pid
-    wait "$(cat /tmp/slam_node_pid)"
-    echo "SLAM_SUPERVISOR node exited status=$? after attempt=${attempt}; restarting in ${backoff}s" >&2
+    echo $! > /tmp/slam_node_pid          # only so the keeper supervisor can kill it from its own subshell
+    wait $!
+    status=$?
+    # A node that mapped for a while and then died is a fresh incident, not
+    # an escalating crash loop: hold the ceiling for repeated fast exits only.
+    if (( $(date +%s) - started > 60 )); then backoff=5; fi
+    echo "SLAM_SUPERVISOR node exited status=${status} after attempt=${attempt}; restarting in ${backoff}s" >&2
     sleep "${backoff}"
     backoff=$(( backoff < 30 ? backoff + 5 : 30 ))
   done
@@ -61,13 +66,15 @@ slam_supervisor() {
 # first so the relaunched keeper opens a new session instead of attaching to
 # the old one.
 keeper_supervisor() {
-  local attempt=0 backoff=5 status
+  local attempt=0 backoff=5 started status
   while true; do
     attempt=$((attempt + 1))
     restore_stdlib
     cyclone_env 28
+    started=$(date +%s)
     python3 /app/slam_keeper.py
     status=$?
+    if (( $(date +%s) - started > 60 )); then backoff=5; fi
     if [[ ${status} -eq 75 ]]; then
       echo "KEEPER_SUPERVISOR odometry reset reported: restarting the slam node" >&2
       date +%s > /tmp/slam_node_started_at
