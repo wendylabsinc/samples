@@ -258,6 +258,152 @@ function slamReadoutText(model) {
   return parts.join("  ");
 }
 
+// The DOM layer ==============================================================
+//
+// One model, replaced wholesale by the reducer; one in-flight guard; one
+// render per completed cycle or interaction. Nothing below runs under
+// node --test except through the vm harness.
+
+let slamModel = newSlamModel();
+let slamInFlight = false;
+let slamEls = null;
+
+async function slamFetch(path, headers) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SLAM_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(path, { cache: "no-store", signal: controller.signal, headers });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function slamFetchJson(path) {
+  const response = await slamFetch(path);
+  if (!response.ok) throw new Error(`${path} answered ${response.status}`);
+  return response.json();
+}
+
+function slamDecodeImage(blob) {
+  if (typeof createImageBitmap === "function") return createImageBitmap(blob);
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("map image failed to decode")); };
+    image.src = url;
+  });
+}
+
+async function slamFetchMap(heldVersion) {
+  const headers = heldVersion === null ? undefined : { "If-None-Match": `"${heldVersion}"` };
+  const response = await slamFetch("/api/slam/map.png", headers);
+  if (response.status === 304 || response.status === 404) return { status: response.status };
+  if (!response.ok) throw new Error(`/api/slam/map.png answered ${response.status}`);
+  const meta = slamMapMetaFromHeaders((name) => response.headers.get(name));
+  const image = await slamDecodeImage(await response.blob());
+  return { status: 200, meta, image };
+}
+
+// One cycle: the snapshot, then the PNG only if its version moved, then the
+// trajectory only if it grew or reset, then one redraw. Sequential behind
+// one guard, so the panel never holds more than one browser socket: the
+// 2026-08 freeze was the per-origin connection budget, and this panel must
+// not spend it.
+async function refreshSlam() {
+  if (slamInFlight || slamModel.hidden || slamModel.tabHidden) return;
+  slamInFlight = true;
+  try {
+    const body = await slamFetchJson("/api/slam");
+    slamModel = slamReduce(slamModel, { type: "snapshot", body });
+    const plan = slamPlan(slamModel);
+    if (plan.map) {
+      const result = await slamFetchMap(slamModel.map ? slamModel.map.version : null);
+      if (result.status === 200) slamModel = slamReduce(slamModel, { type: "map", meta: result.meta, image: result.image });
+      else if (result.status === 404) slamModel = slamReduce(slamModel, { type: "mapMissing" });
+    }
+    if (plan.trajectory) {
+      const { epoch, from } = plan.trajectoryQuery;
+      const reply = await slamFetchJson(`/api/slam/trajectory?epoch=${epoch}&from=${from}`);
+      slamModel = slamReduce(slamModel, { type: "trajectory", reply });
+    }
+  } catch (error) {
+    // Deliberately not noteControlFailure(): a slow map must never trip the
+    // control breaker and blank the camera tiles.
+    slamModel = slamReduce(slamModel, { type: "failure", error: String((error && error.message) || error) });
+  } finally {
+    slamInFlight = false;
+  }
+  renderSlamPanel();
+}
+
+function drawSlamOverlay(ctx, overlay, width, height) {
+  ctx.globalAlpha = 1;
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#eef2ef";
+  ctx.font = "800 20px system-ui, sans-serif";
+  ctx.fillText(overlay.title, width / 2, height / 2 - 6);
+  if (overlay.detail) {
+    ctx.fillStyle = "#b7c3bd";
+    ctx.font = "14px system-ui, sans-serif";
+    ctx.fillText(overlay.detail, width / 2, height / 2 + 18);
+  }
+}
+
+function drawSlam(ctx, model, width, height) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#080a09";
+  ctx.fillRect(0, 0, width, height);
+  const overlay = slamOverlay(model);
+  if (overlay) drawSlamOverlay(ctx, overlay, width, height);
+}
+
+function renderSlamPanel() {
+  if (!slamEls) return;
+  slamEls.slamState.textContent = slamStateText(slamModel);
+  slamEls.slamStats.textContent = slamStatsText(slamModel);
+  slamEls.slamReadout.textContent = slamReadoutText(slamModel);
+  slamEls.slamReason.textContent = slamModel.reason || "";
+  slamEls.slamFollow.checked = slamModel.view.follow;
+  slamEls.slamHide.textContent = slamModel.hidden ? "Show" : "Hide";
+  slamEls.slamBody.classList.toggle("hidden", slamModel.hidden);
+  if (!slamModel.hidden) drawSlam(slamEls.slamCanvas.getContext("2d"), slamModel, slamEls.slamCanvas.width, slamEls.slamCanvas.height);
+}
+
+function startSlamPanel(els) {
+  slamEls = els;
+  slamModel = slamReduce(slamModel, { type: "resize", width: els.slamCanvas.width, height: els.slamCanvas.height });
+  els.slamFollow.addEventListener("change", () => {
+    slamModel = slamReduce(slamModel, { type: "follow", on: els.slamFollow.checked });
+    renderSlamPanel();
+  });
+  els.slamReset.addEventListener("click", () => {
+    slamModel = slamReduce(slamModel, { type: "reset" });
+    renderSlamPanel();
+  });
+  els.slamZoomIn.addEventListener("click", () => {
+    slamModel = slamReduce(slamModel, { type: "zoom", factor: SLAM_ZOOM_STEP });
+    renderSlamPanel();
+  });
+  els.slamZoomOut.addEventListener("click", () => {
+    slamModel = slamReduce(slamModel, { type: "zoom", factor: 1 / SLAM_ZOOM_STEP });
+    renderSlamPanel();
+  });
+  els.slamHide.addEventListener("click", () => {
+    slamModel = slamReduce(slamModel, { type: "hidden", hidden: !slamModel.hidden });
+    renderSlamPanel();
+    if (!slamModel.hidden) refreshSlam();
+  });
+  document.addEventListener("visibilitychange", () => {
+    slamModel = slamReduce(slamModel, { type: "tabHidden", hidden: Boolean(document.hidden) });
+    if (!slamModel.tabHidden) refreshSlam();
+  });
+  setInterval(refreshSlam, SLAM_POLL_MS);
+  renderSlamPanel();
+  refreshSlam();
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     SLAM_POLL_MS,

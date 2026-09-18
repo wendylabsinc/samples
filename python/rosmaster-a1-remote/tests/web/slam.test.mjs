@@ -217,3 +217,176 @@ test("SLAM text: the pill, the stats and the readout", () => {
   assert.equal(slamStateText(slamReduce(newSlamModel(), { type: "snapshot", body: snapshot({ bridge: { state: "waiting_for_odom_tf", reason: null } }) })), "waiting for odom tf");
   assert.equal(slamStatsText(slamReduce(newSlamModel(), { type: "snapshot", body: snapshot({ slam: { saves: 1 }, trajectory: { epoch: 1, count: 1 } }) })), "1 save, 1 pose");
 });
+
+
+// The page wiring ===========================================================
+import { loadPage, response } from "./harness.mjs";
+
+function mapResponse(version = 4, body = "png-bytes") {
+  return response({
+    status: 200,
+    headers: {
+      "X-Map-Version": String(version), "X-Map-Width": "200", "X-Map-Height": "100", "X-Map-Resolution": "0.05",
+      "X-Map-Origin-X": "-5", "X-Map-Origin-Y": "-2.5", "X-Map-Origin-Yaw": "0", ETag: `"${version}"`,
+    },
+    blob: body,
+  });
+}
+
+// A loaded page whose load-time poll has settled against the harness default
+// (no map yet), then switched to a mapping car with a map and two trajectory
+// poses. Calls are cleared so a test sees only what it triggers.
+async function mappingPage(snapshotOverrides = {}) {
+  const page = loadPage();
+  await page.settle();
+  page.fake.slam = snapshot(snapshotOverrides);
+  page.fake.responses.set("/api/slam/map.png", mapResponse(4));
+  page.fake.responses.set("/api/slam/trajectory", { epoch: 1, from: 0, total: 2, points: [0, 0, 0.1, 0] });
+  page.clearCalls();
+  return page;
+}
+
+test("SLAM wiring: the page polls the snapshot once on load and fetches nothing else while there is no map", async () => {
+  const page = loadPage();
+  await page.settle();
+  assert.equal(page.gets("/api/slam").length, 1);
+  assert.equal(page.gets("/api/slam/map.png").length, 0);
+  assert.equal(page.gets("/api/slam/trajectory").length, 0);
+  assert.equal(page.el("slamState").textContent, "waiting for map");
+  assert.equal(page.el("slamStats").textContent, "0 saves, 0 poses");
+});
+
+test("SLAM wiring: one cycle fetches the snapshot, then the PNG, then the trajectory, in that order", async () => {
+  const page = await mappingPage();
+  await page.run("refreshSlam()");
+  await page.settle();
+  assert.deepEqual(page.calls.filter((c) => c.method === "GET").map((c) => c.path), [
+    "/api/slam", "/api/slam/map.png", "/api/slam/trajectory?epoch=1&from=0",
+  ]);
+  const model = page.slam;
+  assert.equal(model.map.version, 4);
+  assert.deepEqual(model.mapImage, { bitmap: true, blob: "png-bytes" });
+  assert.deepEqual(model.trajectory, { epoch: 1, points: [0, 0, 0.1, 0] });
+  assert.equal(page.el("slamState").textContent, "mapping");
+  assert.equal(page.el("slamStats").textContent, "3 saves, 2 poses");
+  assert.equal(page.el("slamReadout").textContent, "x 1.00 m  y 2.00 m  heading 90°  map 10.0 × 5.0 m");
+});
+
+test("SLAM wiring: an unchanged map and trajectory cost only the snapshot", async () => {
+  const page = await mappingPage();
+  await page.run("refreshSlam()");
+  await page.settle();
+  page.clearCalls();
+  await page.run("refreshSlam()");
+  await page.settle();
+  assert.deepEqual(page.calls.map((c) => c.path), ["/api/slam"]);
+});
+
+test("SLAM wiring: a new map version refetches the PNG with If-None-Match, and a 304 keeps the image", async () => {
+  const page = await mappingPage();
+  await page.run("refreshSlam()");
+  await page.settle();
+  page.fake.slam = snapshot({ map: { ...snapshot().map, version: 5 } });
+  page.fake.responses.set("/api/slam/map.png", response({ status: 304, headers: { ETag: '"5"' } }));
+  page.clearCalls();
+  await page.run("refreshSlam()");
+  await page.settle();
+  const pngCall = page.calls.find((c) => c.path === "/api/slam/map.png");
+  assert.ok(pngCall, "the version moved, so the PNG was asked for");
+  assert.equal(pngCall.headers["If-None-Match"], '"4"');
+  assert.equal(page.slam.map.version, 4, "a 304 leaves the held image alone");
+  assert.equal(page.slam.failures, 0, "a 304 is not a failure");
+});
+
+test("SLAM wiring: a PNG 404 is not a failure and keeps whatever image is held", async () => {
+  const page = await mappingPage();
+  await page.run("refreshSlam()");
+  await page.settle();
+  page.fake.slam = snapshot({ map: { ...snapshot().map, version: 6 } });
+  page.fake.responses.set("/api/slam/map.png", response({ status: 404 }));
+  await page.run("refreshSlam()");
+  await page.settle();
+  assert.equal(page.slam.failures, 0);
+  assert.equal(page.slam.map.version, 4);
+  assert.deepEqual(page.slam.mapImage, { bitmap: true, blob: "png-bytes" });
+});
+
+test("SLAM wiring: never two requests in flight", async () => {
+  const page = await mappingPage();
+  page.fake.held.add("/api/slam");
+  page.run("refreshSlam()");
+  page.run("refreshSlam()");
+  page.run("refreshSlam()");
+  await page.settle();
+  assert.equal(page.gets("/api/slam").length, 1, "the guard swallows overlapping polls");
+  assert.equal(page.releaseHeld(), 1);
+  await page.settle();
+  assert.equal(page.gets("/api/slam/map.png").length, 1, "the held cycle carried on to the PNG");
+});
+
+test("SLAM wiring: three failed polls show the unreachable state on the canvas, one success clears it", async () => {
+  const page = await mappingPage();
+  page.fake.failing.add("/api/slam");
+  for (let i = 0; i < 3; i += 1) {
+    await page.run("refreshSlam()");
+    await page.settle();
+  }
+  assert.equal(page.el("slamState").textContent, "car unreachable");
+  const texts = page.canvasFrame("slamCanvas").filter((c) => c.op === "fillText").map((c) => c.args[0]);
+  assert.ok(texts.includes("Car not reachable"), `overlay drawn: ${texts.join(" | ")}`);
+  page.fake.failing.delete("/api/slam");
+  await page.run("refreshSlam()");
+  await page.settle();
+  assert.equal(page.el("slamState").textContent, "mapping");
+  assert.equal(page.slam.failures, 0);
+});
+
+test("SLAM wiring: a timed-out snapshot counts as one failure", async () => {
+  const page = await mappingPage();
+  page.fake.held.add("/api/slam");
+  page.run("refreshSlam()");
+  await page.settle();
+  assert.ok(page.expireFetchTimeouts() >= 1);
+  await page.settle();
+  assert.equal(page.slam.failures, 1);
+  assert.equal(page.run("slamInFlight"), false, "the guard is released after a failure");
+});
+
+test("SLAM wiring: SLAM failures never trip the control breaker or blank the camera tiles", async () => {
+  const page = await mappingPage();
+  await page.run("refreshStatus()");
+  await page.settle();
+  assert.deepEqual(page.tileIds(), ["hp60c_depth", "hp60c_rgb"]);
+  page.fake.failing.add("/api/slam");
+  for (let i = 0; i < 5; i += 1) {
+    await page.run("refreshSlam()");
+    await page.settle();
+  }
+  assert.equal(page.state.feedsSuspended, false);
+  assert.equal(page.run("controlFailStreak"), 0);
+  assert.match(page.tile("hp60c_depth").img.src, /frame_hp60c_depth\.jpg/);
+});
+
+test("SLAM wiring: polling stops while the panel is hidden or the tab is in the background, and resumes at once", async () => {
+  const page = await mappingPage();
+  page.fireElement("slamHide", "click", {});
+  assert.equal(page.el("slamState").textContent, "hidden");
+  assert.ok(page.el("slamBody").classList.contains("hidden"));
+  assert.equal(page.el("slamHide").textContent, "Show");
+  page.clearCalls();
+  await page.run("refreshSlam()");
+  await page.settle();
+  assert.equal(page.gets("/api/slam").length, 0);
+  page.fireElement("slamHide", "click", {});
+  await page.settle();
+  assert.equal(page.gets("/api/slam").length, 1, "unhiding polls immediately");
+  assert.equal(page.el("slamHide").textContent, "Hide");
+  page.clearCalls();
+  page.setDocumentHidden(true);
+  await page.run("refreshSlam()");
+  await page.settle();
+  assert.equal(page.gets("/api/slam").length, 0);
+  page.setDocumentHidden(false);
+  await page.settle();
+  assert.equal(page.gets("/api/slam").length, 1, "coming back to the tab polls immediately");
+});
