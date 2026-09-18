@@ -355,8 +355,127 @@ function drawSlam(ctx, model, width, height) {
   ctx.globalAlpha = 1;
   ctx.fillStyle = "#080a09";
   ctx.fillRect(0, 0, width, height);
+  const view = slamView(model, width, height);
   const overlay = slamOverlay(model);
+  // Anything but mapping dims the scene under the state text; the last map
+  // stays visible, so a slam restart never blanks the panel.
+  ctx.globalAlpha = overlay ? 0.5 : 1;
+  if (model.mapImage && model.map) drawSlamMap(ctx, model.map, model.mapImage, view);
+  drawSlamTrajectory(ctx, model.trajectory.points, view);
+  if (model.pose) {
+    if (model.scan) drawSlamScan(ctx, model.scan.points, model.pose, view);
+    drawSlamRobot(ctx, model.pose, view);
+  }
+  ctx.globalAlpha = 1;
+  drawSlamScaleBar(ctx, view, width, height);
   if (overlay) drawSlamOverlay(ctx, overlay, width, height);
+}
+
+function drawSlamMap(ctx, meta, image, view) {
+  const [ox, oy] = view.toCanvas(meta.origin.x, meta.origin.y);
+  const cell = view.scale * meta.resolution;
+  ctx.save();
+  ctx.translate(ox, oy);
+  // World angles turn counter-clockwise; canvas y points down, so the same
+  // turn is clockwise on screen.
+  ctx.rotate(-(meta.origin.yaw || 0));
+  ctx.imageSmoothingEnabled = false;
+  // The PNG is north-up (row 0 is the grid's highest y), so its top edge
+  // sits `height` cells above the origin and its bottom edge on it.
+  ctx.drawImage(image, 0, -meta.height * cell, meta.width * cell, meta.height * cell);
+  ctx.restore();
+}
+
+function drawSlamTrajectory(ctx, points, view) {
+  if (points.length < 4) return;
+  ctx.strokeStyle = "#f0b429";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i += 2) {
+    const [px, py] = view.toCanvas(points[i], points[i + 1]);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+}
+
+function drawSlamScan(ctx, points, pose, view) {
+  const c = Math.cos(pose.yaw);
+  const s = Math.sin(pose.yaw);
+  ctx.fillStyle = "#58c897";
+  for (let i = 0; i < points.length; i += 2) {
+    const sx = points[i];
+    const sy = points[i + 1];
+    const [px, py] = view.toCanvas(pose.x + c * sx - s * sy, pose.y + s * sx + c * sy);
+    ctx.fillRect(px - 1, py - 1, 2, 2);
+  }
+}
+
+function drawSlamRobot(ctx, pose, view) {
+  // 0.30 m long by 0.20 m wide in world units, never under 10 px.
+  const length = Math.max(0.3 * view.scale, 10);
+  const half = length / 3;
+  const [cx, cy] = view.toCanvas(pose.x, pose.y);
+  const dx = Math.cos(pose.yaw);
+  const dy = -Math.sin(pose.yaw);
+  const nx = -dy;
+  const ny = dx;
+  ctx.fillStyle = "#eef2ef";
+  ctx.beginPath();
+  ctx.moveTo(cx + dx * length * 0.6, cy + dy * length * 0.6);
+  ctx.lineTo(cx - dx * length * 0.4 + nx * half, cy - dy * length * 0.4 + ny * half);
+  ctx.lineTo(cx - dx * length * 0.4 - nx * half, cy - dy * length * 0.4 - ny * half);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawSlamScaleBar(ctx, view, width, height) {
+  const metres = view.scale >= 40 ? 1 : 5;
+  const x = 12;
+  const y = height - 14;
+  ctx.strokeStyle = "#b7c3bd";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + metres * view.scale, y);
+  ctx.stroke();
+  ctx.fillStyle = "#b7c3bd";
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(`${metres} m`, x, y - 5);
+}
+
+// CSS pixels to canvas pixels: the canvas is 640 x 400 in its own units but
+// is laid out at the column's width.
+function slamCanvasScale(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: rect.width ? canvas.width / rect.width : 1, y: rect.height ? canvas.height / rect.height : 1 };
+}
+
+function wireSlamPointer(canvas) {
+  let dragging = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    dragging = { x: event.clientX, y: event.clientY };
+    if (typeof canvas.setPointerCapture === "function" && event.pointerId !== undefined) canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const k = slamCanvasScale(canvas);
+    slamModel = slamReduce(slamModel, { type: "drag", dx: (event.clientX - dragging.x) * k.x, dy: (event.clientY - dragging.y) * k.y });
+    dragging = { x: event.clientX, y: event.clientY };
+    renderSlamPanel();
+  });
+  const release = () => { dragging = null; };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("wheel", (event) => {
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const k = slamCanvasScale(canvas);
+    const factor = event.deltaY < 0 ? SLAM_ZOOM_STEP : 1 / SLAM_ZOOM_STEP;
+    slamModel = slamReduce(slamModel, { type: "wheel", factor, atX: (event.clientX - rect.left) * k.x, atY: (event.clientY - rect.top) * k.y });
+    renderSlamPanel();
+  }, { passive: false });
 }
 
 function renderSlamPanel() {
@@ -374,6 +493,7 @@ function renderSlamPanel() {
 function startSlamPanel(els) {
   slamEls = els;
   slamModel = slamReduce(slamModel, { type: "resize", width: els.slamCanvas.width, height: els.slamCanvas.height });
+  wireSlamPointer(els.slamCanvas);
   els.slamFollow.addEventListener("change", () => {
     slamModel = slamReduce(slamModel, { type: "follow", on: els.slamFollow.checked });
     renderSlamPanel();
