@@ -521,8 +521,15 @@
          the later display wins and a hidden diagnostic block would stay on
          screen. The debug byte dump is one, so it needs saying again here. A
          node:vm test cannot see this: the harness has no CSS, so classList is
-         all it can assert on and both orderings look identical to it. */
+         all it can assert on and both orderings look identical to it. The
+         Map panel's body (.panel-body, declared above at the same specificity)
+         has the identical trap: Hide toggles slamBody's hidden class, and
+         without this rule the canvas would stay on screen frozen. */
       .diagnostic.hidden {
+        display: none;
+      }
+
+      .panel-body.hidden {
         display: none;
       }
 
