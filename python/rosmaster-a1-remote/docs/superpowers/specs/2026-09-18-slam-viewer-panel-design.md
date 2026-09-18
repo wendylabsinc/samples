@@ -471,26 +471,58 @@ poll leaves the camera tiles unsuspended and the control breaker untouched.
 
 **Integration** is the live validation below.
 
-## Live validation (to be done on the car, then dated here)
+## Live validation (done 2026-09-18, 20:15-21:35 UTC)
 
-1. Deploy the web service; open the remote; the Map panel shows `mapping`
-   with map, pose, scan and trajectory; pan, wheel zoom, Follow and Reset
-   behave as specified; reloading the page repopulates within one poll from
-   the latched map and trajectory.
-2. Drive two minutes with turns: the trajectory grows, the map updates within
-   about a second of the keeper's saves, the pose moves smoothly; camera
-   tiles stay live throughout and the browser's socket count to the car
-   stays at or below six (lsof, as in the 2026-08 investigation).
-3. From the host shell, kill `async_slam_toolbox_node`: "slam_toolbox
-   restarting" appears, then a new epoch with the trajectory restarting and
-   the map continuing; the server log shows the two state transitions and
-   the epoch change.
-4. Stop the `rosmaster-a1_slam` container: "SLAM service not running" within
-   3 s; start it again: the panel recovers without a page reload.
-5. Restart the `base` container: the keeper's odometry-reset watchdog opens a
-   new session; the panel shows the new epoch and the new map.
-6. Record `/api/slam` response size and the web container's CPU before and
-   during, for the budget line above.
+Car `wendyos-bright-kiwi.local` (re-enrolled in org 2 that evening), page open
+in Safari on the operator's Mac, Ethan driving with the controller; server
+side observed by polling `/api/slam` on the car every 2-5 s.
+
+1. **Deploy and first look.** `scripts/deploy_car.sh <car> web` built the web
+   image in 25 s and deployed it. From the Mac: the page carries `slam.js`;
+   `GET /api/slam` 200, 5.2-5.5 KB, `Cache-Control: no-store`, state
+   `mapping`, a composed pose, 300-350 scan points; `GET /api/slam/map.png`
+   200 with `ETag` and the seven `X-Map-*` headers, a matching
+   `If-None-Match` answered 304 with no body; the PNG decoded to 97 x 104
+   cells whose three colour counts equalled the keeper's own unknown, free
+   and occupied counts (8962 / 1053 / 73); `GET /api/slam/trajectory` 200.
+   The panel showed the map, the marker, the scan and the stats; Follow,
+   drag, zoom, Reset and Hide behaved as specified (Ethan).
+2. **Drive, about 2.5 minutes with turns.** State `mapping` throughout,
+   reason null; the trajectory grew 2 → 169 poses, saves 1 → 8 with 0 save
+   errors and 0 odometry resets, the grid grew 198 x 104 → 412 x 316 cells
+   (20.6 x 15.8 m). `/api/slam` answered in 50-530 ms with three 1.1-2.2 s
+   outliers over a jittery Wi-Fi link. Safari held exactly 2 established
+   connections to the car for the whole sampled minute. CPU on the car with
+   one page open: web service 8 % of a core, keeper 2 %, base 2 %,
+   odometry 2 %, slam_toolbox idle at rest.
+3. **slam_toolbox killed** (`kill` on the host). +2 and +4 s: `mapping` with
+   reason `map -> odom 2.1 / 4.1 s old`; +8 to +12 s: `slam_unreachable`
+   with `no /slam/status for 4.2-8.4 s`; +14 s: `mapping` in a new keeper
+   session. **Deviation from the wording this spec expected:** the slam
+   service's entrypoint restarts the keeper together with slam_toolbox, so
+   the keeper never publishes `slam_down`; the panel says "SLAM service not
+   running" for about six seconds during a slam_toolbox kill, not
+   "slam_toolbox restarting". Truthful, and left as is.
+4. **Service outage, 20 s** (SIGSTOP on the keeper and slam_toolbox, then
+   SIGCONT, in place of a container stop which the CLI only offers per app).
+   `slam_unreachable` within 3 s with the age counting up on every poll,
+   the pose still coasting on odometry, the map version frozen; on resume,
+   `mapping` within 2 s. Ethan confirmed the overlay over the dimmed map and
+   the recovery without a reload.
+5. **Odometry restart** (the odometry node killed; base's supervisor
+   relaunched it, in place of a whole-container restart with the operator
+   beside a live car). `waiting_for_odom_tf` with `odom -> base_link N s
+   old`, a pose jump when the new odometry came up, then the keeper's
+   odometry-reset watchdog fired (a few seconds of `slam_unreachable`) and a
+   new session opened; the maps volume holds the three sessions of the run
+   with `latest` on the newest.
+6. **Session resets and the trail.** After each reset the panel kept
+   drawing the previous session's trajectory over the new map until the car
+   moved and the new keeper published its first path; then the trail and
+   the map reset together (Ethan). See the follow-up below.
+
+Not measured: the browser-tab-hidden pause in the field (unit-tested only),
+and a full `base` container restart's timing.
 
 ## Follow-ups and the conversion path (not in this spec)
 
@@ -514,6 +546,12 @@ poll leaves the camera tiles unsuspended and the control breaker untouched.
   resynchronises from 0 (found by the whole-branch review, fixed in
   `slamPlan`); a map version collision self-heals within one
   `map_update_interval`. A standalone viewer inherits this rule.
+- **Open a new trajectory epoch on a keeper session change.** The bridge
+  sees the new `session.name` in `/slam/status` seconds before the new keeper
+  publishes its first path, but today it keeps the old list until that path
+  arrives, so a car that sits still after a reset shows the old trail over the
+  new map. Resetting the epoch when `session.name` changes would clear it at
+  once. Found in the live validation.
 - **Map deltas**: if grids grow past a few thousand cells a side, send only
   the changed rows or a tiled PNG; not needed for an office.
 - Quietening the request log for the 4 Hz poll if it drowns the service log
