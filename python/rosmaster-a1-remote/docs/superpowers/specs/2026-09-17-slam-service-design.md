@@ -270,9 +270,14 @@ larger than `SLAM_ODOM_JUMP_M` (1.0) or `SLAM_ODOM_JUMP_RAD` (1.0) between
 consecutive messages counts an `odom_reset`, writes it to `session.json` (no extra save: the
 last autosave is at most `SLAM_AUTOSAVE_S` old), and asks the entrypoint to
 relaunch slam_toolbox: the keeper exits with status 75, which the entrypoint's keeper supervisor maps to "kill the slam node and
-let its supervisor relaunch it" before relaunching the keeper; a new session
-begins. Continuing the old session from its autosave with
-`map_start_pose` is the follow-up that would make this seamless.
+let its supervisor relaunch it" before relaunching the keeper. The start
+stamp has one writer, the slam supervisor: the relaunched keeper attaches to
+the old session until the node's relaunch renews the stamp, then ends itself
+(status 0) and the next keeper opens a new session — one new session per
+reset (the keeper does the same on any slam_toolbox restart, so a crash
+never overwrites the session's saved map with an empty graph). Continuing
+the old session from its autosave with `map_start_pose` is the follow-up
+that would make this seamless.
 
 ### slam_toolbox parameters (validated on the corrected bag)
 
