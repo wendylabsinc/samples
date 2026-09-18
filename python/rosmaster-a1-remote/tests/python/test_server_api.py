@@ -2310,6 +2310,7 @@ class SlamRouteTests(ServerTestCase):
         self.assertEqual(data, json.dumps(self.bridge.snapshot_value, sort_keys=True).encode("utf-8"))
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Content-Length"], str(len(data)))
+        self.assertEqual(headers["Cache-Control"], "no-store")
 
     def test_map_png_is_404_before_the_first_map(self):
         status, _, _ = self._get("/api/slam/map.png")
@@ -2349,6 +2350,7 @@ class SlamRouteTests(ServerTestCase):
         self.assertEqual(json.loads(data), self.bridge.trajectory_value)
         self.assertEqual(headers["Content-Length"], str(len(data)))
         self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Cache-Control"], "no-store")
         self._get("/api/slam/trajectory")
         self._get("/api/slam/trajectory?epoch=abc&from=-1")
         self.assertEqual(self.bridge.trajectory_calls, [(2, 5), (None, None), (None, -1)])
