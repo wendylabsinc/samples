@@ -430,6 +430,21 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(status["session"]["name"], self.node.session.name)
         self.assertEqual(status["session"]["dir"], str(self.node.session.dir))
 
+    def test_construction_does_not_shadow_the_nodes_own_clock(self):
+        # Real rclpy.Node.__init__ sets self._clock to its own Clock, and
+        # Timer reads self._clock.handle; SlamKeeper's injected age-clock
+        # (the `clock` constructor arg, here a FakeClock) must live under a
+        # different name so it never touches that attribute. The stub's
+        # Node.create_timer() raises if self._clock stops being its own
+        # Clock, so this failed the moment construction reached
+        # create_timer(), before this assertion ever ran (import rclpy.node
+        # to reach the real stub Clock type for the isinstance check).
+        import rclpy.node as rclpy_node
+
+        self.assertIsInstance(self.node.get_clock(), rclpy_node._Clock)
+        self.assertIs(self.node.get_clock(), self.node._clock)
+        self.assertIsNot(self.node._clock, self.clock)
+
     def test_inputs_drive_the_state_and_the_map_counts(self):
         self.node.on_scan(scan_msg())
         self.node.on_odom(odom_msg(0.0, 0.0, 0.0))

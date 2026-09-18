@@ -385,7 +385,12 @@ class SlamKeeper(Node):
         self.cfg = cfg
         self.store = store
         self.saver = saver
-        self._clock = clock
+        # Not self._clock: rclpy.node.Node.__init__ (our real base class)
+        # already owns that name for its own Clock, and Timer reads
+        # self._clock.handle. Shadowing it with this plain callable crashed
+        # every create_timer() call below against the real library (caught
+        # by the offline replay harness, scripts/slam_offline_check.sh).
+        self._now = clock
         self._wall = wall_clock
         self.state = KeeperState(cfg, clock=clock)
         self.session: Session | None = None

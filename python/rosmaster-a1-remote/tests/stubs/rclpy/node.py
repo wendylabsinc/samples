@@ -6,6 +6,16 @@ regression tests. It deliberately does not emulate ROS semantics: publishers
 do not actually deliver anything to subscribers, subscriptions never fire on
 their own, and timers never tick unless a test calls the wrapped callback
 directly.
+
+One piece of real rclpy IS emulated on purpose: Node.__init__ sets
+self._clock to its own Clock object, get_clock() returns that same object,
+and create_timer() raises if self._clock has been replaced with something
+else. Real rclpy's Timer.__init__ does `self._clock.handle`, so a Node
+subclass that does `self._clock = <anything else>` (slam_keeper.py's
+SlamKeeper once did, injecting a plain time.monotonic callable under that
+exact name) crashes on its first create_timer() call -- but only against
+the real library; a stub that does not check this stays green regardless.
+This keeps that class of bug visible here instead of only in a container.
 """
 from __future__ import annotations
 
@@ -52,17 +62,25 @@ class _Clock:
 class Node:
     def __init__(self, name: str) -> None:
         self._name = name
+        self._clock = _Clock()
 
     def create_publisher(self, *args) -> _Publisher:
         return _Publisher(*args)
 
     def get_clock(self) -> _Clock:
-        return _Clock()
+        return self._clock
 
     def create_subscription(self, *args) -> _Inert:
         return _Inert(*args)
 
     def create_timer(self, *args) -> _Inert:
+        if not isinstance(self._clock, _Clock):
+            raise TypeError(
+                "Node.create_timer() needs self._clock to still be the "
+                "Node's own Clock (real rclpy.Timer reads self._clock.handle); "
+                f"it is now {self._clock!r}, so something reassigned "
+                "self._clock after Node.__init__ ran"
+            )
         return _Inert(*args)
 
     def create_client(self, *args) -> _Inert:
