@@ -59,6 +59,16 @@
       "frameworks": {
         "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
       }
+    },
+    "slam": {
+      "context": "rosmaster-a1-slam-wendy",
+      "entitlements": [
+        { "type": "network", "mode": "host" },
+        { "type": "persist", "name": "rosmaster-a1-maps", "path": "/maps" }
+      ],
+      "frameworks": {
+        "ros2": { "domainId": 0, "rmw": "rmw_cyclonedds_cpp", "distro": "humble" }
+      }
     }
   }
 }

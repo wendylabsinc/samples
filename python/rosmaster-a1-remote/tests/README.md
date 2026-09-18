@@ -31,9 +31,14 @@ Stdlib `unittest` only, no pytest, no fixtures library.
 (in the `.venv`) and a rosbag2 `.db3` recorded with
 `wendy device ros2 bag record /scan /odom`.
 
+`test_slam_params.py` guards `rosmaster-a1-slam-wendy/app/slam_params.yaml`
+against regressing to slam_toolbox's stock `base_footprint`/interactive-mode
+defaults, and `test_slam_keeper.py` covers `slam_keeper.py`'s session store
+and state machine — both with the same stub arrangement, no ROS 2 installed.
+
 ## Shell: service scripts (`tests/shell`)
 
-Cover the bash scripts the base, lidar and web entrypoints run, using
+Cover the bash scripts the base, lidar, web and slam entrypoints run, using
 `mktemp -d` fixtures and sourced functions instead of the car. No stubs, no
 ROS.
 
@@ -41,6 +46,7 @@ ROS.
 bash tests/shell/test_pick_lidar_port.sh
 bash tests/shell/test_write_lidar_params.sh
 bash tests/shell/test_cyclone_env.sh
+bash tests/shell/test_slam_args.sh
 ```
 
 ## JavaScript: web remote front end (`tests/web`)
