@@ -2948,12 +2948,12 @@ class Handler(BaseHTTPRequestHandler):
             # than a 404 on a page that has just been told the feed exists.
             self._stream_camera(*CAMERA_STREAM_PATHS[parsed.path])
         elif parsed.path == "/api/slam":
-            self._send_json(slam_bridge.snapshot())
+            self._send_json(slam_bridge.snapshot(), no_store=True)
         elif parsed.path == "/api/slam/map.png":
             self._send_slam_map()
         elif parsed.path == "/api/slam/trajectory":
             query = parse_qs(parsed.query)
-            self._send_json(slam_bridge.trajectory(_query_int(query, "epoch"), _query_int(query, "from")))
+            self._send_json(slam_bridge.trajectory(_query_int(query, "epoch"), _query_int(query, "from")), no_store=True)
         elif parsed.path.startswith("/static/"):
             rel = parsed.path.removeprefix("/static/")
             self._send_file(STATIC_DIR / rel, self._content_type(rel))
@@ -3087,11 +3087,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = json.loads(raw.decode("utf-8"))
         return parsed if isinstance(parsed, dict) else {}
 
-    def _send_json(self, payload: dict, status: int = 200) -> None:
+    def _send_json(self, payload: dict, status: int = 200, no_store: bool = False) -> None:
         body = json.dumps(payload, sort_keys=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
