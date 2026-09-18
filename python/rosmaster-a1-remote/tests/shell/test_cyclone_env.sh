@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for rosmaster-a1-wendy/app/cyclone_env.sh (also copied verbatim into
-# rosmaster-a1-lidar-wendy/app/ and rosmaster-a1-web-remote-wendy/app/, since
-# each service is its own build context).
+# rosmaster-a1-lidar-wendy/app/, rosmaster-a1-web-remote-wendy/app/ and
+# rosmaster-a1-slam-wendy/app/, since each service is its own build context).
 #
 # The agent gives every app container ROS_LOCALHOST_ONLY=1, so Cyclone DDS
 # binds loopback, where discovery is unicast to "participant index" port
@@ -17,6 +17,7 @@ set -u
 HELPER="$(dirname "$0")/../../rosmaster-a1-wendy/app/cyclone_env.sh"
 LIDAR_HELPER="$(dirname "$0")/../../rosmaster-a1-lidar-wendy/app/cyclone_env.sh"
 WEB_HELPER="$(dirname "$0")/../../rosmaster-a1-web-remote-wendy/app/cyclone_env.sh"
+SLAM_HELPER="$(dirname "$0")/../../rosmaster-a1-slam-wendy/app/cyclone_env.sh"
 failures=0
 
 check() {
@@ -63,14 +64,16 @@ contains "DDS_MAX_PARTICIPANT_INDEX overrides the ceiling" "${CYCLONEDDS_URI}" "
 
 unset CYCLONEDDS_URI
 
-if [[ ! -f "${LIDAR_HELPER}" || ! -f "${WEB_HELPER}" ]]; then
-  echo "FAIL - lidar or web copy of cyclone_env.sh not found"
+if [[ ! -f "${LIDAR_HELPER}" || ! -f "${WEB_HELPER}" || ! -f "${SLAM_HELPER}" ]]; then
+  echo "FAIL - lidar, web or slam copy of cyclone_env.sh not found"
   failures=$((failures + 1))
 else
   cmp "${HELPER}" "${LIDAR_HELPER}"
   check "lidar copy is byte-identical to base" 0 $?
   cmp "${HELPER}" "${WEB_HELPER}"
   check "web copy is byte-identical to base" 0 $?
+  cmp "${HELPER}" "${SLAM_HELPER}"
+  check "slam copy is byte-identical to base" 0 $?
 fi
 
 if [[ ${failures} -gt 0 ]]; then
