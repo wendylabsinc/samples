@@ -288,7 +288,7 @@ again.
   | lidar | `ydlidar_ros2_driver_node` (run directly by `lidar_supervisor.sh`) | 24 |
   | lidar | `static_transform_publisher` (`base_link -> laser_frame`) | 25 |
   | web | `web_remote.py` | 26 |
-  | slam | `async_slam_toolbox_node` | 27 |
+  | slam | `async_slam_toolbox_node` (+ the `map_saver_cli` its save_map service shells out to) | `auto` (they share one environment, like the lidar launch) |
   | slam | `slam_keeper.py` | 28 |
 
   The ceiling is raised to 60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`,

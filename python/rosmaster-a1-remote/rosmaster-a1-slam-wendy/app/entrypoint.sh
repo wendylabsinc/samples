@@ -13,7 +13,7 @@ source /app/cyclone_env.sh
 
 echo "rosmaster-a1 slam service starting"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-} RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}"
-echo "SLAM_MAPS_DIR=${SLAM_MAPS_DIR:-/maps} SLAM_AUTOSAVE_S=${SLAM_AUTOSAVE_S:-30} SLAM_KEEP_SESSIONS=${SLAM_KEEP_SESSIONS:-5} SLAM_MAP_FILE=${SLAM_MAP_FILE:-} SLAM_USE_SIM_TIME=${SLAM_USE_SIM_TIME:-0} participant indices 27/28"
+echo "SLAM_MAPS_DIR=${SLAM_MAPS_DIR:-/maps} SLAM_AUTOSAVE_S=${SLAM_AUTOSAVE_S:-30} SLAM_KEEP_SESSIONS=${SLAM_KEEP_SESSIONS:-5} SLAM_MAP_FILE=${SLAM_MAP_FILE:-} SLAM_USE_SIM_TIME=${SLAM_USE_SIM_TIME:-0} participant index auto for the slam node, 28 for the keeper"
 ls -ld "${SLAM_MAPS_DIR:-/maps}" 2>&1 || echo "maps volume missing: saves will fail, mapping continues" >&2
 
 mapfile -t slam_extra_args < <(bash /app/slam_args.sh)
@@ -40,7 +40,12 @@ slam_supervisor() {
     attempt=$((attempt + 1))
     date +%s > /tmp/slam_node_started_at
     echo "SLAM_SUPERVISOR attempt=${attempt} launching async_slam_toolbox_node ${slam_extra_args[*]}"
-    cyclone_env 27
+    # save_map's service handler shells out to nav2's map_saver_cli, which
+    # shares this environment with the node that spawns it -- the same
+    # shape as the lidar launch and its driver. A fixed index would collide
+    # between the two; "auto" under the raised ceiling lets each take the
+    # lowest free index instead.
+    cyclone_env auto
     /opt/ros/humble/lib/slam_toolbox/async_slam_toolbox_node --ros-args --params-file /app/slam_params.yaml "${slam_extra_args[@]}" &
     echo $! > /tmp/slam_node_pid
     wait "$(cat /tmp/slam_node_pid)"

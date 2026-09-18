@@ -158,7 +158,10 @@ Two processes, each supervised the way the lidar service supervises its driver:
 The entrypoint sources the shared `cyclone_env.sh` (the same file the base,
 lidar and web services carry; `tests/shell/test_cyclone_env.sh` keeps the
 copies byte-identical) and pins a Cyclone participant index per process:
-27 for the slam_toolbox node, 28 for the keeper. `cyclone_env` writes
+`auto` for the slam_toolbox node (its save_map service shells out to
+nav2's `map_saver_cli`, which shares this environment and so cannot bind a
+fixed index already held by its parent — the same shape as the lidar
+launch and its driver), 28 for the keeper. `cyclone_env` writes
 `CYCLONEDDS_URI` with multicast off, shared memory off and
 `MaxAutoParticipantIndex` raised to `DDS_MAX_PARTICIPANT_INDEX` (default 60):
 the agent's injected config does not raise the index, and the car's loopback
