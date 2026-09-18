@@ -104,6 +104,30 @@ def encode_map_png(width: int, height: int, data) -> bytes:
     return buffer.getvalue()
 
 
+def downsample_scan(msg, max_points: int = SLAM_SCAN_MAX_POINTS) -> list[float]:
+    """Finite in-range returns as Cartesian points in the laser frame.
+
+    The lidar service publishes laser_frame as a static identity on
+    base_link, so these are base_link coordinates. Every k-th kept return is
+    taken so that at most max_points remain.
+    """
+    lower = max(0.02, float(msg.range_min))
+    upper = float(msg.range_max)
+    kept: list[tuple[int, float]] = []
+    for idx, raw in enumerate(msg.ranges):
+        value = float(raw)
+        if not math.isfinite(value) or value <= lower or (upper > 0 and value > upper):
+            continue
+        kept.append((idx, value))
+    stride = max(1, math.ceil(len(kept) / max_points))
+    points: list[float] = []
+    for idx, value in kept[::stride]:
+        angle = msg.angle_min + idx * msg.angle_increment
+        points.append(_cm(value * math.cos(angle)))
+        points.append(_cm(value * math.sin(angle)))
+    return points
+
+
 class SlamBridge:
     def __init__(self, node, clock=time.monotonic, log=print) -> None:
         self._now = clock
@@ -199,7 +223,10 @@ class SlamBridge:
             return self._map["png"], self._map_meta_locked()
 
     def on_scan(self, msg) -> None:
-        return None
+        points = downsample_scan(msg)
+        now = self._now()
+        with self._lock:
+            self._scan = {"points": points, "at": now}
 
     def on_trajectory(self, msg) -> None:
         return None
