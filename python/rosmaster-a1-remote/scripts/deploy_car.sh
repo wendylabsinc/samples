@@ -17,14 +17,14 @@
 # is safe and under-entitling only costs a redeploy once the hardware returns.
 #
 # The four apps that used to deploy separately (each with its own wendy.json)
-# are now one app, rosmaster-a1, with four services (base, lidar, realsense,
-# web) sharing a single root wendy.json, so pruning runs once against that
+# are now one app, rosmaster-a1, with five services (base, lidar, realsense,
+# web, slam) sharing a single root wendy.json, so pruning runs once against that
 # manifest instead of once per app directory. That also raises the stakes:
-# with all four services in one app, an absent entitled tty now blocks that
+# with all five services in one app, an absent entitled tty now blocks that
 # service's container for the whole app deploy, which makes pruning MORE
 # important than it was with four separate apps.
 #
-# Division of labor for a no-args deploy (all four services):
+# Division of labor for a no-args deploy (all five services):
 #   - pruning above handles the absent-serial hard-fail when enumeration
 #     succeeds, by dropping the offending entitlement before the single
 #     group `wendy run` call, so no service ever tries to create a container
@@ -125,7 +125,7 @@ if [[ ${#SERVICES[@]} -eq 0 && -z "${present}" ]]; then
   echo "Enumeration failed, so pruning could not drop absent-serial entitlements;" >&2
   echo "falling back to the per-service loop so a container-creation hard-fail in" >&2
   echo "one service can't abort the others." >&2
-  SERVICES=(base lidar realsense web)
+  SERVICES=(base lidar realsense web slam)
 fi
 
 if [[ ${#SERVICES[@]} -eq 0 ]]; then
