@@ -190,14 +190,16 @@ saves a named copy by hand.
 
 The `web` service turns the topics above into three finite GET routes for
 the Map panel (WDY-1637). Every response sends `Content-Length` and
-`Cache-Control: no-store`; metres are rounded to centimetres, yaw is in
-radians. POST is 404.
+`Cache-Control: no-store`; metres are rounded to centimetres, except the
+map origin, whose `x` and `y` carry millimetres and whose `yaw` carries four
+decimals. POST is 404.
 
-`GET /api/slam`, polled by the panel at 4 Hz, about 4 KB:
+`GET /api/slam`, polled by the panel at 4 Hz, about 4 KB. The body always
+carries a top-level `ok: true`:
 
 | Key | Value |
 |---|---|
-| `bridge.state` | `slam_unreachable` (no `/slam/status` for 3 s), or the keeper's state passed through: `slam_down`, `waiting_for_scan`, `waiting_for_odom_tf`, `mapping`; a keeper `mapping` with no grid yet becomes `waiting_for_map` |
+| `bridge.state` | `slam_unreachable` (no `/slam/status` for 3 s), or the keeper's state passed through: `slam_down`, `waiting_for_scan`, `waiting_for_odom_tf`, `mapping`; a keeper `mapping` with no grid yet becomes `waiting_for_map`; an unknown keeper state string passes through unchanged |
 | `bridge.reason` | the stalest input over its threshold, e.g. `map -> odom 4.1 s old`, or null |
 | `slam`, `slam_age_s` | the keeper's `/slam/status` object verbatim, and its age; null before the first one |
 | `pose` | `{x, y, yaw, age_s}` for `map -> base_link`, composed from the two `/tf` transforms; null until both have arrived |

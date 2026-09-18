@@ -1513,7 +1513,11 @@ renderControllerPanel();
 renderGalleryLayout();
 // The Map panel polls its own three routes behind its own guard (slam.js);
 // its failures are not control failures and never feed the breaker above.
-startSlamPanel(els);
+try {
+  startSlamPanel(els);
+} catch (error) {
+  console.error("Map panel failed to start", error);
+}
 refreshStatus();
 // Last, and deliberately not awaited: a granted device reopens itself on load
 // so the operator authorises once, and a browser without WebHID at all simply
