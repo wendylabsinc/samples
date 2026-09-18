@@ -22,17 +22,21 @@ the design and the offline validation behind the parameters.
 mapping session, named by start time, with `map.posegraph` + `map.data`
 (slam_toolbox's serialised graph), `map.pgm` + `map.yaml` (nav2 map format)
 and `session.json`; `/maps/latest` points at the current one. The five most
-recent sessions are kept. Every container start begins a fresh session;
-`SLAM_MAP_FILE=/maps/<session>/map` continues mapping from a saved graph
-with the car placed where that session started.
+recent sessions are kept. The image ships a `/maps/.unmounted` marker that
+the mount hides, so a keeper that still sees it runs without a session and
+reports `last_save.reason = "maps volume not mounted"` instead of filling
+the container layer with sessions nobody will find again. Every container
+start begins a fresh session; `SLAM_MAP_FILE=/maps/<session>/map` continues
+mapping from a saved graph with the car placed where that session started.
 
 Knobs, all optional: `SLAM_MAPS_DIR` (`/maps`), `SLAM_AUTOSAVE_S` (`30`,
 `0` disables), `SLAM_KEEP_SESSIONS` (`5`), `SLAM_MAP_FILE` (empty),
 `SLAM_TRAJECTORY_MIN_STEP_M` (`0.05`), `SLAM_TRAJECTORY_MAX_POSES`
 (`5000`), `SLAM_ODOM_JUMP_M` (`1.0`), `SLAM_ODOM_JUMP_RAD` (`1.0`),
-`SLAM_DOWN_S` (`10`), `SLAM_SAVE_TIMEOUT_S` (`20`),
-`DDS_MAX_PARTICIPANT_INDEX` (`60`, shared with the other services),
-`SLAM_USE_SIM_TIME` (`0`; the offline harness sets `1`).
+`SLAM_DOWN_S` (`10`), `SLAM_SAVE_TIMEOUT_S` (`20`), `SLAM_MIN_FREE_MB`
+(`256`; saves pause below this much free space rather than fill the volume
+with a half-written graph), `DDS_MAX_PARTICIPANT_INDEX` (`60`, shared with
+the other services), `SLAM_USE_SIM_TIME` (`0`; the offline harness sets `1`).
 
 Deploy from the parent directory:
 

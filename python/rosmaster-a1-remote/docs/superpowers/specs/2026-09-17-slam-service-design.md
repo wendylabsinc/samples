@@ -220,10 +220,12 @@ last_save        {"age_s","ok","path","reason"} or null ("reason" is a string ex
 odom_resets      n (see watchdog)
 ```
 
-`state` derivation: `slam_down` if the keeper has not seen a map->odom
-transform for `SLAM_DOWN_S` (10 s) after having seen one, or never within
-60 s of a scan arriving; `waiting_for_scan` if no scan for 2 s;
-`waiting_for_odom_tf` if no `odom -> base_link` for 2 s; else `mapping`.
+`state` derivation, in this order, so a root cause wins over its
+consequence: `waiting_for_scan` if no scan for 2 s; `waiting_for_odom_tf` if
+no `odom -> base_link` transform for 2 s (the `/odom` topic is not a
+substitute: it keeps flowing when the broadcaster is off); `slam_down` if the
+keeper has not seen a map->odom transform for `SLAM_DOWN_S` (10 s) after
+having seen one, or never within 60 s of a scan arriving; else `mapping`.
 This is the pattern `/base_bridge/status` and `/odometry/status` use, and
 what WDY-1637's "SLAM not ready / no lidar" messages will read.
 
@@ -243,8 +245,13 @@ keeper owns the volume:
   logged, never fatal. Writes go to temporary names and are renamed into
   place so a reader never sees a half-written map.
 - Rotation: on start the keeper deletes the oldest sessions beyond
-  `SLAM_KEEP_SESSIONS` (5). Disk per session is a few MB (the bag's 116-node
-  graph serialised to 10 MB; a 10-minute drive fits in tens of MB).
+  `SLAM_KEEP_SESSIONS` (5). Disk per session is ~100 KB per pose-graph node,
+  measured on the acceptance session (83 nodes: 8.2 MB `map.posegraph` +
+  1.25 MB `map.data`), and the whole graph is rewritten on every autosave, so
+  a 10-minute drive is ~2000 nodes and 150-200 MB per save, five sessions
+  kept. A save is therefore skipped, not attempted, when the volume has less
+  than `SLAM_MIN_FREE_MB` (256) free: `last_save` reports `low disk: <n> MB
+  free` and the last good map stays whole instead of being half overwritten.
 - Opt-in continuation: `SLAM_MAP_FILE=/maps/<session>/map` starts slam_toolbox
   with `map_file_name` and `map_start_at_dock: true`, i.e. continue mapping
   from that graph with the car placed where that session started. Off by
@@ -301,7 +308,12 @@ averaged over the bag, ~35 MB RSS; the Jetson Orin Nano has headroom.
   new session.
 - Volume missing or read-only: the keeper logs once, runs with no session
   (`session` null in the status), keeps publishing status and trajectory,
-  and reports `last_save.ok = false`.
+  and reports `last_save.ok = false`. "Missing" includes an unmounted
+  volume, which is otherwise invisible: the image creates `/maps/.unmounted`
+  and the persist mount hides it, so a keeper that can see that file knows
+  the mount is absent and does not write sessions into the container layer.
+  A volume that becomes unusable later (full, remounted read-only) degrades
+  the same way rather than taking the node down.
 - Service calls time out (`SLAM_SAVE_TIMEOUT_S` 20): counted as
   `save_errors`; the map in memory is unaffected.
 
@@ -312,9 +324,12 @@ Environment variables, read once at start, matching the sibling services:
 `SLAM_MAP_FILE=` (empty), `SLAM_TRAJECTORY_MIN_STEP_M=0.05`,
 `SLAM_TRAJECTORY_MAX_POSES=5000`, `SLAM_ODOM_JUMP_M=1.0`,
 `SLAM_ODOM_JUMP_RAD=1.0`, `SLAM_DOWN_S=10`, `SLAM_SAVE_TIMEOUT_S=20`,
-`DDS_MAX_PARTICIPANT_INDEX=60` (read by the shared `cyclone_env.sh`, the
-same knob as the other services), `SLAM_USE_SIM_TIME=0` (1 makes both nodes
-use the bag clock; only the offline harness sets it).
+`SLAM_MIN_FREE_MB=256` (saves are skipped below this much free space on the
+maps volume), `DDS_MAX_PARTICIPANT_INDEX=60` (read by the shared
+`cyclone_env.sh`, the same knob as the other services), `SLAM_USE_SIM_TIME=0`
+(1 makes the slam node use the bag clock; only the offline harness sets it.
+The keeper's ages stay on the monotonic clock either way, by design: they
+say how long ago the keeper saw something, not what the bag's clock reads).
 
 ### Integration with the Wendy environment
 

@@ -276,8 +276,10 @@ again.
   `MaxAutoParticipantIndex` of 9 leaves only ten slots per host. base, lidar
   and the agent's own ROS tools can fill all ten between them, and the next
   node to start fails with "no free participant index for domain 0". Each of
-  our processes pins a fixed index from `cyclone_env.sh` (`app/cyclone_env.sh`
-  in each of the base, lidar, web and slam services), leaving 0-9 for the agent:
+  our processes takes its index from `cyclone_env.sh` (`app/cyclone_env.sh` in
+  each of the base, lidar, web and slam services): a fixed one, except where a
+  process spawns a ROS child that shares its environment and would collide
+  with it.
 
   | service | process | index |
   |---|---|---|
@@ -291,12 +293,17 @@ again.
   | slam | `async_slam_toolbox_node` (+ the `map_saver_cli` its save_map service shells out to) | `auto` (they share one environment, like the lidar launch) |
   | slam | `slam_keeper.py` | 28 |
 
-  The ceiling is raised to 60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`,
-  default 60) so our pinned participants still discover, and are discovered
-  by, everything else — the realsense service's own trick
-  (`rosmaster-a1-realsense-wendy/app/entrypoint.sh`), extended. If
-  `wendy device ros2 echo` or `bag record` still report no free index, run
-  `wendy device ros2 exec -- daemon stop` first to free one more slot.
+  Pinning above 9 does not reserve 0-9 for the agent: Cyclone's `auto`
+  allocation starts at 0 and takes the lowest free slot, and four long-lived
+  processes of ours are auto-indexed (the lidar launch, the lidar driver, the
+  realsense node and the slam node), plus a transient `map_saver_cli` on every
+  autosave — so they do land in the agent's range. What keeps every
+  participant discoverable, ours and the agent's alike, is the raised ceiling:
+  60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`, default 60), the realsense
+  service's own trick (`rosmaster-a1-realsense-wendy/app/entrypoint.sh`)
+  extended. If `wendy device ros2 echo` or `bag record` still report no free
+  index, run `wendy device ros2 exec -- daemon stop` first to free one more
+  slot.
 - **Preview encoding is rationed.** JPEG encoding shares a thread with the
   command publisher, and four tiles at full frame rate starved it enough that
   the motor watchdog cut in. `PREVIEW_MAX_FPS` caps it; depth statistics are
