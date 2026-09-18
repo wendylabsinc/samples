@@ -3,11 +3,12 @@
 set -o pipefail
 source /opt/ros/humble/setup.bash
 
-# The slam node and keeper pin Cyclone participant indices 27/28 through
-# /app/cyclone_env.sh (unconditionally, once the entrypoint starts them), but
-# this harness's own processes -- the bag player, the static tf publisher,
-# the relay and the recorder -- are launched directly, below, and never call
-# that function. Give them an auto-assigned index too, with the same raised
+# The keeper pins Cyclone participant index 28 through /app/cyclone_env.sh
+# and the slam node takes an auto one (its save_map child needs a free slot),
+# both once the entrypoint starts them; but this harness's own processes --
+# the bag player, the static tf publisher, the relay and the recorder -- are
+# launched directly, below, and never call that function. Give them an
+# auto-assigned index too, with the same raised
 # ceiling (DDS_MAX_PARTICIPANT_INDEX, default 60) the rest of the app uses,
 # so all of them, plus the pinned slam/keeper, discover each other on the
 # container's loopback.
