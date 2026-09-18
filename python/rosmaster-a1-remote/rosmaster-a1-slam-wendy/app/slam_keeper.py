@@ -219,6 +219,7 @@ class KeeperState:
         self.last_save_at: float | None = None
         self.last_save_ok: bool | None = None
         self.last_save_path: str | None = None
+        self.last_save_reason: str | None = None
         self.odom_resets = 0
 
     # --- inputs ---------------------------------------------------------
@@ -273,6 +274,7 @@ class KeeperState:
         self.last_save_at = self._clock()
         self.last_save_ok = ok
         self.last_save_path = path
+        self.last_save_reason = None
         if ok:
             self.saves += 1
             self.poses_since_save = 0
@@ -286,6 +288,16 @@ class KeeperState:
         self.save_errors += 1
         self.last_save_ok = False
         return True
+
+    def note_save_unavailable(self, reason: str) -> None:
+        """A save that was never attempted — e.g. the maps volume was
+        unwritable at startup — still needs to show up as a red
+        `last_save` for a dashboard, but it is not an attempt: `saves` and
+        `save_errors` only count real save calls through the saver."""
+        self.last_save_at = self._clock()
+        self.last_save_ok = False
+        self.last_save_path = None
+        self.last_save_reason = reason
 
     # --- queries ----------------------------------------------------------
     def _age(self, at: float | None) -> float | None:
@@ -306,7 +318,12 @@ class KeeperState:
     def status(self, session: dict | None) -> dict:
         map_info = None if self.map_info is None else dict(self.map_info, age_s=self._age(self.map_at))
         pose = None if self.pose is None else dict(self.pose, age_s=self._age(self.pose_at))
-        last_save = None if self.last_save_at is None else {"age_s": self._age(self.last_save_at), "ok": self.last_save_ok, "path": self.last_save_path}
+        last_save = None if self.last_save_at is None else {
+            "age_s": self._age(self.last_save_at),
+            "ok": self.last_save_ok,
+            "path": self.last_save_path,
+            "reason": self.last_save_reason,
+        }
         return {
             "state": self.state(),
             "scan_age_s": self._age(self.last_scan_at),
@@ -376,10 +393,12 @@ class SlamKeeper(Node):
             self.session = store.attach_or_start(wall_clock(), node_started_at)
         except OSError as exc:
             # A missing or read-only volume must not take the heartbeat and
-            # the trajectory down with it: mapping continues, saves report false.
+            # the trajectory down with it: mapping continues, saves report
+            # false. This is not a save attempt, so it must not count as one.
             print(f"SLAM_KEEPER cannot use {store.root}: {exc}; running without saves", flush=True)
-            self.state.save_finished(False, None)
+            self.state.note_save_unavailable(str(exc))
         self.exit_status: int | None = None
+        self._save_token = 0
         self.status_pub = self.create_publisher(String, "/slam/status", 10)
         self.trajectory_pub = self.create_publisher(PathMsg, "/slam/trajectory", LATCHED)
         # Not `self.subscriptions`: that is a read-only property on the real rclpy Node.
@@ -451,17 +470,27 @@ class SlamKeeper(Node):
     def start_save(self) -> None:
         base = self.store.staging_base(self.session)
         self.state.save_started()
-        self.saver.save(base, self._on_save_done)
+        self._save_token += 1
+        token = self._save_token
+        self.saver.save(base, lambda ok: self._on_save_done(token, ok))
 
-    def _on_save_done(self, ok: bool) -> None:
-        if self.state.save_in_flight_since is None:
-            return          # the save already expired; a late answer must not count twice
-        moved = []
+    def _on_save_done(self, token: int, ok: bool) -> None:
+        if token != self._save_token or self.state.save_in_flight_since is None:
+            return          # a stale answer: an expired or already-superseded attempt
+        grid_path = None
         if ok:
-            moved = self.store.commit_save(self.session, "graph") + self.store.commit_save(self.session, "grid")
-            ok = len(moved) == 4
-        grid = next((str(p) for p in moved if p.name == "map.pgm"), None)
-        self.state.save_finished(ok, grid)
+            staging_dir = Path(self.store.staging_base(self.session)).parent
+            staged = [staging_dir / name for names in SAVE_OUTPUTS.values() for name in names]
+            if all(p.is_file() for p in staged):
+                moved = self.store.commit_save(self.session, "graph") + self.store.commit_save(self.session, "grid")
+                grid_path = next((str(p) for p in moved if p.name == "map.pgm"), None)
+            else:
+                # Not all four outputs landed: commit none of them, and drop
+                # whatever did land so it cannot leak into the next attempt.
+                ok = False
+                for p in staged:
+                    p.unlink(missing_ok=True)
+        self.state.save_finished(ok, grid_path)
         if ok:
             self.store.update_session_json(self.session, saves=self.state.saves, scans=self.state.scans, last_pose=self.state.pose)
         else:
@@ -480,7 +509,8 @@ def main(argv=None) -> int:
     rclpy.init(args=argv)
     node = SlamKeeper(cfg=cfg, store=SessionStore(Path(cfg.maps_dir), cfg.keep_sessions), saver=None, node_started_at=_read_node_started_at())
     node.saver = RosMapSaver(node)
-    print(f"SLAM_KEEPER session={node.session.name} maps_dir={cfg.maps_dir} autosave_s={cfg.autosave_s} keep={cfg.keep_sessions}", flush=True)
+    session_name = node.session.name if node.session is not None else "none (maps volume unwritable)"
+    print(f"SLAM_KEEPER session={session_name} maps_dir={cfg.maps_dir} autosave_s={cfg.autosave_s} keep={cfg.keep_sessions}", flush=True)
     try:
         while rclpy.ok() and node.exit_status is None:
             rclpy.spin_once(node, timeout_sec=0.2)

@@ -233,6 +233,13 @@ class KeeperStateTests(unittest.TestCase):
         state.save_started(); state.save_finished(False, None)
         self.assertEqual((state.saves, state.save_errors, state.poses_since_save), (0, 1, 1))
 
+    def test_note_save_unavailable_reports_a_failure_without_counting_it(self):
+        state, clock = keeper_state()
+        state.note_save_unavailable("maps volume is read-only")
+        status = state.status(None)
+        self.assertEqual(status["last_save"], {"age_s": 0.0, "ok": False, "path": None, "reason": "maps volume is read-only"})
+        self.assertEqual((state.saves, state.save_errors), (0, 0), "no save was attempted, so nothing is counted")
+
     def test_an_odometry_jump_is_a_reset(self):
         state, clock = keeper_state(odom_jump_m=1.0, odom_jump_rad=1.0)
         self.assertFalse(state.on_odom(0.0, 0.0, 0.0))
@@ -263,6 +270,95 @@ class KeeperStateTests(unittest.TestCase):
         self.assertEqual((status["saves"], status["save_errors"], status["trajectory_poses"], status["odom_resets"]), (1, 0, 1, 0))
         self.assertEqual(status["session"]["name"], "s")
         json.dumps(status, sort_keys=True)  # must be JSON-serialisable as is
+
+
+class FakeFuture:
+    """Stands in for an rclpy Future: records the done-callback and lets a
+    test resolve it independently of the other request's future, either
+    with a result or by raising, so it can drive the two calls out of
+    order and check each combination RosMapSaver has to handle."""
+
+    def __init__(self):
+        self._callback = None
+        self._result = None
+        self._exc = None
+
+    def add_done_callback(self, callback):
+        self._callback = callback
+
+    def resolve(self, *, result=None, exc=None):
+        self._result, self._exc = result, exc
+        self._callback(self)
+
+    def result(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+class FakeServiceClient:
+    def __init__(self):
+        self.futures: list = []
+
+    def call_async(self, request):
+        future = FakeFuture()
+        self.futures.append(future)
+        return future
+
+
+class FakeSaverNode:
+    """No rclpy.node.Node at all: just enough of `create_client` for
+    RosMapSaver to keep the two clients it calls by name."""
+
+    def __init__(self):
+        self.clients: dict = {}
+
+    def create_client(self, _srv_type, name):
+        client = FakeServiceClient()
+        self.clients[name] = client
+        return client
+
+
+def save_result(code):
+    return types.SimpleNamespace(result=code)
+
+
+class RosMapSaverTests(unittest.TestCase):
+    def setUp(self):
+        self.node = FakeSaverNode()
+        self.saver = slam_keeper.RosMapSaver(self.node)
+        self.calls: list = []
+        self.saver.save("/tmp/session/.saving/map", self.calls.append)
+
+    def _futures(self):
+        graph = self.node.clients["/slam_toolbox/serialize_map"].futures[-1]
+        grid = self.node.clients["/slam_toolbox/save_map"].futures[-1]
+        return graph, grid
+
+    def test_both_services_ok_calls_done_true_once(self):
+        graph, grid = self._futures()
+        graph.resolve(result=save_result(0))
+        self.assertEqual(self.calls, [], "only one of the two services has answered so far")
+        grid.resolve(result=save_result(0))
+        self.assertEqual(self.calls, [True])
+
+    def test_a_failing_result_code_calls_done_false(self):
+        graph, grid = self._futures()
+        graph.resolve(result=save_result(0))
+        grid.resolve(result=save_result(1))    # a non-zero result code is a failure
+        self.assertEqual(self.calls, [False])
+
+    def test_a_raising_future_calls_done_false_instead_of_raising(self):
+        graph, grid = self._futures()
+        graph.resolve(exc=RuntimeError("service unavailable"))
+        grid.resolve(result=save_result(0))
+        self.assertEqual(self.calls, [False])
+
+    def test_done_fires_exactly_once_per_attempt(self):
+        graph, grid = self._futures()
+        graph.resolve(result=save_result(0))
+        grid.resolve(result=save_result(0))
+        self.assertEqual(len(self.calls), 1)
 
 
 class FakeSaver:
@@ -415,6 +511,36 @@ class NodeTests(unittest.TestCase):
         self.assertEqual((status["saves"], status["save_errors"]), (0, 1))
         self.assertFalse((self.node.session.dir / "map.pgm").exists(), "nothing is committed from a late answer")
 
+    def test_a_late_answer_from_an_expired_attempt_is_ignored_after_a_retry(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()                        # starts the first save attempt
+        self.clock.t += 21.0
+        self.node.tick()                        # expires: counted as an error, no retry this tick
+        self.node.tick()                        # retries: a second attempt starts
+        self.assertEqual(len(self.saver.calls), 2)
+        self.saver.complete(0, ok=True)         # the first attempt's late answer arrives while the second is in flight
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual((status["saves"], status["save_errors"]), (0, 1), "a stale answer must not be credited to the new attempt")
+        self.assertFalse((self.node.session.dir / "map.pgm").exists())
+        self.saver.complete(1, ok=True)         # the real answer for the attempt actually in flight
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual((status["saves"], status["save_errors"]), (1, 1))
+        self.assertTrue((self.node.session.dir / "map.pgm").is_file())
+
+    def test_a_partial_save_commits_nothing_and_clears_the_staged_leftovers(self):
+        self.node.on_pose(pose_msg(0.0, 0.0, 0.0))
+        self.node.tick()
+        self.saver.complete(0, ok=True, files=("pgm", "yaml"))   # only the grid half completed
+        self.node.tick()
+        status = self.last_status()
+        self.assertEqual((status["saves"], status["save_errors"]), (0, 1))
+        self.assertFalse((self.node.session.dir / "map.pgm").exists(), "nothing is committed from a partial save")
+        self.assertFalse((self.node.session.dir / "map.yaml").exists())
+        staging = self.node.session.dir / ".saving"
+        self.assertEqual(list(staging.iterdir()), [], "the partial staged files must not leak into the next attempt")
+
     def test_an_unwritable_volume_keeps_status_and_trajectory_alive(self):
         blocker = Path(self.tmp.name) / "blocked"
         blocker.write_text("not a directory")
@@ -426,6 +552,7 @@ class NodeTests(unittest.TestCase):
         status = json.loads(node.status_pub.messages[-1].data)
         self.assertIsNone(status["session"])
         self.assertEqual(status["last_save"]["ok"], False)
+        self.assertEqual(status["save_errors"], 0, "an unwritable volume at startup is not a save attempt")
         self.assertEqual(status["trajectory_poses"], 1)
         self.assertEqual(len(node.trajectory_pub.messages), 1)
 
@@ -434,6 +561,24 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(topics, ["/map", "/odom", "/pose", "/scan", "/tf"])
         self.assertEqual(self.node.status_pub.args[1], "/slam/status")
         self.assertEqual(self.node.trajectory_pub.args[1], "/slam/trajectory")
+
+
+class MainTests(unittest.TestCase):
+    def test_main_does_not_crash_when_the_maps_volume_is_unwritable_at_startup(self):
+        from unittest import mock
+
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            blocker = Path(tmp.name) / "blocked"
+            blocker.write_text("not a directory")
+            env = {"SLAM_MAPS_DIR": str(blocker / "maps"), "SLAM_KEEP_SESSIONS": "2"}
+            # rclpy.ok() patched False so the spin loop never runs: exit_status
+            # would otherwise never become non-None and the loop would hang.
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(slam_keeper.rclpy, "ok", return_value=False):
+                exit_status = slam_keeper.main()
+            self.assertEqual(exit_status, 0)
+        finally:
+            tmp.cleanup()
 
 
 if __name__ == "__main__":
