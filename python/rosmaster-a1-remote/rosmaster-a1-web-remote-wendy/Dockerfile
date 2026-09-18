@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pil \
     ros-humble-rmw-cyclonedds-cpp \
     ros-humble-geometry-msgs \
+    ros-humble-nav-msgs \
+    ros-humble-tf2-msgs \
     ros-humble-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,6 +49,7 @@ RUN tar -C /usr/lib -czf /opt/python3.10-stdlib.tar.gz python3.10
 WORKDIR /app
 COPY app/server.py /app/web_remote.py
 COPY app/direct_gamepad.py /app/direct_gamepad.py
+COPY app/slam_bridge.py /app/slam_bridge.py
 # Generate the TLS certificate at build time, not at container start.
 #
 # Browsers only hand the Gamepad API to a secure context, so the remote has to

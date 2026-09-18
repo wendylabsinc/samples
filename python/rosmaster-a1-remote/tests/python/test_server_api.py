@@ -2158,5 +2158,120 @@ class TlsListenerTests(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class FakeSlamBridge:
+    """Scripted stand-in for server.slam_bridge. The routes are under test
+    here, not the bridge: tests/python/test_slam_bridge.py covers that."""
+
+    def __init__(self):
+        self.snapshot_value = {
+            "ok": True,
+            "bridge": {"state": "waiting_for_map", "reason": None},
+            "slam": None,
+            "slam_age_s": None,
+            "pose": None,
+            "map_odom": None,
+            "map": None,
+            "scan": None,
+            "trajectory": {"epoch": 0, "count": 0},
+        }
+        self.map_value = None
+        self.trajectory_value = {"epoch": 0, "from": 0, "total": 0, "points": []}
+        self.trajectory_calls = []
+
+    def snapshot(self):
+        return self.snapshot_value
+
+    def map_png(self):
+        return self.map_value
+
+    def trajectory(self, epoch, start):
+        self.trajectory_calls.append((epoch, start))
+        return self.trajectory_value
+
+
+def _map_meta(version):
+    return {"version": version, "width": 40, "height": 30, "resolution": 0.05, "origin": {"x": -1.25, "y": 0.5, "yaw": 0.0}, "at": 0.0}
+
+
+class SlamRouteTests(ServerTestCase):
+    """The SLAM viewer's three GET routes: finite, Content-Length on every
+    response, no-store, and the map PNG's placement metadata as headers."""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_bridge = server.slam_bridge
+        self.bridge = FakeSlamBridge()
+        server.slam_bridge = self.bridge
+
+    def tearDown(self):
+        server.slam_bridge = self._orig_bridge
+        super().tearDown()
+
+    def _get_with(self, path, headers):
+        conn = self._connection()
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        data = response.read()
+        result = (response.status, data, dict(response.getheaders()))
+        conn.close()
+        return result
+
+    def test_api_slam_returns_the_bridge_snapshot_as_sorted_json(self):
+        status, data, headers = self._get("/api/slam")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data), self.bridge.snapshot_value)
+        self.assertEqual(data, json.dumps(self.bridge.snapshot_value, sort_keys=True).encode("utf-8"))
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Content-Length"], str(len(data)))
+
+    def test_map_png_is_404_before_the_first_map(self):
+        status, _, _ = self._get("/api/slam/map.png")
+        self.assertEqual(status, 404)
+
+    def test_map_png_carries_the_bytes_the_etag_and_the_placement_headers(self):
+        self.bridge.map_value = (b"\x89PNGfake", _map_meta(7))
+        status, data, headers = self._get("/api/slam/map.png")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, b"\x89PNGfake")
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(headers["Content-Length"], "8")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["ETag"], '"7"')
+        self.assertEqual(headers["X-Map-Version"], "7")
+        self.assertEqual(headers["X-Map-Width"], "40")
+        self.assertEqual(headers["X-Map-Height"], "30")
+        self.assertEqual(headers["X-Map-Resolution"], "0.05")
+        self.assertEqual(headers["X-Map-Origin-X"], "-1.25")
+        self.assertEqual(headers["X-Map-Origin-Y"], "0.5")
+        self.assertEqual(headers["X-Map-Origin-Yaw"], "0.0")
+
+    def test_map_png_answers_304_to_a_matching_if_none_match_only(self):
+        self.bridge.map_value = (b"png", _map_meta(7))
+        status, data, headers = self._get_with("/api/slam/map.png", {"If-None-Match": '"7"'})
+        self.assertEqual(status, 304)
+        self.assertEqual(data, b"")
+        self.assertEqual(headers["ETag"], '"7"')
+        status, data, _ = self._get_with("/api/slam/map.png", {"If-None-Match": '"6"'})
+        self.assertEqual(status, 200)
+        self.assertEqual(data, b"png")
+
+    def test_trajectory_passes_epoch_and_from_and_treats_bad_values_as_missing(self):
+        self.bridge.trajectory_value = {"epoch": 2, "from": 5, "total": 6, "points": [1.0, 2.0]}
+        status, data, headers = self._get("/api/slam/trajectory?epoch=2&from=5")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data), self.bridge.trajectory_value)
+        self.assertEqual(headers["Content-Length"], str(len(data)))
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self._get("/api/slam/trajectory")
+        self._get("/api/slam/trajectory?epoch=abc&from=-1")
+        self.assertEqual(self.bridge.trajectory_calls, [(2, 5), (None, None), (None, -1)])
+
+    def test_the_slam_routes_reject_post(self):
+        for path in ("/api/slam", "/api/slam/map.png", "/api/slam/trajectory"):
+            with self.subTest(path=path):
+                status, _ = self._post_raw(path, b"{}")
+                self.assertEqual(status, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
