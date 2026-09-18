@@ -395,6 +395,40 @@ Live validation on the car (acceptance for the deploy):
 - `wendy device apps stop/start rosmaster-a1_slam`: a new session appears,
   the previous session's files remain, `/maps/latest` moves.
 
+### Live validation (done 2026-09-18, 02:26-03:04 UTC)
+
+Car `wendyos-wendy-rosmaster-large` (mTLS, port 50052), agent nightly with
+the DDS fix, services base/lidar/web/slam. Numbers from `/slam/status`
+(`wendy device ros2 exec -- topic echo /slam/status --once --full-length`;
+the plain echo truncates at 128 characters and needs about 30 s to discover
+the pinned keeper), the maps volume and the slam service log.
+
+- Bench, still: `state: mapping` within 3 s of the keeper starting,
+  `map_odom` 0, `odom_tf_age_s` 0.015, `scan_age_s` 0.06, `pose` null, no
+  save (no `/pose` at rest), session directory with `session.json` on the
+  volume.
+- Floor drive, 123 s, a loop with turns both ways (bag
+  `slam-drive-2026-09-18`, 14.8 MB): `saves` 3 (one per 30 s of motion),
+  `save_errors` 0, `odom_resets` 0, `map_odom` (0.01 m, 0.81 m, 0.27 rad) at
+  the end, `trajectory_poses` 143, map 253 x 159 cells with 4033 occupied.
+  Session files: `map.posegraph` 9.2 MB, `map.data` 2.2 MB, `map.pgm`
+  40 KB — the volume went from 20 KB to 11 MB, in line with the ~100 KB per
+  node measured offline. The saved map is a coherent room with straight
+  walls and furniture; no doubled geometry.
+- slam_toolbox killed by hand: relaunched after 5 s, the keeper saw the new
+  start stamp, ended itself and the next keeper opened one new session 14 s
+  after the kill; the old session's five files were unchanged.
+- base service stopped and started with the odometry at (0.69, -0.30):
+  `SLAM_KEEPER odometry jumped: requesting a slam restart (resets=1)`, exit
+  75, node killed and relaunched, one new session 13 s after the restart;
+  the reset is recorded in the previous session's `session.json`
+  (`odom_resets: 1`) because the keeper that counts it exits — the next
+  keeper's status counter starts at 0. All four services RUNNING throughout.
+- Not yet measured: disk growth and save stalls on a drive longer than ten
+  minutes (the free-space guard and the knobs exist for that), and
+  participant-index pressure with all five services plus the agent's tools
+  (`daemon stop` was needed before `bag record`, as before).
+
 ## Follow-ups (not in this spec)
 
 - Scan sanitiser: drop the blocked -175 deg sector and mark 0-range returns
