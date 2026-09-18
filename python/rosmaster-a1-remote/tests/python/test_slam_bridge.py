@@ -86,6 +86,19 @@ def grid_message(width, height, data, resolution=0.05, ox=0.0, oy=0.0, oyaw=0.0)
     )
 
 
+def scan_message(ranges, angle_min=-math.pi, angle_increment=None, range_min=0.05, range_max=12.0):
+    if angle_increment is None:
+        angle_increment = 2 * math.pi / max(len(ranges), 1)
+    return types.SimpleNamespace(
+        header=types.SimpleNamespace(frame_id="laser_frame", stamp=None),
+        angle_min=angle_min,
+        angle_increment=angle_increment,
+        range_min=range_min,
+        range_max=range_max,
+        ranges=list(ranges),
+    )
+
+
 class ImportTests(unittest.TestCase):
     def test_the_bridge_subscribes_to_the_five_topics_on_the_given_node(self):
         bridge, _, _ = make_bridge()
@@ -272,6 +285,42 @@ class MapTests(unittest.TestCase):
         clock.t += 11.0
         bridge.on_status(status_message(state="mapping"))
         self.assertEqual(bridge.snapshot()["bridge"]["reason"], "map 11.0 s old")
+
+
+class ScanTests(unittest.TestCase):
+    def test_returns_become_cartesian_points_in_base_link(self):
+        bridge, _, _ = make_bridge()
+        # Four beams at 0, 90, 180 and 270 degrees, one metre each.
+        bridge.on_scan(scan_message([1.0, 1.0, 1.0, 1.0], angle_min=0.0, angle_increment=math.pi / 2))
+        points = bridge.snapshot()["scan"]["points"]
+        self.assertEqual(points, [1.0, 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, -1.0])
+        self.assertNotIn("-0.0", json.dumps(points))
+
+    def test_non_finite_and_out_of_range_returns_are_dropped(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_scan(scan_message([float("inf"), float("nan"), 0.0, 0.01, 13.0, 2.0], angle_min=0.0, angle_increment=0.0, range_min=0.05, range_max=12.0))
+        self.assertEqual(bridge.snapshot()["scan"]["points"], [2.0, 0.0])
+
+    def test_at_most_360_points_are_kept(self):
+        bridge, _, _ = make_bridge()
+        bridge.on_scan(scan_message([1.0] * 1000))
+        points = bridge.snapshot()["scan"]["points"]
+        self.assertLessEqual(len(points) // 2, slam_bridge.SLAM_SCAN_MAX_POINTS)
+        self.assertGreaterEqual(len(points) // 2, 300)
+
+    def test_scan_age_and_staleness_reason(self):
+        bridge, clock, _ = make_bridge()
+        bridge.on_status(status_message(state="waiting_for_odom_tf"))
+        bridge.on_scan(scan_message([1.0] * 4))
+        clock.t += 2.2
+        bridge.on_status(status_message(state="waiting_for_odom_tf"))
+        snap = bridge.snapshot()
+        self.assertAlmostEqual(snap["scan"]["age_s"], 2.2, places=3)
+        self.assertEqual(snap["bridge"]["reason"], "scan 2.2 s old")
+
+    def test_no_scan_is_null(self):
+        bridge, _, _ = make_bridge()
+        self.assertIsNone(bridge.snapshot()["scan"])
 
 
 if __name__ == "__main__":
