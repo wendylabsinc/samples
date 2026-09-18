@@ -70,6 +70,22 @@ def status_message(**fields):
     return types.SimpleNamespace(data=json.dumps(body))
 
 
+def grid_message(width, height, data, resolution=0.05, ox=0.0, oy=0.0, oyaw=0.0):
+    return types.SimpleNamespace(
+        header=types.SimpleNamespace(frame_id="map", stamp=None),
+        info=types.SimpleNamespace(
+            width=width,
+            height=height,
+            resolution=resolution,
+            origin=types.SimpleNamespace(
+                position=types.SimpleNamespace(x=ox, y=oy, z=0.0),
+                orientation=quaternion_yaw(oyaw),
+            ),
+        ),
+        data=list(data),
+    )
+
+
 class ImportTests(unittest.TestCase):
     def test_the_bridge_subscribes_to_the_five_topics_on_the_given_node(self):
         bridge, _, _ = make_bridge()
@@ -188,6 +204,74 @@ class StateTests(unittest.TestCase):
             "slam_bridge: start -> slam_unreachable (no /slam/status yet)",
             "slam_bridge: slam_unreachable -> waiting_for_scan",
         ])
+
+
+class MapTests(unittest.TestCase):
+    UNKNOWN, FREE, OCCUPIED = (0x10, 0x15, 0x13), (0x25, 0x30, 0x29), (0xDF, 0xE6, 0xE2)
+
+    @staticmethod
+    def decode(png: bytes):
+        from PIL import Image
+        return Image.open(io.BytesIO(png)).convert("RGB")
+
+    def test_cells_map_to_the_three_palette_colours_with_the_highest_row_at_the_top(self):
+        bridge, _, _ = make_bridge()
+        # 3 wide, 2 tall. Grid row 0 (lowest y): unknown, free, occupied.
+        # Grid row 1 (highest y): occupied at 50, free at 49, unknown at -1.
+        bridge.on_map(grid_message(3, 2, [-1, 0, 100, 50, 49, -1]))
+        png, meta = bridge.map_png()
+        image = self.decode(png)
+        self.assertEqual(image.size, (3, 2))
+        self.assertEqual([image.getpixel((x, 0)) for x in range(3)], [self.OCCUPIED, self.FREE, self.UNKNOWN], "image row 0 is grid row 1")
+        self.assertEqual([image.getpixel((x, 1)) for x in range(3)], [self.UNKNOWN, self.FREE, self.OCCUPIED])
+        self.assertEqual(meta["version"], 1)
+
+    def test_metadata_and_version_follow_each_grid(self):
+        bridge, clock, _ = make_bridge()
+        bridge.on_map(grid_message(2, 1, [0, 0], resolution=0.1, ox=-1.5, oy=2.25, oyaw=0.5))
+        bridge.on_map(grid_message(2, 1, [0, 100], resolution=0.1, ox=-1.5, oy=2.25, oyaw=0.5))
+        clock.t += 0.7
+        snap = bridge.snapshot()
+        self.assertEqual(snap["map"]["version"], 2)
+        self.assertEqual((snap["map"]["width"], snap["map"]["height"]), (2, 1))
+        self.assertEqual(snap["map"]["resolution"], 0.1)
+        self.assertEqual((snap["map"]["origin"]["x"], snap["map"]["origin"]["y"]), (-1.5, 2.25))
+        self.assertAlmostEqual(snap["map"]["origin"]["yaw"], 0.5, places=3)
+        self.assertAlmostEqual(snap["map"]["age_s"], 0.7, places=3)
+        self.assertNotIn("png", snap["map"])
+        self.assertNotIn("at", snap["map"])
+        self.assertEqual(bridge.map_png()[1]["version"], 2)
+
+    def test_a_grid_with_the_wrong_cell_count_is_rejected_and_the_old_map_kept(self):
+        bridge, _, lines = make_bridge()
+        bridge.on_map(grid_message(2, 2, [0, 0, 0, 0]))
+        bridge.on_map(grid_message(2, 2, [0, 0, 0]))
+        self.assertEqual(bridge.map_png()[1]["version"], 1)
+        self.assertEqual([line for line in lines if "rejected /map" in line], ["slam_bridge: rejected /map 2x2 with 3 cells"])
+
+    def test_a_grid_over_the_side_cap_is_rejected_before_anything_else_is_read(self):
+        bridge, _, lines = make_bridge()
+        big = slam_bridge.SLAM_MAP_MAX_SIDE + 1
+        msg = types.SimpleNamespace(header=None, info=types.SimpleNamespace(width=big, height=1, resolution=0.05, origin=None), data=[0] * big)
+        bridge.on_map(msg)
+        self.assertIsNone(bridge.map_png())
+        self.assertEqual(len([line for line in lines if "rejected /map" in line]), 1)
+
+    def test_no_map_means_none_and_mapping_becomes_waiting_for_map_until_one_arrives(self):
+        bridge, _, _ = make_bridge()
+        self.assertIsNone(bridge.map_png())
+        self.assertIsNone(bridge.snapshot()["map"])
+        bridge.on_status(status_message(state="mapping"))
+        self.assertEqual(bridge.snapshot()["bridge"]["state"], "waiting_for_map")
+        bridge.on_map(grid_message(1, 1, [0]))
+        self.assertEqual(bridge.snapshot()["bridge"]["state"], "mapping")
+
+    def test_a_stale_map_while_mapping_is_the_reason(self):
+        bridge, clock, _ = make_bridge()
+        bridge.on_map(grid_message(1, 1, [0]))
+        clock.t += 11.0
+        bridge.on_status(status_message(state="mapping"))
+        self.assertEqual(bridge.snapshot()["bridge"]["reason"], "map 11.0 s old")
 
 
 if __name__ == "__main__":
