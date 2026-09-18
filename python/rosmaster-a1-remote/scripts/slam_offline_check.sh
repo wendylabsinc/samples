@@ -18,9 +18,10 @@
 #   RELAY_GZ_BIAS=0.0002  gyro bias to subtract (relay only).
 #   RATE=1.0           playback rate.
 #
-# Acceptance (exit 0): max map->odom correction < 3 m and < 1 rad, a session
-# directory with map.posegraph, map.data, map.pgm, map.yaml, session.json,
-# last /slam/status state "mapping" and saves >= 1.
+# Acceptance (exit 0): max map->odom correction < 3 m and < 1 rad, at least
+# 20 poses and 500 occupied map cells (a replay that dies early clears every
+# other check), a session directory with map.posegraph, map.data, map.pgm,
+# map.yaml, session.json, last /slam/status state "mapping" and saves >= 1.
 set -euo pipefail
 
 bag=$(cd "${1:?bag dir}" && pwd)
@@ -33,8 +34,8 @@ echo "== building the service image"
 docker build -q -t rosmaster-a1-slam-check "${repo}/rosmaster-a1-slam-wendy"
 
 echo "== replaying ${bag} -> ${out}"
-# ROS_LOCALHOST_ONLY=1: cyclone_env.sh's multicast-off, fixed-index scheme
-# (used by both the slam node and the keeper) is only discoverable this way
+# ROS_LOCALHOST_ONLY=1: cyclone_env.sh's multicast-off scheme (an auto index
+# for the slam node, 28 for the keeper) is only discoverable this way
 # -- it is what the Wendy agent sets on every app container in production
 # (see cyclone_env.sh's header). A bare docker run does not set it, and
 # without it nothing in the container, slam/keeper included, discovers
@@ -59,15 +60,26 @@ out = Path(sys.argv[1]); s = json.loads((out / "stats.json").read_text())
 latest = out / "maps" / "latest"
 files = sorted(p.name for p in latest.iterdir()) if latest.exists() else []
 status = s.get("last_live_status") or {}
+grid = s.get("map") or {}
+
+def number(value, missing):
+    """stats.json always has the key; the value is null when nothing was
+    recorded, which has to read as a clean FAIL, not a TypeError."""
+    return missing if value is None else value
+
 checks = {
-    "max map->odom xy < 3 m": s.get("map_odom_max_xy", 99) < 3.0,
-    "max map->odom yaw < 1 rad": s.get("map_odom_max_abs_yaw", 99) < 1.0,
+    "max map->odom xy < 3 m": number(s.get("map_odom_max_xy"), 99) < 3.0,
+    "max map->odom yaw < 1 rad": number(s.get("map_odom_max_abs_yaw"), 99) < 1.0,
+    # A replay that dies after a handful of scans passed every check above:
+    # tiny corrections, five files, one save. The map has to be a map.
+    "at least 20 poses": number(s.get("poses"), 0) >= 20,
+    "at least 500 occupied map cells": number(grid.get("occupied"), 0) >= 500,
     "session has all five files": all(f in files for f in ("map.posegraph", "map.data", "map.pgm", "map.yaml", "session.json")),
     "last live status is mapping": status.get("state") == "mapping",
     "at least one save": status.get("saves", 0) >= 1,
 }
 for label, ok in checks.items():
     print(("ok  " if ok else "FAIL") + " - " + label)
-print(f"map->odom max xy {s.get('map_odom_max_xy')} m, max yaw {s.get('map_odom_max_abs_yaw')} rad; poses {s.get('poses')}; session files {files}")
+print(f"map->odom max xy {s.get('map_odom_max_xy')} m, max yaw {s.get('map_odom_max_abs_yaw')} rad; poses {s.get('poses')}; occupied cells {grid.get('occupied')}; saves {status.get('saves')}, save_errors {status.get('save_errors')}; session files {files}")
 sys.exit(0 if all(checks.values()) else 1)
 PY
