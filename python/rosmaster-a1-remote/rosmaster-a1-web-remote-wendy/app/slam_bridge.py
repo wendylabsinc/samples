@@ -88,6 +88,22 @@ def _with_age(entry: dict | None, now: float) -> dict | None:
     return {"x": _cm(entry["x"]), "y": _cm(entry["y"]), "yaw": round(entry["yaw"], 3), "age_s": _age(now, entry["at"])}
 
 
+def encode_map_png(width: int, height: int, data) -> bytes:
+    """A north-up, three-colour PNG of an occupancy grid.
+
+    Image row 0 is the grid's highest-y row, so the file is a correct picture
+    on its own (and a correct texture for any later viewer); the panel places
+    its top edge `height` cells above the origin.
+    """
+    cells = np.asarray(data, dtype=np.int8).reshape(height, width)
+    index = np.where(cells < 0, 0, np.where(cells >= OCCUPIED_THRESHOLD, 2, 1)).astype(np.uint8)
+    image = PILImage.frombytes("P", (width, height), np.ascontiguousarray(index[::-1]).tobytes())
+    image.putpalette(MAP_PALETTE)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 class SlamBridge:
     def __init__(self, node, clock=time.monotonic, log=print) -> None:
         self._now = clock
@@ -151,7 +167,36 @@ class SlamBridge:
             self._status_at = now
 
     def on_map(self, msg) -> None:
-        return None
+        width, height = int(msg.info.width), int(msg.info.height)
+        cells = len(msg.data)
+        if width <= 0 or height <= 0 or cells != width * height or max(width, height) > SLAM_MAP_MAX_SIDE:
+            self._log(f"slam_bridge: rejected /map {width}x{height} with {cells} cells")
+            return
+        png = encode_map_png(width, height, msg.data)
+        origin = msg.info.origin
+        entry = {
+            "png": png,
+            "width": width,
+            "height": height,
+            "resolution": float(msg.info.resolution),
+            "origin": {
+                "x": round(float(origin.position.x), 3),
+                "y": round(float(origin.position.y), 3),
+                "yaw": round(yaw_of(origin.orientation), 4),
+            },
+            "at": self._now(),
+        }
+        with self._lock:
+            self._map_version += 1
+            entry["version"] = self._map_version
+            self._map = entry
+
+    def map_png(self) -> tuple[bytes, dict] | None:
+        """The cached PNG and its placement metadata, or None before the first grid."""
+        with self._lock:
+            if self._map is None:
+                return None
+            return self._map["png"], self._map_meta_locked()
 
     def on_scan(self, msg) -> None:
         return None
