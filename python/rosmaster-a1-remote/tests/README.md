@@ -36,6 +36,12 @@ against regressing to slam_toolbox's stock `base_footprint`/interactive-mode
 defaults, and `test_slam_keeper.py` covers `slam_keeper.py`'s session store
 and state machine — both with the same stub arrangement, no ROS 2 installed.
 
+`test_slam_bridge.py` covers `rosmaster-a1-web-remote-wendy/app/slam_bridge.py`
+(pose composition, PNG encoding decoded back with Pillow, scan downsampling,
+trajectory epochs, the state table) with SimpleNamespace messages and an
+injected clock; `SlamRouteTests` in `test_server_api.py` covers the three
+`/api/slam*` routes against the real server with a scripted bridge.
+
 ## Shell: service scripts (`tests/shell`)
 
 Cover the bash scripts the base, lidar, web and slam entrypoints run, using
@@ -73,6 +79,13 @@ That second layer exists because the page script used to be inline in
 and matched substrings. A reviewer's mutation run broke twelve real safety
 behaviors with the whole suite still green. Do not add source scraping
 assertions back; add a test that runs the code.
+
+`slam.test.mjs` covers `rosmaster-a1-web-remote-wendy/app/static/slam.js`, the
+Map panel, in both layers: its pure reducer, view transform, fetch plan and
+merge as plain unit tests, then the polling chain, the canvas drawing and
+the pointer handling through the harness, whose fake 2D context records
+every drawing call and whose `response()` helper scripts a status, headers
+and a body for one path.
 
 ```
 node --test tests/web/*.test.mjs
