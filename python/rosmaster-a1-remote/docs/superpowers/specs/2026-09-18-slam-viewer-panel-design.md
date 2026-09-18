@@ -353,7 +353,8 @@ that covers the whole chain, run sequentially:
 2. If `slamPlan` says so, `GET /api/slam/map.png` with `If-None-Match`;
    decode with `createImageBitmap(blob)` when available, else an `Image` on
    an object URL (revoked when replaced). 304 keeps the current image; 404
-   clears it and is not a failure.
+   keeps whatever image is held (the bridge has no map right now) and is
+   not a failure.
 3. If `slamPlan` says so, `GET /api/slam/trajectory?epoch=E&from=N`, merged
    with `slamMerge`.
 4. One redraw.
