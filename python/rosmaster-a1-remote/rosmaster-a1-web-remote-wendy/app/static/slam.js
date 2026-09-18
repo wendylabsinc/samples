@@ -102,8 +102,6 @@ function slamReduce(model, event) {
       next.mapAvailable = body.map || null;
       const trajectory = body.trajectory || {};
       next.trajectoryAvailable = { epoch: Number(trajectory.epoch) || 0, count: Number(trajectory.count) || 0 };
-      next.failures = 0;
-      next.lastError = null;
       if (!next.view.fitted && next.mapAvailable) fitViewInto(next, next.mapAvailable);
       if (next.view.follow && next.pose) {
         next.view.cx = next.pose.x;
@@ -127,6 +125,10 @@ function slamReduce(model, event) {
     case "failure":
       next.failures = model.failures + 1;
       next.lastError = event.error || "request failed";
+      return next;
+    case "cycleDone":
+      next.failures = 0;
+      next.lastError = null;
       return next;
     case "hidden":
       next.hidden = Boolean(event.hidden);
@@ -186,7 +188,14 @@ function slamPlan(model) {
   const haveCount = have.points.length / 2;
   const sameEpoch = have.epoch === want.epoch;
   const trajectory = !sameEpoch || want.count !== haveCount;
-  return { map, trajectory, trajectoryQuery: { epoch: want.epoch, from: sameEpoch ? haveCount : 0 } };
+  // A same-epoch count smaller than what the client already holds cannot be
+  // the same server: epoch counters are per process, and within one
+  // incarnation the trajectory is append-only. It is a new bridge that
+  // relatched the keeper's path as epoch 1 again after a web-service
+  // restart, so resync from 0 rather than asking for a `from` the relatched
+  // path can never satisfy.
+  const from = sameEpoch && want.count >= haveCount ? haveCount : 0;
+  return { map, trajectory, trajectoryQuery: { epoch: want.epoch, from } };
 }
 
 function slamMerge(list, reply) {
@@ -234,6 +243,7 @@ function slamMapMetaFromHeaders(get) {
 function slamStateText(model) {
   if (model.hidden) return "hidden";
   if (model.failures >= SLAM_UNREACHABLE_FAILURES) return "car unreachable";
+  if (model.state === "slam_unreachable") return "SLAM service not running";
   return String(model.state).replaceAll("_", " ");
 }
 
@@ -319,14 +329,24 @@ async function refreshSlam() {
     const plan = slamPlan(slamModel);
     if (plan.map) {
       const result = await slamFetchMap(slamModel.map ? slamModel.map.version : null);
-      if (result.status === 200) slamModel = slamReduce(slamModel, { type: "map", meta: result.meta, image: result.image });
-      else if (result.status === 404) slamModel = slamReduce(slamModel, { type: "mapMissing" });
+      if (result.status === 200) {
+        // Captured before the reduce, which replaces slamModel.mapImage with
+        // the new bitmap; the old one is only reachable through this local
+        // once the reduce runs. The reducer stays pure: this is a side
+        // effect the reduce itself must not perform.
+        const previousImage = slamModel.mapImage;
+        slamModel = slamReduce(slamModel, { type: "map", meta: result.meta, image: result.image });
+        if (previousImage && typeof previousImage.close === "function") previousImage.close();
+      } else if (result.status === 404) {
+        slamModel = slamReduce(slamModel, { type: "mapMissing" });
+      }
     }
     if (plan.trajectory) {
       const { epoch, from } = plan.trajectoryQuery;
       const reply = await slamFetchJson(`/api/slam/trajectory?epoch=${epoch}&from=${from}`);
       slamModel = slamReduce(slamModel, { type: "trajectory", reply });
     }
+    slamModel = slamReduce(slamModel, { type: "cycleDone" });
   } catch (error) {
     // Deliberately not noteControlFailure(): a slow map must never trip the
     // control breaker and blank the camera tiles.
@@ -469,7 +489,12 @@ function wireSlamPointer(canvas) {
   canvas.addEventListener("pointerup", release);
   canvas.addEventListener("pointercancel", release);
   canvas.addEventListener("wheel", (event) => {
+    // preventDefault first regardless: this listener is registered
+    // non-passive precisely so the page can stop the canvas from scrolling,
+    // and a horizontal scroll (deltaY === 0) still needs that even though it
+    // is not a zoom.
     if (typeof event.preventDefault === "function") event.preventDefault();
+    if (!event.deltaY) return;
     const rect = canvas.getBoundingClientRect();
     const k = slamCanvasScale(canvas);
     const factor = event.deltaY < 0 ? SLAM_ZOOM_STEP : 1 / SLAM_ZOOM_STEP;
@@ -493,6 +518,9 @@ function renderSlamPanel() {
 function startSlamPanel(els) {
   slamEls = els;
   slamModel = slamReduce(slamModel, { type: "resize", width: els.slamCanvas.width, height: els.slamCanvas.height });
+  // Seeded before the first refreshSlam(), so a page opened in a background
+  // tab does not spend its first poll before visibilitychange has ever fired.
+  slamModel = slamReduce(slamModel, { type: "tabHidden", hidden: Boolean(document.hidden) });
   wireSlamPointer(els.slamCanvas);
   els.slamFollow.addEventListener("change", () => {
     slamModel = slamReduce(slamModel, { type: "follow", on: els.slamFollow.checked });

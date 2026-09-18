@@ -74,13 +74,19 @@ test("SLAM model: the first snapshot with a map fits the view to it, once", () =
   near(model.view.scale, FIT_SCALE * 2, 1e-6);
 });
 
-test("SLAM model: failures count up, three mean unreachable, one snapshot clears them", () => {
+test("SLAM model: failures count up, three mean unreachable, one completed cycle clears them", () => {
   let model = newSlamModel();
   for (let i = 0; i < SLAM_UNREACHABLE_FAILURES; i += 1) model = slamReduce(model, { type: "failure", error: "offline" });
   assert.deepEqual(slamOverlay(model), { title: "Car not reachable", detail: "offline" });
   assert.equal(slamStateText(model), "car unreachable");
+  // A snapshot alone does not clear it (that was the bug: a snapshot can
+  // succeed while a later step in the same cycle keeps failing); only
+  // cycleDone, dispatched after every step of a cycle has succeeded, does.
   model = slamReduce(model, { type: "snapshot", body: snapshot() });
+  assert.equal(model.failures, 3);
+  model = slamReduce(model, { type: "cycleDone" });
   assert.equal(model.failures, 0);
+  assert.equal(model.lastError, null);
   assert.equal(slamOverlay(model), null);
 });
 
@@ -150,6 +156,18 @@ test("SLAM plan: the PNG only when the version moved, the trajectory only when i
   assert.deepEqual(slamPlan(model), { map: true, trajectory: true, trajectoryQuery: { epoch: 2, from: 0 } });
 });
 
+test("SLAM plan: a same-epoch count smaller than what is held means a different server, and resyncs from 0", () => {
+  // The web service restarted under an open page: the new bridge relatches
+  // the keeper's path as epoch 1 again, this time with fewer points than the
+  // client already holds from the old epoch 1. `from: haveCount` would ask
+  // for points past the end of the relatched path and get nothing back.
+  let model = slamReduce(newSlamModel(), { type: "snapshot", body: snapshot({ trajectory: { epoch: 1, count: 4 } }) });
+  model = slamReduce(model, { type: "map", meta: { ...snapshot().map }, image: { bitmap: true } });
+  model = slamReduce(model, { type: "trajectory", reply: { epoch: 1, from: 0, total: 4, points: [0, 0, 0.1, 0, 0.2, 0, 0.3, 0] } });
+  model = slamReduce(model, { type: "snapshot", body: snapshot({ trajectory: { epoch: 1, count: 2 } }) });
+  assert.deepEqual(slamPlan(model), { map: false, trajectory: true, trajectoryQuery: { epoch: 1, from: 0 } });
+});
+
 test("SLAM plan: a null map in the snapshot fetches nothing and keeps the held image", () => {
   let model = slamReduce(newSlamModel(), { type: "snapshot", body: snapshot() });
   model = slamReduce(model, { type: "map", meta: snapshot().map, image: { bitmap: true } });
@@ -215,6 +233,9 @@ test("SLAM text: the pill, the stats and the readout", () => {
   assert.equal(slamStateText(model), "hidden");
   assert.equal(slamReadoutText(newSlamModel()), "Waiting for the car");
   assert.equal(slamStateText(slamReduce(newSlamModel(), { type: "snapshot", body: snapshot({ bridge: { state: "waiting_for_odom_tf", reason: null } }) })), "waiting for odom tf");
+  // slam_unreachable gets the spec's exact pill wording rather than the
+  // generic underscore-to-space form every other state gets.
+  assert.equal(slamStateText(slamReduce(newSlamModel(), { type: "snapshot", body: snapshot({ bridge: { state: "slam_unreachable", reason: null } }) })), "SLAM service not running");
   assert.equal(slamStatsText(slamReduce(newSlamModel(), { type: "snapshot", body: snapshot({ slam: { saves: 1 }, trajectory: { epoch: 1, count: 1 } }) })), "1 save, 1 pose");
 });
 
@@ -222,12 +243,12 @@ test("SLAM text: the pill, the stats and the readout", () => {
 // The page wiring ===========================================================
 import { loadPage, response } from "./harness.mjs";
 
-function mapResponse(version = 4, body = "png-bytes") {
+function mapResponse(version = 4, body = "png-bytes", yaw = 0) {
   return response({
     status: 200,
     headers: {
       "X-Map-Version": String(version), "X-Map-Width": "200", "X-Map-Height": "100", "X-Map-Resolution": "0.05",
-      "X-Map-Origin-X": "-5", "X-Map-Origin-Y": "-2.5", "X-Map-Origin-Yaw": "0", ETag: `"${version}"`,
+      "X-Map-Origin-X": "-5", "X-Map-Origin-Y": "-2.5", "X-Map-Origin-Yaw": String(yaw), ETag: `"${version}"`,
     },
     blob: body,
   });
@@ -341,6 +362,23 @@ test("SLAM wiring: three failed polls show the unreachable state on the canvas, 
   assert.equal(page.slam.failures, 0);
 });
 
+test("SLAM wiring: a snapshot that keeps succeeding while the PNG keeps failing still reaches unreachable", async () => {
+  // The bug: failures used to reset on a successful snapshot alone, so a
+  // snapshot/PNG-failure/snapshot/PNG-failure cycle oscillated the counter
+  // between 0 and 1 and never reached SLAM_UNREACHABLE_FAILURES, leaving the
+  // pill on "mapping" while the map silently never arrived.
+  const page = await mappingPage();
+  page.fake.responses.set("/api/slam/map.png", response({ status: 500 }));
+  for (let i = 0; i < 3; i += 1) {
+    await page.run("refreshSlam()");
+    await page.settle();
+  }
+  assert.equal(page.el("slamState").textContent, "car unreachable");
+  const texts = page.canvasFrame("slamCanvas").filter((c) => c.op === "fillText").map((c) => c.args[0]);
+  assert.ok(texts.includes("Car not reachable"), `overlay drawn: ${texts.join(" | ")}`);
+  assert.match(page.slam.lastError, /\/api\/slam\/map\.png/);
+});
+
 test("SLAM wiring: a timed-out snapshot counts as one failure", async () => {
   const page = await mappingPage();
   page.fake.held.add("/api/slam");
@@ -413,6 +451,25 @@ test("SLAM drawing: the map image is placed at its origin, north up, one cell pe
   near(draw.args[4], 100 * cell, 1e-6);
   const rotate = frame.find((c) => c.op === "rotate");
   near(rotate.args[0], 0);
+});
+
+test("SLAM drawing: a non-zero origin yaw rotates the map and still translates to the origin", async () => {
+  const yaw = Math.PI / 2;
+  const page = await mappingPage({ map: { ...snapshot().map, origin: { x: -5, y: -2.5, yaw } } });
+  page.fake.responses.set("/api/slam/map.png", mapResponse(4, "png-bytes", yaw));
+  await page.run("refreshSlam()");
+  await page.settle();
+  const frame = page.canvasFrame("slamCanvas");
+  const rotate = frame.find((c) => c.op === "rotate");
+  near(rotate.args[0], -yaw, 1e-9);
+  // World angles turn counter-clockwise, canvas y points down, so drawSlamMap
+  // rotates by -yaw; the origin still has to land at its own canvas point
+  // under whatever scale and centre the view actually has, not a hardcoded
+  // north-up constant.
+  const { scale, cx, cy } = page.slam.view;
+  const translate = frame.find((c) => c.op === "translate");
+  near(translate.args[0], (-5 - cx) * scale + 320, 1e-9);
+  near(translate.args[1], 200 - (-2.5 - cy) * scale, 1e-9);
 });
 
 test("SLAM drawing: scan points go through the pose and the robot marker points along its heading", async () => {
