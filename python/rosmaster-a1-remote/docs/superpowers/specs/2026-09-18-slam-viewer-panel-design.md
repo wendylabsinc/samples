@@ -507,6 +507,13 @@ poll leaves the camera tiles unsuspended and the control breaker untouched.
   drive.
 - **Websocket push** for a standalone viewer, if a 4 Hz pose ever proves
   visibly coarse; the bridge's snapshot method is already the payload.
+- **Epochs and map versions are per web-service process.** The bridge's
+  trajectory epoch and map version restart at 1 when the web container
+  restarts under an open page, so the client is defensive: a same-epoch
+  count smaller than what it holds means a different server and it
+  resynchronises from 0 (found by the whole-branch review, fixed in
+  `slamPlan`); a map version collision self-heals within one
+  `map_update_interval`. A standalone viewer inherits this rule.
 - **Map deltas**: if grids grow past a few thousand cells a side, send only
   the changed rows or a tiled PNG; not needed for an office.
 - Quietening the request log for the 4 Hz poll if it drowns the service log
