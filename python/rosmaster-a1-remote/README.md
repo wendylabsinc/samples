@@ -290,15 +290,15 @@ again.
   | lidar | `ydlidar_ros2_driver_node` (run directly by `lidar_supervisor.sh`) | 24 |
   | lidar | `static_transform_publisher` (`base_link -> laser_frame`) | 25 |
   | web | `web_remote.py` | 26 |
-  | slam | `async_slam_toolbox_node` (+ the `map_saver_cli` its save_map service shells out to) | `auto` (they share one environment, like the lidar launch) |
+  | slam | `async_slam_toolbox_node` (+ the `map_saver_cli` its save_map service shells out to) | `auto` (they share one environment, so a fixed index would collide; the raised ceiling lets each take the lowest free one) |
   | slam | `slam_keeper.py` | 28 |
 
   Pinning above 9 does not reserve 0-9 for the agent: Cyclone's `auto`
-  allocation starts at 0 and takes the lowest free slot, and four long-lived
-  processes of ours are auto-indexed (the lidar launch, the lidar driver, the
-  realsense node and the slam node), plus a transient `map_saver_cli` on every
-  autosave — so they do land in the agent's range. What keeps every
-  participant discoverable, ours and the agent's alike, is the raised ceiling:
+  allocation starts at 0 and takes the lowest free slot, and two long-lived
+  processes of ours are auto-indexed (the realsense node and the slam node),
+  plus a transient `map_saver_cli` on every autosave — so they do land in the
+  agent's range. What keeps every participant discoverable, ours and the
+  agent's alike, is the raised ceiling:
   60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`, default 60), the realsense
   service's own trick (`rosmaster-a1-realsense-wendy/app/entrypoint.sh`)
   extended. If `wendy device ros2 echo` or `bag record` still report no free

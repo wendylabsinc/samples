@@ -41,10 +41,9 @@ slam_supervisor() {
     date +%s > /tmp/slam_node_started_at
     echo "SLAM_SUPERVISOR attempt=${attempt} launching async_slam_toolbox_node ${slam_extra_args[*]}"
     # save_map's service handler shells out to nav2's map_saver_cli, which
-    # shares this environment with the node that spawns it -- the same
-    # shape as the lidar launch and its driver. A fixed index would collide
-    # between the two; "auto" under the raised ceiling lets each take the
-    # lowest free index instead.
+    # shares this environment with the node that spawns it. A fixed index
+    # would collide between the two; "auto" under the raised ceiling lets
+    # each take the lowest free index instead.
     cyclone_env auto
     started=$(date +%s)
     /opt/ros/humble/lib/slam_toolbox/async_slam_toolbox_node --ros-args --params-file /app/slam_params.yaml "${slam_extra_args[@]}" &
