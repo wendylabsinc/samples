@@ -116,7 +116,7 @@ fi
 # resolve from /usr/lib/python310.zip, so the failure arrives as a confusing
 # ModuleNotFoundError for termios or similar. Restore before every launch and
 # relaunch on exit instead of letting a lost race kill the process for good.
-# The flock serializes concurrent restores (the two supervisors below launch
+# The flock serializes concurrent restores (the three supervisors below launch
 # back-to-back, and the ros2 shim uses the same lock): an rm -rf landing while
 # another restore's tar is mid-extract leaves the tree transiently incomplete.
 restore_stdlib() {
@@ -152,4 +152,11 @@ echo "Starting direct Rosmaster base bridge with ROSMASTER_SERIAL_PORT=${ROSMAST
 supervise_python BASE_BRIDGE_SUPERVISOR /app/base_bridge.py &
 driver_pid=$!
 
-wait "${sensor_probe_pid}" "${driver_pid}"
+# Dead-reckoning from /vel_raw + the IMU into /odom and odom -> base_link.
+# Pure consumer of the bridge's topics, so it simply idles until the bridge
+# is up and resumes across bridge restarts.
+echo "Starting odometry (ODOM_PUBLISH_TF=${ODOM_PUBLISH_TF:-1})"
+supervise_python ODOMETRY_SUPERVISOR /app/odometry.py &
+odometry_pid=$!
+
+wait "${sensor_probe_pid}" "${driver_pid}" "${odometry_pid}"

@@ -10,6 +10,8 @@ preserved Yahboom ROS 2 Humble driver and exposes:
 - `/voltage`
 - `/joint_states`
 - `/edition`
+- `/odom` and the `odom -> base_link` transform (see below)
+- `/odometry/status`
 
 It does not send movement commands by itself, with two safety exceptions. It
 zeroes the motors on every serial (re)connect, because the board holds its
@@ -28,3 +30,20 @@ cd .. && wendy run --yes --detach --service base --device <car-hostname>.local:5
 
 See `../README.md` for the full app, the other services, and deploy commands
 that cover all four at once.
+
+## Odometry
+
+`app/odometry.py` dead-reckons `/vel_raw`'s forward speed with the IMU's
+yaw rate into `nav_msgs/Odometry` on `/odom` and the `odom -> base_link`
+transform, one message per velocity frame. The firmware's own `angular.z`
+is not used: on the Ackermann A1 it is meaningless (Yahboom's driver says
+so), and `linear.y` is the steer angle. Gyro bias is re-estimated whenever
+the car has stood still for two seconds, and a resting car never turns.
+`/odometry/status` (JSON, 1 Hz) reports `waiting_for_vel_raw`,
+`calibrating_gyro` or `tracking`, the bias, sample ages and the pose.
+
+Good enough for `slam_toolbox` to scan-match against; there is no sensor
+fusion. Knobs, all optional: `ODOM_PUBLISH_TF` (default `1`; set `0` when an
+EKF owns the transform), `ODOM_MAX_DT_S` (`0.25`), `ODOM_IMU_STALE_S`
+(`0.5`), `ODOM_BIAS_STILL_S` (`2.0`), `ODOM_STILL_SPEED_MPS` (`0.01`),
+`ODOM_FRAME` (`odom`), `ODOM_CHILD_FRAME` (`base_link`).

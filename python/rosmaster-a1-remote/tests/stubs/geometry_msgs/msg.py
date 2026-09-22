@@ -19,3 +19,51 @@ class Twist:
     def __init__(self) -> None:
         self.linear = Vector3()
         self.angular = Vector3()
+
+
+class Point:
+    def __init__(self) -> None:
+        self.x: float = 0.0
+        self.y: float = 0.0
+        self.z: float = 0.0
+
+
+class Quaternion:
+    def __init__(self) -> None:
+        self.x: float = 0.0
+        self.y: float = 0.0
+        self.z: float = 0.0
+        self.w: float = 1.0
+
+
+class Pose:
+    def __init__(self) -> None:
+        self.position = Point()
+        self.orientation = Quaternion()
+
+
+class PoseWithCovariance:
+    def __init__(self) -> None:
+        self.pose = Pose()
+        self.covariance: list = [0.0] * 36
+
+
+class TwistWithCovariance:
+    def __init__(self) -> None:
+        self.twist = Twist()
+        self.covariance: list = [0.0] * 36
+
+
+class Transform:
+    def __init__(self) -> None:
+        self.translation = Vector3()
+        self.rotation = Quaternion()
+
+
+class TransformStamped:
+    def __init__(self) -> None:
+        from std_msgs.msg import Header
+
+        self.header = Header()
+        self.child_frame_id: str = ""
+        self.transform = Transform()

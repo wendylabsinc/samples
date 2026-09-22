@@ -33,7 +33,7 @@ its own Dockerfile; the manifest is what ties them together.
 
 | Service | Directory | What it does |
 |---|---|---|
-| `base` | `rosmaster-a1-wendy/` | Motor bridge and telemetry, plus the sensor probe that captures camera and audio. Owns the serial link to the motor board, subscribes to `/cmd_vel`, publishes encoders, IMU and voltage. |
+| `base` | `rosmaster-a1-wendy/` | Motor bridge and telemetry, plus the sensor probe that captures camera and audio. Owns the serial link to the motor board, subscribes to `/cmd_vel`, publishes encoders, IMU and voltage, and dead-reckons them into `/odom` and the `odom -> base_link` transform. |
 | `lidar` | `rosmaster-a1-lidar-wendy/` | YDLIDAR driver, publishes `/scan` and a `/lidar_sensor_probe/status` heartbeat. Its probe skips camera and audio capture — `base` already owns those. |
 | `realsense` | `rosmaster-a1-realsense-wendy/` | RealSense driver, publishes depth, colour and both infrared streams. |
 | `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, MJPEG streams, controller handling, autonomy. |

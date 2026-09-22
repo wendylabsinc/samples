@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-rosidl-default-generators \
     ros-humble-sensor-msgs \
     ros-humble-geometry-msgs \
+    ros-humble-nav-msgs \
     ros-humble-std-msgs \
     udev \
     v4l-utils \
@@ -98,6 +99,7 @@ RUN mv /opt/ros/humble/bin/ros2 /opt/ros/humble/bin/ros2.real \
 WORKDIR /app
 COPY app/sensor_probe.py /app/sensor_probe.py
 COPY app/base_bridge.py /app/base_bridge.py
+COPY app/odometry.py /app/odometry.py
 COPY app/identify_serial.py /app/identify_serial.py
 COPY app/port_census.py /app/port_census.py
 COPY app/entrypoint.sh /app/entrypoint.sh
