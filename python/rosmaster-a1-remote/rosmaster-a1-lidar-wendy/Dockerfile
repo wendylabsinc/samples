@@ -98,6 +98,7 @@ COPY app/port_census.py /app/port_census.py
 COPY app/pick_lidar_port.sh /app/pick_lidar_port.sh
 COPY app/lidar_supervisor.sh /app/lidar_supervisor.sh
 COPY app/write_lidar_params.sh /app/write_lidar_params.sh
+COPY app/cyclone_env.sh /app/cyclone_env.sh
 COPY app/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

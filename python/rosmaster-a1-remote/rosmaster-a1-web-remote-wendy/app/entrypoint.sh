@@ -10,6 +10,7 @@ if [[ -f /opt/python3.10-stdlib.tar.gz ]]; then
 fi
 
 source /opt/ros/humble/setup.bash
+source /app/cyclone_env.sh
 
 echo "rosmaster-a1-web-remote starting"
 echo "PORT=${PORT:-8091}"
@@ -56,6 +57,8 @@ restore_stdlib() {
     ) 9>/tmp/python-stdlib-restore.lock
   fi
 }
+
+cyclone_env 26
 
 attempt=0
 backoff=5

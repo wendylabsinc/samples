@@ -238,8 +238,32 @@ again.
   drives before 2026-09-17. The lidar service now forces `reversion: false`
   (`app/write_lidar_params.sh`). Any autonomy result from before that date
   was measured with the sectors reversed.
-- **CycloneDDS needs a raised participant limit.** With several ROS apps on one
-  device, a new node fails with "no free participant index" on loopback.
+- **CycloneDDS needs a raised participant limit.** The agent gives every app
+  container `ROS_LOCALHOST_ONLY=1`, so Cyclone binds loopback, where
+  discovery is unicast to "participant index" port pairs and the default
+  `MaxAutoParticipantIndex` of 9 leaves only ten slots per host. base, lidar
+  and the agent's own ROS tools can fill all ten between them, and the next
+  node to start fails with "no free participant index for domain 0". Each of
+  our processes pins a fixed index from `cyclone_env.sh` (`app/cyclone_env.sh`
+  in each of the base, lidar and web services), leaving 0-9 for the agent:
+
+  | service | process | index |
+  |---|---|---|
+  | base | `sensor_probe.py` | 20 |
+  | base | `base_bridge.py` | 21 |
+  | base | `odometry.py` | 22 |
+  | lidar | `sensor_probe.py` | 23 |
+  | lidar | `ydlidar_ros2_driver_node` (run directly by `lidar_supervisor.sh`) | 24 |
+  | lidar | `static_transform_publisher` (`base_link -> laser_frame`) | 25 |
+  | web | `web_remote.py` | 26 |
+  | (reserved) | slam node / slam keeper | 27 / 28 |
+
+  The ceiling is raised to 60 (`cyclone_env`'s `DDS_MAX_PARTICIPANT_INDEX`,
+  default 60) so our pinned participants still discover, and are discovered
+  by, everything else — the realsense service's own trick
+  (`rosmaster-a1-realsense-wendy/app/entrypoint.sh`), extended. If
+  `wendy device ros2 echo` or `bag record` still report no free index, run
+  `wendy device ros2 exec -- daemon stop` first to free one more slot.
 - **Preview encoding is rationed.** JPEG encoding shares a thread with the
   command publisher, and four tiles at full frame rate starved it enough that
   the motor watchdog cut in. `PREVIEW_MAX_FPS` caps it; depth statistics are

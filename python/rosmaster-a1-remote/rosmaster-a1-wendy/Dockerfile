@@ -102,6 +102,7 @@ COPY app/base_bridge.py /app/base_bridge.py
 COPY app/odometry.py /app/odometry.py
 COPY app/identify_serial.py /app/identify_serial.py
 COPY app/port_census.py /app/port_census.py
+COPY app/cyclone_env.sh /app/cyclone_env.sh
 COPY app/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

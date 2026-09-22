@@ -31,18 +31,17 @@ Stdlib `unittest` only, no pytest, no fixtures library.
 (in the `.venv`) and a rosbag2 `.db3` recorded with
 `wendy device ros2 bag record /scan /odom`.
 
-## Shell: lidar service scripts (`tests/shell`)
+## Shell: service scripts (`tests/shell`)
 
-Cover the three bash scripts behind the lidar service's driver
-(`rosmaster-a1-lidar-wendy/app/lidar_supervisor.sh` and the port picker and
-params writer it calls) against real ports and params files, using
-`mktemp -d` fixtures instead of the car. The supervisor test runs the real
-params writer with a stand-in picker and driver. No ROS.
+Cover the bash scripts the base, lidar and web entrypoints run, using
+`mktemp -d` fixtures and sourced functions instead of the car. No stubs, no
+ROS.
 
 ```bash
 bash tests/shell/test_pick_lidar_port.sh
 bash tests/shell/test_write_lidar_params.sh
 bash tests/shell/test_lidar_supervisor.sh
+bash tests/shell/test_cyclone_env.sh
 ```
 
 ## JavaScript: web remote front end (`tests/web`)
