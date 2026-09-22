@@ -259,6 +259,12 @@ running `slam_bridge.py` on its own node, consumes them unchanged.
 - **The recovery manoeuvre is bounded.** When boxed in, the car reverses for at
   most 1.5 seconds and 0.25 m per episode, shared across attempts and never
   extended, then stops and hands control back.
+- **The forward arc after a reverse still stops for what is in its path.** For
+  its first 0.9 s the turn-out ignores a LiDAR return inside the stop distance,
+  so the arc can sweep the edge it is turning away from out of the front sector.
+  A return at or inside `AUTO_TURN_OUT_HARD_STOP_M` (0.25 m), or the depth
+  camera's stop, brakes it at once: the grace used to cover everything, and a
+  wheels-up run drove at a hand 0.22 m from the LiDAR for 0.8 s.
 
 **Nothing on this car senses behind it.** The LiDAR and the depth camera both
 face forward, so even a bounded reverse is blind. A rear sensor is the only real

@@ -1803,37 +1803,20 @@ class DepthSourceTests(ServerTestCase):
         self.assertIsNone(realsense["obstacle_p20_m"])
 
 
-class ReverseEscapeBoundTests(unittest.TestCase):
-    """The recovery manoeuvre drives the car into the one place it cannot see.
+class AutoPlannerHarness(unittest.TestCase):
+    """Drives the auto planner tick by tick on a clock the test owns.
 
-    Reported from driving the real car: "Lidar doesn't scan behind, so it got
-    stuck running away from something." The LiDAR covers roughly plus or minus
-    105 degrees at the front and the depth camera faces forward too, so nothing
-    on this chassis observes what is behind it, and an Ackermann car cannot
-    turn in place to go and look first. Reversing is therefore the single
-    manoeuvre guaranteed to move the car through unobserved space, and the
-    escape counters used to make it reverse further the longer it struggled:
-    less information bought more movement, which is backwards.
-
-    Every bound here is on a whole stuck episode rather than on one attempt.
-    A per attempt bound is not a bound at all when the state machine is free to
-    make another attempt.
+    No test methods of its own; the planner test classes below inherit it.
     """
 
-    # The bar, in the units an operator cares about. These are deliberately
-    # written as literals rather than read off the server's own constants: a
-    # test that asks the code what its limit is cannot notice the limit moving.
-    BLIND_REVERSE_CEILING_M = 0.30
-    BLIND_REVERSE_CEILING_S = 2.00
-
     AUTO = {"speed": 1.00, "stop_distance": 0.35, "avoid_distance": 0.85, "clear_distance": 1.60}
-    BOXED_IN_M = 0.20
-    CLEAR_M = 3.00
 
     def setUp(self):
         self.control = server.control
         self.clock = 10_000.0
         self.control._auto_state = self.control._new_auto_state()
+        # What the depth camera reports; tests override single keys.
+        self.depth = {}
 
     def tearDown(self):
         self.control._auto_state = self.control._new_auto_state()
@@ -1867,23 +1850,25 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         }
 
     def _depth_source(self):
+        depth = {
+            "updated_at": self.clock - 0.05,
+            "frames": 40,
+            # Clear ahead as far as the camera is concerned unless a test says
+            # otherwise: the LiDAR is what boxes the car in by default.
+            "obstacle_p20_m": 1.40,
+            "above_floor_near_m": 1.60,
+            "above_floor_close_pixels": 0,
+            "obstacle_valid_ratio": 0.60,
+            "above_floor_valid_ratio": 0.60,
+        }
+        depth.update(self.depth)
         return {
             "camera": "realsense",
             "feed_id": "realsense_depth",
             "stale_s": server.REALSENSE_STALE_S,
             "age_s": 0.05,
             "fresh": True,
-            "depth": {
-                "updated_at": self.clock - 0.05,
-                "frames": 40,
-                # Clear ahead as far as the camera is concerned. The LiDAR is
-                # what boxes the car in here, so the depth veto stays out of it.
-                "obstacle_p20_m": 1.40,
-                "above_floor_near_m": 1.60,
-                "above_floor_close_pixels": 0,
-                "obstacle_valid_ratio": 0.60,
-                "above_floor_valid_ratio": 0.60,
-            },
+            "depth": depth,
         }
 
     def _feedback(self):
@@ -1906,6 +1891,33 @@ class ReverseEscapeBoundTests(unittest.TestCase):
             )
             samples.append({"dt": dt, "linear_x": msg.linear.x, "steering_y": msg.linear.y, "state": decision["auto_state"], "action": decision["action"], "reason": decision["reason"]})
         return samples
+
+
+class ReverseEscapeBoundTests(AutoPlannerHarness):
+    """The recovery manoeuvre drives the car into the one place it cannot see.
+
+    Reported from driving the real car: "Lidar doesn't scan behind, so it got
+    stuck running away from something." The LiDAR covers roughly plus or minus
+    105 degrees at the front and the depth camera faces forward too, so nothing
+    on this chassis observes what is behind it, and an Ackermann car cannot
+    turn in place to go and look first. Reversing is therefore the single
+    manoeuvre guaranteed to move the car through unobserved space, and the
+    escape counters used to make it reverse further the longer it struggled:
+    less information bought more movement, which is backwards.
+
+    Every bound here is on a whole stuck episode rather than on one attempt.
+    A per attempt bound is not a bound at all when the state machine is free to
+    make another attempt.
+    """
+
+    # The bar, in the units an operator cares about. These are deliberately
+    # written as literals rather than read off the server's own constants: a
+    # test that asks the code what its limit is cannot notice the limit moving.
+    BLIND_REVERSE_CEILING_M = 0.30
+    BLIND_REVERSE_CEILING_S = 2.00
+
+    BOXED_IN_M = 0.20
+    CLEAR_M = 3.00
 
     @staticmethod
     def _reversing(samples):
@@ -2047,6 +2059,75 @@ class ReverseEscapeBoundTests(unittest.TestCase):
         self.assertIn("reverse_used_s", state)
         self.assertIn("reverse_used_m", state)
         self.assertGreater(state["reverse_used_s"], 0.0)
+
+
+class TurnOutHazardTests(AutoPlannerHarness):
+    """The forward arc after a reverse must still stop for what is in front.
+
+    Wheels-up bench run, 2026-09-22 14:38: autonomy reversed, entered the
+    turn-out, and a hand held 0.22 m in front of the nose was driven towards at
+    0.32 for about 0.8 s before the planner braked. The turn-out ignored every
+    hazard for its first 0.9 s. That grace lets the arc sweep the edge of the
+    obstacle it is turning away from out of the front sector without braking
+    for it again, so it stays -- but only for a LiDAR return in the outer band
+    of the stop distance. Something at or inside the hard floor, or anything
+    the forward-facing depth camera sees above the floor within the stop
+    distance, is in the path, whatever the car is turning away from.
+    """
+
+    BOXED_IN_M = 0.20
+    # Not the stop distance: the reverse has bought room, but the corridor is
+    # not open enough to cruise (clear distance 1.60), so the planner turns out.
+    ROOM_AFTER_REVERSE_M = 0.90
+    HAND_M = 0.22            # the bench run's hand, LiDAR distance
+    EDGE_M = 0.30            # inside the stop distance, outside the hard floor
+
+    def _into_turn_out(self):
+        """Box the car in, give it room once it reverses, stop at the turn-out."""
+        self._drive(0.5, self.BOXED_IN_M)
+        self.assertEqual(self.control._auto_state["name"], "reverse_escape")
+        for _ in range(80):
+            self._drive(0.05, self.ROOM_AFTER_REVERSE_M)
+            if self.control._auto_state["name"] == "turn_out":
+                break
+        self.assertEqual(self.control._auto_state["name"], "turn_out")
+        forward = self._drive(0.05, self.ROOM_AFTER_REVERSE_M)
+        self.assertGreater(forward[-1]["linear_x"], 0.0, "the turn-out drives forward")
+
+    def test_a_hand_inside_the_hard_floor_brakes_the_turn_out_at_once(self):
+        with self._driving():
+            self._into_turn_out()
+            samples = self._drive(0.15, self.HAND_M)
+        self.assertTrue(
+            all(sample["linear_x"] <= 0.0 for sample in samples),
+            f"drove towards a hand at {self.HAND_M} m: {[(s['action'], s['linear_x']) for s in samples]}",
+        )
+        self.assertTrue(samples[0]["action"].startswith("brake"), samples[0]["action"])
+
+    def test_the_depth_camera_brakes_the_turn_out_at_once(self):
+        with self._driving():
+            self._into_turn_out()
+            self.depth = {"above_floor_near_m": 0.25, "above_floor_close_pixels": server.HP60C_RED_MIN_PIXELS * 4}
+            samples = self._drive(0.15, self.ROOM_AFTER_REVERSE_M)
+        self.assertTrue(
+            all(sample["linear_x"] <= 0.0 for sample in samples),
+            f"drove at an object the depth camera sees: {[(s['action'], s['linear_x']) for s in samples]}",
+        )
+
+    def test_an_edge_in_the_outer_stop_band_keeps_the_turn_out_grace(self):
+        """The case the grace exists for: the arc sweeps an edge out of the sector."""
+        with self._driving():
+            self._into_turn_out()
+            samples = self._drive(0.4, self.EDGE_M)
+        self.assertTrue(all(sample["linear_x"] > 0.0 for sample in samples), [s["action"] for s in samples])
+        self.assertEqual(self.control._auto_state["name"], "turn_out")
+
+    def test_an_edge_that_outlasts_the_grace_still_brakes(self):
+        with self._driving():
+            self._into_turn_out()
+            samples = self._drive(1.2, self.EDGE_M)
+        self.assertTrue(samples[-1]["action"].startswith(("brake", "blocked")), samples[-1]["action"])
+        self.assertEqual(samples[-1]["linear_x"], 0.0)
 
 
 class FrameEndpointTests(ServerTestCase):
