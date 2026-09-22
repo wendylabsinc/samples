@@ -73,6 +73,14 @@ AUTO_MAX_STEERING = float(os.environ.get("AUTO_MAX_STEERING", "0.045"))
 AUTO_CLEAR_DISTANCE = float(os.environ.get("AUTO_CLEAR_DISTANCE", "1.60"))
 AUTO_BRAKE_S = float(os.environ.get("AUTO_BRAKE_S", "0.20"))
 AUTO_TURN_OUT_S = float(os.environ.get("AUTO_TURN_OUT_S", "1.45"))
+# The turn-out's first AUTO_TURN_OUT_GRACE_S ignore a LiDAR return inside the
+# stop distance, so the arc can sweep the edge of the obstacle it is turning
+# away from out of the front sector without braking for it again. A return at
+# or inside this floor is not an edge being swept past but something in the
+# path -- the wheels-up bench run of 2026-09-22 drove at a hand held at 0.22 m
+# for 0.8 s -- so it brakes at once, as does the depth camera's stop.
+AUTO_TURN_OUT_GRACE_S = 0.90
+AUTO_TURN_OUT_HARD_STOP_M = float(os.environ.get("AUTO_TURN_OUT_HARD_STOP_M", "0.25"))
 # The blind reverse budget ===================================================
 #
 # RESIDUAL RISK, and it is not removed by anything below. This car has no rear
@@ -2043,7 +2051,11 @@ class RosmasterControl(Node):
                         "forward arc toward open corridor",
                         state,
                     )
-            elif state["name"] == "turn_out" and hazard and now - state["entered_at"] > 0.90:
+            elif state["name"] == "turn_out" and hazard and (
+                now - state["entered_at"] > AUTO_TURN_OUT_GRACE_S
+                or depth_stop
+                or front_near <= min(AUTO_TURN_OUT_HARD_STOP_M, auto["stop_distance"])
+            ):
                 state = self._enter_auto_state(
                     "brake",
                     now,
