@@ -140,17 +140,22 @@ class DeadReckoner:
         imu_stale_s: float = 0.5,
         bias_still_s: float = 2.0,
         still_speed_mps: float = 0.01,
+        bias_quiet_rad_s: float = 0.05,
+        bias_max_rad_s: float = 0.09,
     ) -> None:
         self._clock = clock
         self.max_dt_s = max_dt_s
         self.imu_stale_s = imu_stale_s
         self.bias_still_s = bias_still_s
         self.still_speed_mps = still_speed_mps
+        self.bias_quiet_rad_s = bias_quiet_rad_s
+        self.bias_max_rad_s = bias_max_rad_s
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
         self.bias: float | None = None
         self.dropped = 0
+        self.dropped_bias_windows = 0
         self.frames = 0
         self.imu_stale = False
         self._gyro: float | None = None
@@ -159,6 +164,8 @@ class DeadReckoner:
         self._still_since: float | None = None
         self._still_sum = 0.0
         self._still_count = 0
+        self._still_min = math.inf
+        self._still_max = -math.inf
 
     @property
     def state(self) -> str:
@@ -175,6 +182,8 @@ class DeadReckoner:
         if self._still_since is not None:
             self._still_sum += yaw_rate
             self._still_count += 1
+            self._still_min = min(self._still_min, yaw_rate)
+            self._still_max = max(self._still_max, yaw_rate)
 
     def velocity(self, vx: float) -> Pose | None:
         if not math.isfinite(vx) or abs(vx) > MAX_SPEED_MPS:
@@ -196,28 +205,52 @@ class DeadReckoner:
         return Pose(self.x, self.y, self.yaw, vx, yaw_rate, now)
 
     def _update_bias(self, now: float, still: bool) -> None:
-        """Adopt the mean gyro reading over a full still window as the bias.
+        """Adopt the mean gyro reading over a full still window as the bias,
+        but only when the window is gyro-quiet.
 
-        The window restarts on motion and after every adoption, so each
-        estimate comes from fresh samples; later windows blend 20 % in so a
-        single odd window cannot swing the bias.
+        "Still" is judged by the encoders, and the encoders see nothing when
+        the car is lifted or turned by hand: on 2026-09-17 a hand-turn 4 s
+        before a drive became a -0.17 rad/s bias and +10 rad of phantom yaw.
+        So a window whose samples spread more than `bias_quiet_rad_s` around
+        their mean, or whose mean exceeds `bias_max_rad_s` (no MEMS gyro sits
+        that far off zero), is counted in `dropped_bias_windows` and discarded.
+        The window restarts on motion and after every decision, so each
+        estimate comes from fresh samples; later windows blend 20 % in, and
+        the result is clamped to +-`bias_max_rad_s` as a last line.
         """
         if not still:
             self._still_since = None
-            self._still_sum = 0.0
-            self._still_count = 0
+            self._reset_window_sums()
             return
         if self._still_since is None:
             self._still_since = now
-            self._still_sum = 0.0
-            self._still_count = 0
+            self._reset_window_sums()
             return
         if now - self._still_since >= self.bias_still_s and self._still_count > 0:
             mean = self._still_sum / self._still_count
-            self.bias = mean if self.bias is None else 0.8 * self.bias + 0.2 * mean
+            quiet = (
+                self._still_max - mean <= self.bias_quiet_rad_s
+                and mean - self._still_min <= self.bias_quiet_rad_s
+                and abs(mean) <= self.bias_max_rad_s
+            )
+            if quiet:
+                blended = mean if self.bias is None else 0.8 * self.bias + 0.2 * mean
+                self.bias = max(-self.bias_max_rad_s, min(self.bias_max_rad_s, blended))
+            else:
+                self.dropped_bias_windows += 1
             self._still_since = now
-            self._still_sum = 0.0
-            self._still_count = 0
+            self._reset_window_sums()
+
+    def _reset_window_sums(self) -> None:
+        self._still_sum = 0.0
+        self._still_count = 0
+        self._still_min = math.inf
+        self._still_max = -math.inf
+
+    def now(self) -> float:
+        """The reckoner's own clock, for callers (the node's logging) that
+        need to time things against the same clock as everything else."""
+        return self._clock()
 
     def status(self) -> dict:
         now = self._clock()
@@ -231,6 +264,7 @@ class DeadReckoner:
             "y": round(self.y, 4),
             "yaw": round(self.yaw, 4),
             "dropped": self.dropped,
+            "dropped_bias_windows": self.dropped_bias_windows,
             "frames": self.frames,
         }
 
@@ -257,6 +291,8 @@ class OdometryNode(Node):
             imu_stale_s=_env_float("ODOM_IMU_STALE_S", 0.5),
             bias_still_s=_env_float("ODOM_BIAS_STILL_S", 2.0),
             still_speed_mps=_env_float("ODOM_STILL_SPEED_MPS", 0.01),
+            bias_quiet_rad_s=_env_float("ODOM_BIAS_QUIET_RAD_S", 0.05),
+            bias_max_rad_s=_env_float("ODOM_BIAS_MAX_RAD_S", 0.09),
         )
         self.frame = frame or os.environ.get("ODOM_FRAME", "odom")
         self.child_frame = child_frame or os.environ.get("ODOM_CHILD_FRAME", "base_link")
@@ -267,12 +303,23 @@ class OdometryNode(Node):
         self.create_subscription(Imu, "/imu/data_raw", self.on_imu, qos_profile_sensor_data)
         self.create_subscription(Twist, "/vel_raw", self.on_velocity, 10)
         self.create_timer(1.0, self.publish_status)
+        self._dropped_bias_windows_seen = 0
+        self._first_vel_at: float | None = None
+        self._last_calibrating_log_at: float | None = None
 
     def on_imu(self, msg) -> None:
         self.reckoner.imu(float(msg.angular_velocity.z))
 
     def on_velocity(self, msg) -> None:
         pose = self.reckoner.velocity(float(msg.linear.x))
+        if self._first_vel_at is None and self.reckoner.frames > 0:
+            self._first_vel_at = self.reckoner.now()
+        if self.reckoner.dropped_bias_windows != self._dropped_bias_windows_seen:
+            self._dropped_bias_windows_seen = self.reckoner.dropped_bias_windows
+            print(
+                f"ODOMETRY dropped a still window as gyro bias: not quiet (dropped={self._dropped_bias_windows_seen})",
+                flush=True,
+            )
         if pose is None:
             return
         stamp = self.get_clock().now().to_msg()
@@ -281,8 +328,19 @@ class OdometryNode(Node):
             self.tf_broadcaster.sendTransform(transform_message(pose, self.frame, self.child_frame, stamp))
 
     def publish_status(self) -> None:
+        status = self.reckoner.status()
+        if status["state"] == "calibrating_gyro" and self._first_vel_at is not None:
+            now = self.reckoner.now()
+            elapsed = now - self._first_vel_at
+            since_last_log = math.inf if self._last_calibrating_log_at is None else now - self._last_calibrating_log_at
+            if elapsed >= 10.0 and since_last_log >= 10.0:
+                print(
+                    f"ODOMETRY still calibrating the gyro after {elapsed:.1f} s (dropped={status['dropped_bias_windows']})",
+                    flush=True,
+                )
+                self._last_calibrating_log_at = now
         msg = String()
-        msg.data = json.dumps(self.reckoner.status(), sort_keys=True)
+        msg.data = json.dumps(status, sort_keys=True)
         self.status_pub.publish(msg)
 
 

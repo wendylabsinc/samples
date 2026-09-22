@@ -11,6 +11,7 @@
 # Run: bash tests/shell/test_lidar_supervisor.sh
 set -u
 SUPERVISOR="$(dirname "$0")/../../rosmaster-a1-lidar-wendy/app/lidar_supervisor.sh"
+PARAMS_WRITER="$(dirname "$0")/../../rosmaster-a1-lidar-wendy/app/write_lidar_params.sh"
 failures=0
 
 fail() { echo "FAIL - $1"; failures=$((failures + 1)); }
@@ -42,7 +43,8 @@ wait_for_lines() {
 run_supervisor() {
   local log=$1 picker=$2 params=$3
   shift 3
-  DRIVER_LOG="${log}" YDLIDAR_RETRY_S=0 YDLIDAR_PICKER="${picker}" YDLIDAR_PARAMS="${params}" "$@" \
+  DRIVER_LOG="${log}" YDLIDAR_RETRY_S=0 YDLIDAR_PICKER="${picker}" YDLIDAR_PARAMS="${params}" \
+    YDLIDAR_PARAMS_WRITER="${PARAMS_WRITER}" "$@" \
     bash "${SUPERVISOR}" "${work}/driver" --ros-args --params-file "${params}" > "${log}.out" 2> "${log}.err" &
   echo $!
 }
@@ -52,7 +54,7 @@ stop() { kill "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
 # --- 1. the driver exits: the supervisor re-picks the port and runs it again ---
 root="${work}/retry"; mkdir -p "${root}"
 printf '#!/usr/bin/env bash\necho %s\n' "${root}/ttyUSB2" > "${root}/picker"
-printf 'ydlidar_ros2_driver_node:\n  ros__parameters:\n    port: "/dev/ttyUSB0"\n    baudrate: 230400\n' > "${root}/params.yaml"
+printf 'ydlidar_ros2_driver_node:\n  ros__parameters:\n    port: "/dev/ttyUSB0"\n    baudrate: 230400\n    reversion: true\n' > "${root}/params.yaml"
 touch "${root}/ttyUSB2"
 pid=$(run_supervisor "${root}/driver.log" "${root}/picker" "${root}/params.yaml" env)
 if wait_for_lines "${root}/driver.log" 2 5; then
@@ -70,6 +72,11 @@ if grep -q "port: \"${root}/ttyUSB2\"" "${root}/params.yaml"; then
   pass "picked port is written into the params file"
 else
   fail "params file port: $(grep port: "${root}/params.yaml")"
+fi
+if grep -q "^    reversion: false$" "${root}/params.yaml"; then
+  pass "reversion is forced off in the params file"
+else
+  fail "params file reversion: $(grep reversion: "${root}/params.yaml")"
 fi
 if grep -q "baudrate: 230400" "${root}/params.yaml"; then
   pass "other params are left alone"
@@ -113,7 +120,7 @@ fi
 # --- 3. YDLIDAR_PORT forces a port and bypasses the picker ---
 root="${work}/forced"; mkdir -p "${root}"
 printf '#!/usr/bin/env bash\necho picker-should-not-run >> %s\nexit 1\n' "${root}/driver.log" > "${root}/picker"
-printf 'port: "/dev/ttyUSB0"\n' > "${root}/params.yaml"
+printf 'port: "/dev/ttyUSB0"\nreversion: true\n' > "${root}/params.yaml"
 touch "${root}/forced-port"
 pid=$(run_supervisor "${root}/driver.log" "${root}/picker" "${root}/params.yaml" env YDLIDAR_PORT="${root}/forced-port")
 wait_for_lines "${root}/driver.log" 1 5
@@ -127,6 +134,28 @@ if grep -q "port: \"${root}/forced-port\"" "${root}/params.yaml"; then
   pass "YDLIDAR_PORT: forced port written into the params file"
 else
   fail "YDLIDAR_PORT params: $(cat "${root}/params.yaml")"
+fi
+
+# --- 4. the params writer fails: the driver still starts, and the failure is logged ---
+# A LiDAR on the port the params file already names, with a warning, beats no
+# LiDAR at all.
+root="${work}/writerfail"; mkdir -p "${root}"
+printf '#!/usr/bin/env bash\necho %s\n' "${root}/ttyUSB2" > "${root}/picker"
+printf '#!/usr/bin/env bash\nexit 1\n' > "${root}/writer"
+printf 'port: "/dev/ttyUSB0"\n' > "${root}/params.yaml"
+touch "${root}/ttyUSB2"
+pid=$(run_supervisor "${root}/driver.log" "${root}/picker" "${root}/params.yaml" env YDLIDAR_PARAMS_WRITER="${root}/writer")
+wait_for_lines "${root}/driver.log" 1 5
+stop "${pid}"
+if grep -q "^run " "${root}/driver.log"; then
+  pass "params writer failure: driver still started"
+else
+  fail "params writer failure: driver never ran"
+fi
+if grep -q "LIDAR_SUPERVISOR could not rewrite ${root}/params.yaml; launching with its current contents" "${root}/driver.log.err"; then
+  pass "params writer failure: logged"
+else
+  fail "params writer failure log: $(head -3 "${root}/driver.log.err")"
 fi
 
 if [[ ${failures} -gt 0 ]]; then

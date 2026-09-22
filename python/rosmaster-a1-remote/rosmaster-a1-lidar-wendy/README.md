@@ -21,6 +21,13 @@ alive after the driver had died) and re-picks the port and relaunches with
 backoff every time the driver exits, forever. `YDLIDAR_PORT` forces a port.
 The `base_link -> laser_frame` static transform is started separately.
 
+The scan is published with the driver's `reversion` parameter forced off
+(`app/write_lidar_params.sh`). The shipped T-mini params rotate the scan by
+180 degrees, which on this car put angle 0 at the tail; angle 0 is the nose
+now, and `base_link -> laser_frame` is the identity rotation. Check it after
+any driver or params change: hold a hand 30 cm in front of the nose and
+`lidar.sectors.front.near_m` in the web service's `/api/status` must drop.
+
 Deploy from the parent directory, alongside the other three services:
 
 ```bash

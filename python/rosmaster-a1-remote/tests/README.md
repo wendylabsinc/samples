@@ -1,8 +1,8 @@
 # Tests
 
-Two independent suites live here. Neither depends on the other.
+Three independent suites live here. None depends on another.
 
-## Python: web remote HTTP API (`tests/python`)
+## Python: web remote, odometry and the bag tool (`tests/python`)
 
 Exercises `rosmaster-a1-web-remote-wendy/app/server.py` off the robot, with
 fake ROS packages (`tests/stubs`) standing in for `rclpy` and the ROS
@@ -25,6 +25,30 @@ Run the suite from the repository root, with the venv active:
 ```
 
 Stdlib `unittest` only, no pytest, no fixtures library.
+
+`scripts/odom_scan_consistency.py` is covered by
+`tests/python/test_odom_scan_consistency.py`; the tool itself needs numpy
+(in the `.venv`) and a rosbag2 `.db3` recorded with
+`wendy device ros2 bag record /scan /odom`.
+
+`test_slam_params.py` guards `rosmaster-a1-slam-wendy/app/slam_params.yaml`
+against regressing to slam_toolbox's stock `base_footprint`/interactive-mode
+defaults, and `test_slam_keeper.py` covers `slam_keeper.py`'s session store
+and state machine — both with the same stub arrangement, no ROS 2 installed.
+
+## Shell: service scripts (`tests/shell`)
+
+Cover the bash scripts the base, lidar, web and slam entrypoints run, using
+`mktemp -d` fixtures and sourced functions instead of the car. No stubs, no
+ROS.
+
+```bash
+bash tests/shell/test_pick_lidar_port.sh
+bash tests/shell/test_write_lidar_params.sh
+bash tests/shell/test_lidar_supervisor.sh
+bash tests/shell/test_cyclone_env.sh
+bash tests/shell/test_slam_args.sh
+```
 
 ## JavaScript: web remote front end (`tests/web`)
 

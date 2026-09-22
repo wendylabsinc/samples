@@ -16,6 +16,7 @@ find /usr -path '*/encodings/__init__.py' -print 2>/dev/null | head -20 || true
 
 source /opt/ros/humble/setup.bash
 source /ros_ws/install/setup.bash
+source /app/cyclone_env.sh
 
 export AMENT_PREFIX_PATH="/ros_ws/install/ydlidar_ros2_driver:/ros_ws/install/yahboomcar_ctrl:/ros_ws/install/yahboomcar_bringup:/ros_ws/install/yahboomcar_msgs:/opt/ros/humble:${AMENT_PREFIX_PATH:-}"
 export CMAKE_PREFIX_PATH="${AMENT_PREFIX_PATH}"
@@ -92,6 +93,7 @@ export SENSOR_PROBE_STATUS_TOPIC="${SENSOR_PROBE_STATUS_TOPIC:-/lidar_sensor_pro
 export PROBE_CAMERA=0
 export PROBE_AUDIO=0
 unset PROBE_RAW_LIDAR
+cyclone_env 23
 supervise_python SENSOR_PROBE_SUPERVISOR /app/sensor_probe.py &
 sensor_probe_pid=$!
 
@@ -108,7 +110,11 @@ lidar_driver=/ros_ws/install/ydlidar_ros2_driver/lib/ydlidar_ros2_driver/ydlidar
 # driver, and that is exactly why the driver's death went unnoticed on
 # 2026-09-16: the launch process stayed alive on this publisher alone. It is
 # static, so it runs on its own and is simply restarted if it ever exits.
+#
+# Each of the two ROS processes started below is a single participant with no
+# ROS child, so each pins its own Cyclone index (see cyclone_env.sh).
 tf_supervisor() {
+  cyclone_env 25
   while true; do
     /opt/ros/humble/lib/tf2_ros/static_transform_publisher \
       --x 0 --y 0 --z 0.02 --qx 0 --qy 0 --qz 0 --qw 1 \
@@ -127,6 +133,7 @@ tf_pid=$!
 # treating the first failure as permanent: lidar_supervisor.sh re-picks the
 # port and relaunches the driver -- run directly as its child, not through
 # `ros2 launch` -- every time the driver exits, forever.
+cyclone_env 24
 YDLIDAR_PARAMS="${lidar_params}" bash /app/lidar_supervisor.sh \
   "${lidar_driver}" --ros-args --params-file "${lidar_params}" &
 lidar_pid=$!

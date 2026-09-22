@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Keep the YDLIDAR driver running: pick its serial port, write it into the
-# params file, run the driver, and start over whenever the driver exits.
+# Keep the YDLIDAR driver running: pick its serial port, write it (and
+# reversion off) into the params file, run the driver, and start over whenever
+# the driver exits.
 #
 # The driver is run directly as this script's child -- not through
 # `ros2 launch`. On 2026-09-16 the launch's static_transform_publisher
@@ -18,12 +19,14 @@
 #
 # Usage: lidar_supervisor.sh <driver command...>
 #   YDLIDAR_PORT     force a port instead of asking the picker (ops override)
-#   YDLIDAR_PARAMS   the driver's params yaml (its `port:` line is rewritten)
+#   YDLIDAR_PARAMS   the driver's params yaml (rewritten by the params writer)
 #   YDLIDAR_PICKER   the picker script
+#   YDLIDAR_PARAMS_WRITER  the params writer script (write_lidar_params.sh)
 #   YDLIDAR_RETRY_S  initial seconds between attempts; grows by 5 s to 30 s
 set -u
 params="${YDLIDAR_PARAMS:-/ros_ws/install/ydlidar_ros2_driver/share/ydlidar_ros2_driver/params/Tmini.yaml}"
 picker="${YDLIDAR_PICKER:-/app/pick_lidar_port.sh}"
+params_writer="${YDLIDAR_PARAMS_WRITER:-/app/write_lidar_params.sh}"
 backoff="${YDLIDAR_RETRY_S:-5}"
 
 if [[ $# -eq 0 ]]; then
@@ -45,11 +48,10 @@ while true; do
     continue
   fi
   echo "LIDAR_SUPERVISOR attempt=${attempt} using ${port}"
-  if [[ -w "${params}" ]]; then
-    # Rewrite in place without `sed -i` (GNU and BSD disagree on its syntax),
-    # keeping the file's inode and mode.
-    rewritten=$(sed "s|port: .*|port: \"${port}\"|" "${params}") && printf '%s\n' "${rewritten}" > "${params}"
-  fi
+  # Port for this attempt, and reversion off (the scan came up rotated 180
+  # degrees with the driver's shipped T-mini params; see the script).
+  bash "${params_writer}" "${params}" "${port}" || \
+    echo "LIDAR_SUPERVISOR could not rewrite ${params}; launching with its current contents" >&2
   "$@"
   echo "LIDAR_SUPERVISOR driver exited status=$? after attempt=${attempt}; retrying in ${backoff}s" >&2
   sleep "${backoff}"
