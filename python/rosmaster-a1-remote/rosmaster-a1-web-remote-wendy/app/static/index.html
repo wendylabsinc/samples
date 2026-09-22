@@ -475,6 +475,40 @@
         background: #080a09;
       }
 
+      /* The Map panel. The canvas is the LiDAR canvas's size and style; the
+         toolbar wraps like the drive toggles; the readout is diagnostic text
+         of unknown length and scrolls in its own line rather than widening
+         the column. */
+      .slam-canvas {
+        cursor: grab;
+        touch-action: none;
+      }
+
+      .slam-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .slam-toolbar button {
+        min-height: 30px;
+        padding: 0 10px;
+      }
+
+      .slam-readout {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        color: #b7c3bd;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      .slam-readout .warn {
+        color: #f0b429;
+      }
+
       /* The Controller panel. Every line in it is diagnostic text of unknown
          length, so each one scrolls inside its own box rather than widening
          the column and pushing the page sideways. */
@@ -487,8 +521,15 @@
          the later display wins and a hidden diagnostic block would stay on
          screen. The debug byte dump is one, so it needs saying again here. A
          node:vm test cannot see this: the harness has no CSS, so classList is
-         all it can assert on and both orderings look identical to it. */
+         all it can assert on and both orderings look identical to it. The
+         Map panel's body (.panel-body, declared above at the same specificity)
+         has the identical trap: Hide toggles slamBody's hidden class, and
+         without this rule the canvas would stay on screen frozen. */
       .diagnostic.hidden {
+        display: none;
+      }
+
+      .panel-body.hidden {
         display: none;
       }
 
@@ -630,6 +671,33 @@
              empty here: a tile written into the markup would be a tile the
              page shows whether or not the car has that camera. -->
         <div id="cameraGallery" class="camera-gallery"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <span>Map</span>
+          <span class="gallery-tools">
+            <span id="slamState">connecting</span>
+            <span id="slamStats"></span>
+            <button id="slamHide" type="button">Hide</button>
+          </span>
+        </div>
+        <div id="slamBody" class="panel-body">
+          <canvas id="slamCanvas" class="lidar-canvas slam-canvas" width="640" height="400"></canvas>
+          <div class="slam-toolbar">
+            <label class="toggle">
+              <input id="slamFollow" type="checkbox" checked />
+              <span>Follow</span>
+            </label>
+            <button id="slamZoomIn" type="button" aria-label="Zoom in">+</button>
+            <button id="slamZoomOut" type="button" aria-label="Zoom out">−</button>
+            <button id="slamReset" type="button">Reset view</button>
+          </div>
+          <div class="slam-readout">
+            <span id="slamReadout">Waiting for the car</span>
+            <span id="slamReason" class="warn"></span>
+          </div>
+        </div>
       </section>
 
       <section class="panel">
@@ -822,6 +890,7 @@
     </main>
 
     <script src="/static/gamepad.js"></script>
+    <script src="/static/slam.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>
