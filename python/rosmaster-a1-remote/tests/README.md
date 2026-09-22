@@ -26,6 +26,20 @@ Run the suite from the repository root, with the venv active:
 
 Stdlib `unittest` only, no pytest, no fixtures library.
 
+## Shell: lidar service scripts (`tests/shell`)
+
+Cover the three bash scripts behind the lidar service's driver
+(`rosmaster-a1-lidar-wendy/app/lidar_supervisor.sh` and the port picker and
+params writer it calls) against real ports and params files, using
+`mktemp -d` fixtures instead of the car. The supervisor test runs the real
+params writer with a stand-in picker and driver. No ROS.
+
+```bash
+bash tests/shell/test_pick_lidar_port.sh
+bash tests/shell/test_write_lidar_params.sh
+bash tests/shell/test_lidar_supervisor.sh
+```
+
 ## JavaScript: web remote front end (`tests/web`)
 
 Node's built-in test runner, stdlib only, in two layers.

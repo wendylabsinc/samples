@@ -97,6 +97,7 @@ COPY app/usb_reset.py /app/usb_reset.py
 COPY app/port_census.py /app/port_census.py
 COPY app/pick_lidar_port.sh /app/pick_lidar_port.sh
 COPY app/lidar_supervisor.sh /app/lidar_supervisor.sh
+COPY app/write_lidar_params.sh /app/write_lidar_params.sh
 COPY app/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
