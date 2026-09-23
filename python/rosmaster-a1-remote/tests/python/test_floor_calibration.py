@@ -75,6 +75,17 @@ class StoreTests(unittest.TestCase):
         self.path.write_text(json.dumps(data))
         self.assertEqual(sorted(self.store.load()), ["realsense"])
 
+    def test_truncated_or_overflowing_fields_are_corrupt_not_a_crash(self):
+        self.store.save({"realsense": calibration_for(camera_plane(0.21, 18.0))})
+        good = json.loads(self.path.read_text())["cameras"]["realsense"]
+        for field, value in (("floor_span_m", [0.18]), ("plane", {"normal": [0.0, -1.0], "offset_m": 0.21}), ("inliers", float("inf"))):
+            with self.subTest(field=field):
+                entry = dict(good, **{field: value})
+                self.path.write_text(json.dumps({"version": 1, "cameras": {"realsense": entry, "hp60c": good}}))
+                self.lines.clear()
+                self.assertEqual(sorted(self.store.load()), ["hp60c"])
+                self.assertTrue(any("camera=realsense" in line for line in self.lines), self.lines)
+
     def test_the_write_is_atomic(self):
         first = {"realsense": calibration_for(camera_plane(0.21, 18.0))}
         self.assertTrue(self.store.save(first))

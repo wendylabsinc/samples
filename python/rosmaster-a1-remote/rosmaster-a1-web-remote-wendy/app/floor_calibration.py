@@ -25,6 +25,9 @@ from floor_model import FloorFit, FloorPlane
 
 FILE_VERSION = 1
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# Everything a malformed calibration entry can raise while it is parsed:
+# json accepts Infinity, and int() of it overflows.
+CORRUPT_ERRORS = (ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError)
 
 
 def iso_utc(epoch_s: float) -> str:
@@ -65,7 +68,7 @@ class Calibration:
 
     @classmethod
     def from_json(cls, data: dict) -> "Calibration":
-        """Raises KeyError, TypeError or ValueError on anything malformed."""
+        """Raises one of CORRUPT_ERRORS on anything malformed."""
         plane = FloorPlane.from_normal_offset(data["plane"]["normal"], float(data["plane"]["offset_m"]))
         reference = float(data["reference_height_m"])
         source = str(data["source"])
@@ -105,14 +108,14 @@ class CalibrationStore:
             cameras = data["cameras"]
             if not isinstance(cameras, dict):
                 raise TypeError("cameras is not an object")
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        except CORRUPT_ERRORS as exc:
             self._log(f"FLOOR_CALIBRATION_CORRUPT path={self.path} {type(exc).__name__}: {exc}")
             return {}
         loaded = {}
         for camera, entry in cameras.items():
             try:
                 loaded[str(camera)] = Calibration.from_json(entry)
-            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            except CORRUPT_ERRORS as exc:
                 self._log(f"FLOOR_CALIBRATION_CORRUPT path={self.path} camera={camera} {type(exc).__name__}: {exc}")
         return loaded
 
