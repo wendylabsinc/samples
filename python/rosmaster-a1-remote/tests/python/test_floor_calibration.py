@@ -214,13 +214,25 @@ class ManagerCalibrateTests(ManagerTestCase):
         self.assertEqual(result["reason"], "no reference height yet — press Recalibrate with the car on the floor")
 
     def test_a_startup_calibration_on_the_floor_replaces_the_plane_and_keeps_the_reference(self):
-        saved = {"realsense": calibration_for(camera_plane(0.21, 12.0), reference_height_m=0.21)}
+        saved = {"realsense": calibration_for(camera_plane(0.21, 12.0), reference_height_m=0.23)}
         manager = self.with_camera(self.manager(saved))
         result = calibrate_with(manager, "realsense", "startup", frames())
         self.assertTrue(result["accepted"], result["reason"])
         self.assertAlmostEqual(result["calibration"]["pitch_deg"], CAR_PITCH_DEG, delta=0.5)
-        self.assertEqual(result["calibration"]["reference_height_m"], 0.21)
+        self.assertEqual(result["calibration"]["reference_height_m"], 0.23)
         self.assertEqual(result["calibration"]["source"], "startup")
+        reloaded = CalibrationStore(self.dir / "floor_calibration.json").load()
+        self.assertEqual(reloaded["realsense"].reference_height_m, 0.23, "a startup calibration never changes the reference")
+
+    def test_an_operator_calibration_replaces_an_old_reference(self):
+        saved = {"realsense": calibration_for(camera_plane(0.19, 18.0))}
+        manager = self.with_camera(self.manager(saved))
+        result = calibrate_with(manager, "realsense", "operator", frames())
+        self.assertTrue(result["accepted"], result["reason"])
+        self.assertEqual(result["calibration"]["source"], "operator")
+        self.assertAlmostEqual(result["calibration"]["reference_height_m"], CAR_HEIGHT_M, delta=0.01)
+        reloaded = CalibrationStore(self.dir / "floor_calibration.json").load()
+        self.assertAlmostEqual(reloaded["realsense"].reference_height_m, CAR_HEIGHT_M, delta=0.01)
 
     def test_a_startup_calibration_on_blocks_is_rejected_and_the_saved_one_stays(self):
         saved = {"realsense": calibration_for(camera_plane(0.21, 18.0), created_at=self.wall.t - 60.0)}
