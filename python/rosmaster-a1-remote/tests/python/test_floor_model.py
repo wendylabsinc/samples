@@ -15,11 +15,14 @@ import unittest
 import numpy as np
 
 from tests.python import depth_scene
-from tests.python.depth_scene import CAR_HEIGHT_M, D435I_640, camera_plane, clutter, wall
+from tests.python.depth_scene import CAR_HEIGHT_M, CAR_PITCH_DEG, D435I_640, block, camera_plane, clutter, render, wall
 
 from floor_model import (  # noqa: E402  (depth_scene put the app directory on sys.path)
     CameraIntrinsics,
     FloorPlane,
+    HealthMonitor,
+    ObstacleConfig,
+    classify,
     deproject,
     fit_floor,
     project_floor_point,
@@ -173,6 +176,108 @@ class CalibrationRejectionTests(unittest.TestCase):
 
     def test_no_points_at_all(self):
         self.assertRejected(None, None, "operator", "no floor plane")
+
+
+class ObstacleTests(unittest.TestCase):
+    """Obstacles are 4-25 cm above the calibrated floor, sorted by lateral offset."""
+
+    PLANE = camera_plane(CAR_HEIGHT_M, CAR_PITCH_DEG)
+
+    def regions(self, *boxes, seed=3):
+        return classify(depth_scene.points(render(boxes=boxes, seed=seed)), self.PLANE).regions
+
+    def test_open_floor_is_clear_everywhere(self):
+        for seed in (3, 4, 5):
+            with self.subTest(seed=seed):
+                regions = self.regions(seed=seed)
+                for name in ("path", "left", "right"):
+                    self.assertIsNone(regions[name]["near_m"], name)
+                    self.assertIsNone(regions[name]["p20_m"], name)
+
+    def test_a_5_cm_box_at_0_3_m_is_in_the_path(self):
+        path = self.regions(block(0.3, 0.0, 0.05))["path"]
+        self.assertAlmostEqual(path["near_m"], 0.3, delta=0.02)
+        self.assertGreaterEqual(path["close_points"], ObstacleConfig().min_points)
+
+    def test_a_5_cm_box_at_0_5_m_is_in_the_path_but_not_close(self):
+        path = self.regions(block(0.5, 0.0, 0.05))["path"]
+        self.assertAlmostEqual(path["near_m"], 0.5, delta=0.02)
+        self.assertEqual(path["close_points"], 0)
+
+    def test_a_3_cm_box_is_ignored(self):
+        for forward in (0.3, 0.5):
+            with self.subTest(forward=forward):
+                self.assertIsNone(self.regions(block(forward, 0.0, 0.03))["path"]["near_m"])
+
+    def test_a_box_off_to_the_side_lands_in_its_side_region(self):
+        right = self.regions(block(0.5, 0.4, 0.06))
+        self.assertIsNone(right["path"]["near_m"])
+        self.assertAlmostEqual(right["right"]["near_m"], 0.5, delta=0.02)
+        self.assertIsNone(right["left"]["near_m"])
+        left = self.regions(block(0.5, -0.4, 0.06))
+        self.assertAlmostEqual(left["left"]["near_m"], 0.5, delta=0.02)
+        self.assertIsNone(left["right"]["near_m"])
+
+    def test_an_overhang_the_car_passes_under_is_ignored(self):
+        regions = self.regions(block(0.4, 0.0, 0.60, width_m=0.6, bottom_m=0.30))
+        self.assertIsNone(regions["path"]["near_m"])
+
+    def test_a_few_stray_points_are_not_an_obstacle(self):
+        above = self.PLANE.floor_point(0.6, 0.0) + 0.10 * self.PLANE.n
+        stray = np.array([above] * (ObstacleConfig().min_points - 1))
+        path = classify(stray, self.PLANE).regions["path"]
+        self.assertIsNone(path["near_m"])
+        self.assertEqual(path["points"], ObstacleConfig().min_points - 1)
+
+    def test_floor_points_are_marked_for_the_preview(self):
+        result = classify(depth_scene.points(render(seed=3)), self.PLANE)
+        self.assertGreater(result.floor_ratio, 0.9)
+        self.assertFalse(result.obstacle.any())
+
+
+class HealthTests(unittest.TestCase):
+    PLANE = camera_plane(CAR_HEIGHT_M, CAR_PITCH_DEG)
+
+    def run_checks(self, count=4, **scene):
+        monitor = HealthMonitor(self.PLANE)
+        return [monitor.update(depth_scene.points(render(seed=10 + i, **scene))) for i in range(count)], monitor
+
+    def test_an_unchanged_camera_stays_ok(self):
+        states, monitor = self.run_checks()
+        self.assertEqual(states, ["ok"] * 4)
+        self.assertLess(monitor.last_angle_deg, 0.5)
+
+    def test_a_camera_pitched_3_degrees_further_goes_stale_on_the_third_check(self):
+        states, monitor = self.run_checks(pitch_deg=CAR_PITCH_DEG + 3.0)
+        self.assertEqual(states, ["ok", "ok", "stale", "stale"])
+        self.assertAlmostEqual(monitor.last_angle_deg, 3.0, delta=0.3)
+
+    def test_a_camera_that_dropped_3_cm_goes_stale(self):
+        states, _ = self.run_checks(height_m=CAR_HEIGHT_M - 0.03)
+        self.assertEqual(states[2], "stale")
+
+    def test_a_wall_filling_the_view_is_unknown_and_never_stale(self):
+        states, _ = self.run_checks(count=6, boxes=(wall(0.25),))
+        self.assertEqual(states, ["unknown"] * 6)
+
+    def test_unknown_neither_advances_nor_resets_the_count(self):
+        monitor = HealthMonitor(self.PLANE)
+        moved = [depth_scene.points(render(pitch_deg=CAR_PITCH_DEG + 3.0, seed=20 + i)) for i in range(3)]
+        blind = depth_scene.points(render(boxes=(wall(0.25),), seed=30))
+        self.assertEqual(monitor.update(moved[0]), "ok")
+        self.assertEqual(monitor.update(blind), "unknown")
+        self.assertEqual(monitor.update(moved[1]), "ok")
+        self.assertEqual(monitor.update(moved[2]), "stale")
+
+    def test_stale_is_latched(self):
+        monitor = HealthMonitor(self.PLANE)
+        for i in range(3):
+            monitor.update(depth_scene.points(render(pitch_deg=CAR_PITCH_DEG + 3.0, seed=40 + i)))
+        self.assertEqual(monitor.update(depth_scene.points(render(seed=50))), "stale")
+
+    def test_an_obstacle_in_the_path_does_not_look_like_a_moved_camera(self):
+        states, _ = self.run_checks(boxes=(block(0.5, 0.0, 0.06),))
+        self.assertEqual(states, ["ok"] * 4)
 
 
 if __name__ == "__main__":

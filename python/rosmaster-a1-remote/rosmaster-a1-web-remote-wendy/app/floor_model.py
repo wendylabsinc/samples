@@ -263,3 +263,121 @@ def validate_calibration(
     ):
         return False, f"height {plane.height_m:.2f} m vs reference {reference_height_m:.2f} m — car on blocks?"
     return True, f"accepted: height {plane.height_m:.2f} m, pitch {plane.pitch_deg:.1f}°, roll {plane.roll_deg:.1f}°"
+
+
+@dataclass(frozen=True)
+class ObstacleConfig:
+    min_height_m: float = 0.04
+    max_height_m: float = 0.25
+    path_half_width_m: float = 0.15
+    side_width_m: float = 0.50
+    min_range_m: float = 0.10
+    max_range_m: float = 3.0
+    close_m: float = 0.45
+    floor_band_m: float = 0.02
+    min_points: int = 8
+
+
+def _region(forward: np.ndarray, config: ObstacleConfig) -> dict:
+    """One region's statistics. Fewer than min_points obstacle points is too
+    little support to be an obstacle (a few flying pixels), so the distances
+    read None, which the planner reads as clear; the counts are still given."""
+    region = {
+        "near_m": None,
+        "p20_m": None,
+        "points": int(forward.size),
+        "close_points": int((forward <= config.close_m).sum()),
+    }
+    if forward.size >= max(1, config.min_points):
+        region["near_m"] = round(float(np.percentile(forward, 5)), 3)
+        region["p20_m"] = round(float(np.percentile(forward, 20)), 3)
+    return region
+
+
+@dataclass(frozen=True)
+class Classification:
+    regions: dict
+    obstacle: np.ndarray
+    floor: np.ndarray
+    floor_ratio: float
+
+
+def classify(points: np.ndarray, plane: FloorPlane, config: ObstacleConfig = ObstacleConfig()) -> Classification:
+    height, forward, lateral = plane.frame(points)
+    in_band = (
+        (height > config.min_height_m)
+        & (height < config.max_height_m)
+        & (forward >= config.min_range_m)
+        & (forward <= config.max_range_m)
+    )
+    half, outer = config.path_half_width_m, config.path_half_width_m + config.side_width_m
+    path = in_band & (np.abs(lateral) <= half)
+    left = in_band & (lateral < -half) & (lateral >= -outer)
+    right = in_band & (lateral > half) & (lateral <= outer)
+    floor = np.abs(height) <= config.floor_band_m
+    return Classification(
+        regions={
+            "path": _region(forward[path], config),
+            "left": _region(forward[left], config),
+            "right": _region(forward[right], config),
+        },
+        obstacle=path | left | right,
+        floor=floor,
+        floor_ratio=round(float(floor.mean()), 3) if floor.size else 0.0,
+    )
+
+
+@dataclass(frozen=True)
+class HealthConfig:
+    band_m: float = 0.10
+    path_half_width_m: float = 0.15
+    near_m: float = 0.3
+    far_m: float = 1.5
+    min_points: int = 300
+    inlier_m: float = 0.015
+    angle_deg: float = 2.0
+    height_m: float = 0.02
+    consecutive: int = 3
+
+
+class HealthMonitor:
+    """Does the floor the camera sees now still match the calibration?
+
+    ok, unknown (too little floor in view to judge) or stale. Stale is
+    latched: only a new calibration, which builds a new monitor, clears it.
+    """
+
+    def __init__(self, plane: FloorPlane, config: HealthConfig = HealthConfig()) -> None:
+        self.plane = plane
+        self.config = config
+        self.state = "unknown"
+        self.misses = 0
+        self.last_angle_deg: float | None = None
+        self.last_height_diff_m: float | None = None
+
+    def update(self, points: np.ndarray) -> str:
+        if self.state == "stale":
+            return self.state
+        c = self.config
+        height, forward, lateral = self.plane.frame(points)
+        candidates = (
+            (np.abs(height) <= c.band_m)
+            & (np.abs(lateral) <= c.path_half_width_m)
+            & (forward >= c.near_m)
+            & (forward <= c.far_m)
+        )
+        if int(candidates.sum()) < c.min_points:
+            self.state = "unknown"
+            return self.state
+        fit = fit_floor(np.asarray(points)[candidates], inlier_m=c.inlier_m)
+        if fit is None:
+            self.state = "unknown"
+            return self.state
+        self.last_angle_deg = round(self.plane.angle_to_deg(fit.plane), 2)
+        self.last_height_diff_m = round(abs(fit.plane.height_m - self.plane.height_m), 3)
+        if self.last_angle_deg >= c.angle_deg or self.last_height_diff_m >= c.height_m:
+            self.misses += 1
+        else:
+            self.misses = 0
+        self.state = "stale" if self.misses >= c.consecutive else "ok"
+        return self.state
