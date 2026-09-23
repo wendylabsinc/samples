@@ -36,6 +36,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STUBS_DIR = REPO_ROOT / "tests" / "stubs"
 APP_DIR = REPO_ROOT / "rosmaster-a1-web-remote-wendy" / "app"
@@ -58,6 +60,24 @@ for _path in (str(STUBS_DIR), str(APP_DIR)):
 os.environ.setdefault("GRAPH_COUNT_SAMPLE_INTERVAL_S", "3600")
 
 import server  # noqa: E402  (import must follow the sys.path setup above)
+from floor_calibration import CalibrationStore, FloorCalibrationManager  # noqa: E402
+from tests.python import depth_scene  # noqa: E402
+from tests.python.depth_scene import CAR_HEIGHT_M, CAR_PITCH_DEG, block, camera_plane, render  # noqa: E402
+
+
+def fresh_floor_manager(saved=None) -> FloorCalibrationManager:
+    """A floor calibration manager on its own temporary file, optionally pre-loaded."""
+    store = CalibrationStore(Path(tempfile.mkdtemp()) / "floor_calibration.json", log=lambda line: None)
+    if saved:
+        store.save(saved)
+    return FloorCalibrationManager(store, server.FLOOR_CALIBRATION_SETTINGS, log=lambda line: None)
+
+
+def calibrated_manager(camera="realsense") -> FloorCalibrationManager:
+    """A manager holding an operator calibration of the car's usual floor, with camera_info in."""
+    manager = fresh_floor_manager({camera: depth_scene.calibration_for(camera_plane(CAR_HEIGHT_M, CAR_PITCH_DEG))})
+    manager.set_intrinsics(camera, depth_scene.D435I_640)
+    return manager
 
 
 class ServerTestCase(unittest.TestCase):
@@ -104,6 +124,17 @@ class ServerTestCase(unittest.TestCase):
         server.control._realsense = server.control._empty_realsense()
         server.control._viewers.clear()
         server.control._frame_polls.clear()
+        # The HP60C and the sensor rows too, now that tests feed HP60C depth:
+        # a frame count never decays, so one fed frame would leave the HP60C
+        # looking fitted, and a fresh hp60c_depth row looking healthy, to every
+        # test after it.
+        server.control._hp60c = server.control._empty_hp60c()
+        server.control._sensors = server.control._empty_sensors()
+        # A fresh, empty floor calibration on a temporary file for every test:
+        # the module's own manager points at /state, which on a Mac is
+        # neither there nor writable, and one test's calibration must not
+        # decide the next one's readiness.
+        server.control._floor = fresh_floor_manager()
         # Direct-control release intentionally leaves this latch set until a
         # browser START. Tests share the singleton, so reset both arbitration
         # fields explicitly rather than letting one safety test poison the
@@ -1760,14 +1791,17 @@ class DepthSourceTests(ServerTestCase):
     def test_realsense_depth_statistics_are_produced_with_nobody_watching(self):
         """Autonomy that only worked while a browser tab was open would be a trap.
 
-        The preview is skipped for an unwatched feed, and should be. The zone
-        statistics behind it are what the planner vetoes on, so they are not.
+        The preview is skipped for an unwatched feed, and should be. The
+        obstacle statistics behind it are what the planner vetoes on, so they
+        are not.
         """
         control = server.control
-        control._on_realsense_depth(RealSenseSubscriptionTests._image("16uc1"))
+        control._floor = calibrated_manager()
+        control._on_realsense_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
         self.assertIsNone(control.camera_frame("realsense", "depth"), "an unwatched tile still costs no JPEG")
         snapshot = control.realsense_snapshot()
-        self.assertIsNotNone(snapshot["depth"]["obstacle_p20_m"])
+        self.assertAlmostEqual(snapshot["depth"]["obstacle_p20_m"], 0.3, delta=0.03)
+        self.assertEqual(snapshot["depth"]["obstacle_model"], "floor_plane")
         self.assertGreater(snapshot["depth"]["valid_ratio"], 0.0)
         source = server.select_depth_source(control.hp60c_snapshot(), snapshot)
         self.assertEqual(source["camera"], "realsense")
@@ -1776,7 +1810,8 @@ class DepthSourceTests(ServerTestCase):
     def test_an_undecodable_depth_frame_does_not_leave_stale_distances_behind(self):
         """A fresh timestamp over the last frame's distances is a readout that lies."""
         control = server.control
-        control._on_realsense_depth(RealSenseSubscriptionTests._image("16uc1"))
+        control._floor = calibrated_manager()
+        control._on_realsense_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
         self.assertIsNotNone(control.realsense_snapshot()["depth"]["obstacle_p20_m"])
         control._on_realsense_depth(RealSenseSubscriptionTests._image("yuyv"))
         snapshot = control.realsense_snapshot()
@@ -2128,6 +2163,92 @@ class TurnOutHazardTests(AutoPlannerHarness):
             samples = self._drive(1.2, self.EDGE_M)
         self.assertTrue(samples[-1]["action"].startswith(("brake", "blocked")), samples[-1]["action"])
         self.assertEqual(samples[-1]["linear_x"], 0.0)
+
+
+class DepthFramePipelineTests(ServerTestCase):
+    """camera_info and depth frames in, floor-model statistics out, through the real callbacks."""
+
+    def test_no_camera_info_means_no_obstacle_model(self):
+        control = server.control
+        control._on_realsense_depth(depth_scene.image_msg(render()))
+        depth = control.realsense_snapshot()["depth"]
+        self.assertEqual(depth["obstacle_model"], "none")
+        self.assertEqual(depth["floor_calibration"]["state"], "no_camera_info")
+        self.assertGreater(depth["valid_ratio"], 0.5)
+
+    def test_camera_info_without_a_calibration_is_missing(self):
+        control = server.control
+        control._on_realsense_depth_info(depth_scene.camera_info_msg())
+        control._on_realsense_depth(depth_scene.image_msg(render()))
+        depth = control.realsense_snapshot()["depth"]
+        self.assertEqual(depth["obstacle_model"], "none")
+        self.assertEqual(depth["floor_calibration"]["state"], "missing")
+
+    def test_open_floor_is_clear_and_an_obstacle_is_placed(self):
+        control = server.control
+        control._floor = calibrated_manager()
+        control._on_realsense_depth(depth_scene.image_msg(render(seed=5)))
+        clear = control.realsense_snapshot()["depth"]
+        self.assertEqual(clear["obstacle_model"], "floor_plane")
+        self.assertIsNone(clear["above_floor_near_m"])
+        self.assertIsNone(clear["left_side_p20_m"])
+        self.assertGreater(clear["floor_valid_ratio"], 0.5)
+        control._on_realsense_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.05),), seed=6)))
+        blocked = control.realsense_snapshot()["depth"]
+        self.assertAlmostEqual(blocked["above_floor_near_m"], 0.3, delta=0.03)
+        self.assertGreaterEqual(blocked["above_floor_close_pixels"], server.DEPTH_OBSTACLE_MIN_POINTS)
+
+    def test_camera_info_for_another_resolution_is_scaled(self):
+        control = server.control
+        control._floor = calibrated_manager()
+        half = depth_scene.D435I_640.for_image(320, 240)
+        frame = render(intrinsics=half, boxes=(block(0.3, 0.0, 0.06),), seed=7)
+        control._on_realsense_depth(depth_scene.image_msg(frame))
+        self.assertAlmostEqual(control.realsense_snapshot()["depth"]["above_floor_near_m"], 0.3, delta=0.03)
+
+    def test_a_watched_calibrated_frame_draws_its_preview(self):
+        control = server.control
+        control._floor = calibrated_manager()
+        control.open_camera_viewer("realsense", "depth")
+        try:
+            control._on_realsense_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
+            frame = control.camera_frame("realsense", "depth")
+        finally:
+            control.close_camera_viewer("realsense", "depth")
+        self.assertTrue(frame.startswith(b"\xff\xd8"))
+
+    def test_the_preview_paints_obstacles_red_and_the_path_edges(self):
+        control = server.control
+        control._floor = calibrated_manager()
+        msg = depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),)))
+        depth_m, finite, geometry, _ = control._depth_image_to_stats(msg, "realsense")
+        pixels = np.asarray(control._depth_preview_image(msg, depth_m, finite, geometry))
+        red = (pixels[:, :, 0] == 235) & (pixels[:, :, 1] == 45) & (pixels[:, :, 2] == 35)
+        yellow = (pixels[:, :, 0] == 255) & (pixels[:, :, 1] == 245) & (pixels[:, :, 2] == 0)
+        self.assertGreater(int(red.sum()), 100)
+        self.assertGreater(int(yellow.sum()), 100)
+
+    def test_a_failure_inside_the_floor_model_blanks_the_statistics(self):
+        """An exception must not leave the last frame's distances behind a fresh timestamp."""
+        control = server.control
+        control._floor = calibrated_manager()
+        control._on_realsense_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
+        self.assertIsNotNone(control.realsense_snapshot()["depth"]["above_floor_near_m"])
+        with mock.patch.object(server, "classify", side_effect=RuntimeError("boom")):
+            control._on_realsense_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
+        depth = control.realsense_snapshot()["depth"]
+        self.assertIsNone(depth["above_floor_near_m"])
+        self.assertEqual(depth["obstacle_model"], "none")
+
+    def test_the_hp60c_path_uses_its_own_calibration(self):
+        control = server.control
+        control._floor = calibrated_manager("hp60c")
+        control._on_hp60c_depth_info(depth_scene.camera_info_msg())
+        control._on_hp60c_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
+        with control._lock:
+            depth = dict(control._hp60c["depth"])
+        self.assertEqual(depth["obstacle_model"], "floor_plane")
+        self.assertAlmostEqual(depth["above_floor_near_m"], 0.3, delta=0.03)
 
 
 class FrameEndpointTests(ServerTestCase):

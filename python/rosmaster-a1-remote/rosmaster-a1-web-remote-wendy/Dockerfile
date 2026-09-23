@@ -50,6 +50,8 @@ WORKDIR /app
 COPY app/server.py /app/web_remote.py
 COPY app/direct_gamepad.py /app/direct_gamepad.py
 COPY app/slam_bridge.py /app/slam_bridge.py
+COPY app/floor_model.py /app/floor_model.py
+COPY app/floor_calibration.py /app/floor_calibration.py
 # Generate the TLS certificate at build time, not at container start.
 #
 # Browsers only hand the Gamepad API to a secure context, so the remote has to

@@ -10,6 +10,10 @@ constructed by server.py itself.
 from __future__ import annotations
 
 
+class CameraInfo:
+    pass
+
+
 class CompressedImage:
     pass
 
