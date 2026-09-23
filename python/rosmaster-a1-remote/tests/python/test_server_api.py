@@ -62,7 +62,7 @@ os.environ.setdefault("GRAPH_COUNT_SAMPLE_INTERVAL_S", "3600")
 import server  # noqa: E402  (import must follow the sys.path setup above)
 from floor_calibration import CalibrationStore, FloorCalibrationManager  # noqa: E402
 from tests.python import depth_scene  # noqa: E402
-from tests.python.depth_scene import CAR_HEIGHT_M, CAR_PITCH_DEG, block, camera_plane, render  # noqa: E402
+from tests.python.depth_scene import CAR_HEIGHT_M, CAR_PITCH_DEG, block, camera_plane, render, wall  # noqa: E402
 
 # What a depth frame's statistics carry once the floor model has judged it
 # against a healthy calibration. Planner fixtures that describe "a depth frame
@@ -2355,6 +2355,86 @@ class FloorPlannerTests(AutoPlannerHarness):
         self.assertFalse(any(sample["action"].startswith("brake") for sample in thin), thin)
         self.assertTrue(solid[0]["action"].startswith("brake"), solid[0])
         self.assertEqual(solid[0]["reason"], "depth camera sees an obstacle in the path")
+
+
+class FloorCalibrationRouteTests(ServerTestCase):
+    """POST /api/depth/calibrate against the real control, with frames arriving meanwhile."""
+
+    def setUp(self):
+        super().setUp()
+        self.stop_feeding = threading.Event()
+        self.feeder = None
+
+    def tearDown(self):
+        self.stop_feeding.set()
+        if self.feeder is not None:
+            self.feeder.join(2.0)
+        super().tearDown()
+
+    def feed(self, frame):
+        """Deliver this depth frame at camera rate until the test ends, as the driver would."""
+        control = server.control
+        control._on_realsense_depth_info(depth_scene.camera_info_msg())
+        msg = depth_scene.image_msg(frame)
+        control._on_realsense_depth(msg)
+
+        def loop():
+            while not self.stop_feeding.is_set():
+                control._on_realsense_depth(msg)
+                time.sleep(0.01)
+
+        self.feeder = threading.Thread(target=loop, daemon=True)
+        self.feeder.start()
+
+    def test_status_reports_the_active_cameras_floor_calibration(self):
+        control = server.control
+        control._floor = calibrated_manager()
+        control._on_realsense_depth(depth_scene.image_msg(render()))
+        status, body, _ = self._get("/api/status")
+        self.assertEqual(status, 200)
+        floor = json.loads(body)["floor_calibration"]
+        self.assertEqual(floor["camera"], "realsense")
+        self.assertEqual(floor["state"], "ok")
+        self.assertAlmostEqual(floor["height_m"], CAR_HEIGHT_M, delta=0.01)
+
+    def test_status_with_no_depth_camera_says_so(self):
+        status, body, _ = self._get("/api/status")
+        self.assertEqual(json.loads(body)["floor_calibration"]["state"], "no_camera")
+
+    def test_an_operator_calibration_on_open_floor_is_accepted(self):
+        self.feed(render())
+        started = time.monotonic()
+        status, body = self._post_json("/api/depth/calibrate", {})
+        self.assertLess(time.monotonic() - started, 3.0, "a calibration answers within the page's fetch timeout")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["accepted"], body["reason"])
+        self.assertEqual(body["calibration"]["state"], "ok")
+        self.assertEqual(body["calibration"]["source"], "operator")
+        self.assertAlmostEqual(body["calibration"]["reference_height_m"], CAR_HEIGHT_M, delta=0.01)
+
+    def test_a_wall_is_rejected_with_its_reason(self):
+        self.feed(render(boxes=(wall(0.6),)))
+        status, body = self._post_json("/api/depth/calibrate", {})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["accepted"])
+        self.assertTrue(body["reason"].startswith("no single floor plane"), body["reason"])
+        self.assertEqual(body["calibration"]["state"], "missing")
+
+    def test_with_no_depth_camera_it_says_so_at_once(self):
+        status, body = self._post_json("/api/depth/calibrate", {})
+        self.assertEqual(status, 200)
+        self.assertFalse(body["accepted"])
+        self.assertEqual(body["reason"], "no depth camera to calibrate")
+
+
+class FloorStartupThreadTests(ServerTestCase):
+    def test_the_startup_loop_calibrates_the_fresh_depth_camera(self):
+        control = server.control
+        seen = []
+        with mock.patch.object(control._floor, "run_startup", side_effect=lambda active: seen.append(active()) or None):
+            control._on_realsense_depth(depth_scene.image_msg(render()))
+            control.run_floor_startup_calibration()
+        self.assertEqual(seen, ["realsense"])
 
 
 class FrameEndpointTests(ServerTestCase):

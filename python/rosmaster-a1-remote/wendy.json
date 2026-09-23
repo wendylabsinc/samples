@@ -46,7 +46,8 @@
       "context": "rosmaster-a1-web-remote-wendy",
       "entitlements": [
         { "type": "network", "mode": "host" },
-        { "type": "input" }
+        { "type": "input" },
+        { "type": "persist", "name": "rosmaster-a1-web-state", "path": "/state" }
       ],
       "readiness": {
         "tcpSocket": { "port": 8091 },

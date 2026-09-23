@@ -1379,6 +1379,44 @@ class RosmasterControl(Node):
         source = select_depth_source(self.hp60c_snapshot(), self.realsense_snapshot())
         return f"{source['camera']}_depth" if source else DEPTH_SOURCES[0]["feed_id"]
 
+    def floor_calibration_snapshot(self) -> dict:
+        """The floor calibration of the depth camera autonomy would plan on, for /api/status."""
+        source = self.depth_source()
+        if source is None:
+            return {"camera": None, "state": "no_camera", "calibrated": False, "usable": False, "last_result": None}
+        return self._floor.status(source["camera"])
+
+    def calibrate_floor(self) -> dict:
+        """POST /api/depth/calibrate: an operator calibration of the active depth camera, now.
+
+        Blocks this handler thread while the next FLOOR_CAL_FRAMES frames
+        arrive and are fitted, about a second on the RealSense at 15 Hz; the
+        ROS executor only hands frames over and never waits on it.
+        """
+        source = self.depth_source()
+        if source is None:
+            return {"accepted": False, "reason": "no depth camera to calibrate", "calibration": None}
+        if not source["fresh"]:
+            return {
+                "accepted": False,
+                "reason": f"waiting for fresh {source['camera']} depth frames",
+                "calibration": self._floor.status(source["camera"]),
+            }
+        return self._floor.calibrate(source["camera"], "operator")
+
+    def run_floor_startup_calibration(self) -> None:
+        """main() runs this on its own thread: startup calibrations until one is accepted."""
+
+        def active_camera() -> str | None:
+            source = self.depth_source()
+            return source["camera"] if source and source["fresh"] else None
+
+        result = self._floor.run_startup(active_camera)
+        if result is None:
+            log_line("FLOOR_STARTUP_CALIBRATION_DONE result=none")
+        else:
+            log_line(f"FLOOR_STARTUP_CALIBRATION_DONE accepted={result['accepted']} reason={result['reason']}")
+
     def lidar_snapshot(self) -> dict:
         with self._lock:
             scan = json.loads(json.dumps(self._scan))
@@ -3100,6 +3138,7 @@ class Handler(BaseHTTPRequestHandler):
                     "sensors": control.sensors_snapshot(),
                     "auto": control.auto_snapshot(),
                     "navigation": control.navigation_snapshot(),
+                    "floor_calibration": control.floor_calibration_snapshot(),
                     "gamepad": gamepad_snapshot(),
                     "direct_gamepad": direct_gamepad.snapshot(),
                     "commands": command_freshness.snapshot(),
@@ -3241,6 +3280,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "command": command, "control": control.snapshot(), "auto": control.auto_snapshot()})
         elif parsed.path == "/api/gamepad":
             self._send_json({"ok": True, "gamepad": update_gamepad_state(payload)})
+        elif parsed.path == "/api/depth/calibrate":
+            # Finite like every other route: the calibration answers within
+            # about two seconds, accepted or not, well inside the page's 4 s
+            # fetch timeout.
+            self._send_json({"ok": True, **control.calibrate_floor()}, no_store=True)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -3507,6 +3551,7 @@ def serve_https() -> None:
 def main() -> int:
     direct_gamepad.start()
     threading.Thread(target=spin_ros, daemon=True).start()
+    threading.Thread(target=control.run_floor_startup_calibration, daemon=True, name="floor-startup-calibration").start()
     threading.Thread(target=serve_https, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"WEB_REMOTE_READY port={PORT}", flush=True)
