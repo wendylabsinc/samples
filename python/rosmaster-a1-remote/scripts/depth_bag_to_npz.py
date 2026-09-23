@@ -15,7 +15,7 @@ Usage:
   .venv/bin/python scripts/depth_bag_to_npz.py <bag>.db3 <out>.npz [--frames 5] [--from S] [--to S]
       [--image-topic /camera/camera/depth/image_rect_raw] [--info-topic /camera/camera/depth/camera_info]
 
---from and --to are seconds from the start of the bag. Reads the rosbag2
+--from and --to are seconds from the first depth frame in the bag. Reads the rosbag2
 sqlite3 file directly (CDR), no ROS; needs numpy.
 """
 from __future__ import annotations

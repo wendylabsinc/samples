@@ -4792,7 +4792,7 @@ Put the car on blocks and redeploy `web`. Expected: `FLOOR_CALIBRATION_REJECTED 
 
 - [ ] **Step 5: Spec on-car check 4: tilt the hinge**
 
-With the page open, tilt the camera a few degrees. Expected: `FLOOR_CALIBRATION_STALE` within about 2 s, the line reads "Camera moved since calibration", and Auto Nav refuses with `camera moved since floor calibration — recalibrate`. Press Recalibrate: the state returns to OK.
+With the page open, tilt the camera a few degrees. Expected: `FLOOR_CALIBRATION_STALE` within about 2 s, the line reads "Camera moved since calibration", and Auto Nav refuses with `camera moved since floor calibration — recalibrate`. Press Recalibrate: the state returns to OK. Then tilt it up past level: expect health unknown, not stale, and note it (a known gap, see the spec's implementation notes).
 
 - [ ] **Step 6: Spec on-car check 5: the floor run (WDY-1647)**
 

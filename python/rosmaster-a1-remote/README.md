@@ -249,7 +249,9 @@ service's `rosmaster-a1-web-state` persist volume.
   with the car on its wheels, facing open floor: it also sets the
   **reference height** that every later startup calibration has to match.
 - **At startup** the web service loads the saved calibration, then takes a
-  fresh one every 10 s, for up to 10 minutes, until one is accepted. A
+  fresh one every 10 s until one is accepted, for up to 10 minutes or until the
+  car first moves, whichever comes first: after that, a floor that no longer
+  matches means the camera moved, and that is reported, not re-learned. A
   startup calibration is only accepted within 3 cm of the reference height.
   A car started on blocks therefore keeps its saved calibration and says
   `height 0.25 m vs reference 0.21 m — car on blocks?`, instead of learning
@@ -268,14 +270,18 @@ service's `rosmaster-a1-web-state` persist volume.
 
 A rejected calibration names its reason: too cluttered, no open floor near or
 far, a rolled or pitched camera, an implausible height, or a reference
-mismatch. Every threshold is an environment variable on the web service; the
-`DEPTH_*` and `FLOOR_*` constants at the top of `server.py` are the list.
+mismatch. The obstacle, calibration and health thresholds are environment variables on
+the web service (the `DEPTH_*` and `FLOOR_*` constants at the top of
+`server.py`); the acceptance limits (roll, pitch, height range, minimum
+inliers, open-floor span) are fixed in `CalibrationLimits` in `floor_model.py`.
 
 Limits. An object closer than the camera's minimum range (about 0.15-0.2 m on
 the D435i) reads as no depth, not as an obstacle, as it always has; the LiDAR
 and the stop distance cover it. A real ramp reads as an obstacle, so the car
 stops for it. The HP60C runs the same code, but it has not been validated on
-a car.
+a car. A camera knocked up past level sees too little floor for the health
+check to judge, so it reads as unknown rather than stale, and low obstacles
+drop out of view; watch the depth tile after a knock.
 
 ## Safety model
 

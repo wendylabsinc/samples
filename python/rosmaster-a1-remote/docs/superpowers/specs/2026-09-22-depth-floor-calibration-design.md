@@ -345,3 +345,13 @@ Where it departs from this design:
 - "missing" and "no reference" are one state, because a calibration always
   carries its reference.
 - The roll formula governs; the example JSON's roll sign is illustrative.
+- Startup calibrations stop once the car first moves (`end_startup_window`,
+  called on the first published motion), and a startup attempt that queued
+  behind an operator's Recalibrate is skipped. Otherwise a camera that moved
+  mid-session could be re-learned by the startup loop with nobody asking,
+  clearing the stale latch and resuming Auto Nav (final branch review).
+- Known gap: a camera tilted up far enough to lose the floor from view reads
+  as health unknown, which never counts towards stale, so it is not reported
+  as moved, and low obstacles fall out of its view. Counting path points
+  below the calibrated floor as a miss would catch it (and drop-offs), but
+  needs tuning on real floors first; a follow-up.
