@@ -64,6 +64,17 @@ from floor_calibration import CalibrationStore, FloorCalibrationManager  # noqa:
 from tests.python import depth_scene  # noqa: E402
 from tests.python.depth_scene import CAR_HEIGHT_M, CAR_PITCH_DEG, block, camera_plane, render  # noqa: E402
 
+# What a depth frame's statistics carry once the floor model has judged it
+# against a healthy calibration. Planner fixtures that describe "a depth frame
+# the planner would drive on" include these: since the depth floor
+# calibration, a frame without them is one the floor model could not judge,
+# and depth_ok is false for it (spec 2026-09-22, "depth_ok no longer requires
+# a non-empty statistic").
+FLOOR_OK = {
+    "obstacle_model": "floor_plane",
+    "floor_calibration": {"state": "ok", "calibrated": True, "health": "ok", "usable": True},
+}
+
 
 def fresh_floor_manager(saved=None) -> FloorCalibrationManager:
     """A floor calibration manager on its own temporary file, optionally pre-loaded."""
@@ -1608,6 +1619,7 @@ class DepthSourceTests(ServerTestCase):
             above_floor_near_m=1.6,
             obstacle_valid_ratio=0.6,
             above_floor_valid_ratio=0.6,
+            **FLOOR_OK,
         )
 
     def _ready(self, hp60c, realsense, subscribers=1, lidar_ok=True):
@@ -1895,6 +1907,7 @@ class AutoPlannerHarness(unittest.TestCase):
             "above_floor_close_pixels": 0,
             "obstacle_valid_ratio": 0.60,
             "above_floor_valid_ratio": 0.60,
+            **FLOOR_OK,
         }
         depth.update(self.depth)
         return {
@@ -2142,7 +2155,7 @@ class TurnOutHazardTests(AutoPlannerHarness):
     def test_the_depth_camera_brakes_the_turn_out_at_once(self):
         with self._driving():
             self._into_turn_out()
-            self.depth = {"above_floor_near_m": 0.25, "above_floor_close_pixels": server.HP60C_RED_MIN_PIXELS * 4}
+            self.depth = {"above_floor_near_m": 0.25, "above_floor_close_pixels": server.DEPTH_OBSTACLE_MIN_POINTS * 4}
             samples = self._drive(0.15, self.ROOM_AFTER_REVERSE_M)
         self.assertTrue(
             all(sample["linear_x"] <= 0.0 for sample in samples),
@@ -2249,6 +2262,99 @@ class DepthFramePipelineTests(ServerTestCase):
             depth = dict(control._hp60c["depth"])
         self.assertEqual(depth["obstacle_model"], "floor_plane")
         self.assertAlmostEqual(depth["above_floor_near_m"], 0.3, delta=0.03)
+
+
+class FloorReadinessTests(ServerTestCase):
+    """What autonomy says it is waiting for, when the depth camera is fresh but the floor is not."""
+
+    def depth(self, **calibration):
+        stream = DepthSourceTests._usable_depth()
+        stream["floor_calibration"] = {**FLOOR_OK["floor_calibration"], **calibration}
+        return stream
+
+    def ready(self, depth):
+        return DepthSourceTests._ready(self, DepthSourceTests._hp60c(), DepthSourceTests._realsense(depth=depth))
+
+    def test_each_floor_condition_has_its_own_reason_in_order(self):
+        cases = (
+            ({"state": "no_camera_info", "calibrated": False, "health": None}, "waiting for depth camera info"),
+            ({"state": "missing", "calibrated": False, "health": None}, "waiting for floor calibration — face open floor and press Recalibrate"),
+            ({"state": "stale", "calibrated": True, "health": "stale"}, "camera moved since floor calibration — recalibrate"),
+        )
+        for calibration, reason in cases:
+            with self.subTest(reason=reason):
+                ready = self.ready(self.depth(**calibration))
+                self.assertFalse(ready["ready"])
+                self.assertEqual(ready["reason"], reason)
+
+    def test_a_frame_with_no_floor_status_at_all_waits_for_camera_info(self):
+        stream = DepthSourceTests._usable_depth()
+        del stream["floor_calibration"]
+        self.assertEqual(self.ready(stream)["reason"], "waiting for depth camera info")
+
+    def test_the_floor_reasons_come_after_lidar_base_and_freshness(self):
+        stale = self.depth(state="stale", calibrated=True, health="stale")
+        self.assertEqual(
+            DepthSourceTests._ready(self, DepthSourceTests._hp60c(), DepthSourceTests._realsense(depth=stale), lidar_ok=False)["reason"],
+            "waiting for fresh lidar",
+        )
+        old = DepthSourceTests._usable_depth(age_s=5.0)
+        old["floor_calibration"] = stale["floor_calibration"]
+        self.assertEqual(self.ready(old)["reason"], "waiting for fresh realsense depth frames")
+
+    def test_a_calibrated_healthy_camera_is_ready(self):
+        self.assertTrue(self.ready(self.depth())["ready"])
+
+    def test_an_unknown_health_does_not_block(self):
+        """A wall filling the view says nothing about the calibration either way."""
+        self.assertTrue(self.ready(self.depth(health="unknown"))["ready"])
+
+
+class FloorPlannerTests(AutoPlannerHarness):
+    """The planner against the floor model's statistics."""
+
+    def test_empty_regions_are_depth_ok_and_the_car_cruises(self):
+        self.depth = {
+            "obstacle_p20_m": None,
+            "above_floor_near_m": None,
+            "left_side_p20_m": None,
+            "right_side_p20_m": None,
+            "above_floor_close_pixels": 0,
+        }
+        with self._driving():
+            samples = self._drive(0.2, 1.6)
+            _, decision = self.control._compute_auto_command(
+                self._scan(1.6), dict(self.AUTO), self._depth_source(), state=dict(self.control._auto_state), update_state=False
+            )
+        self.assertTrue(decision["depth_ok"], decision["reason"])
+        self.assertGreater(samples[-1]["linear_x"], 0.0, samples[-1])
+
+    def test_an_engaged_planner_stops_when_the_camera_moves(self):
+        with self._driving():
+            cruising = self._drive(0.2, 1.6)
+            self.assertGreater(cruising[-1]["linear_x"], 0.0)
+            self.depth = {"floor_calibration": {"state": "stale", "calibrated": True, "health": "stale", "usable": False}}
+            stopped = self._drive(0.1, 1.6)
+        self.assertTrue(all(sample["linear_x"] == 0.0 for sample in stopped), stopped)
+        self.assertEqual(stopped[-1]["reason"], "camera moved since floor calibration — recalibrate")
+        self.assertEqual(stopped[-1]["action"], "wait_for_floor_calibration")
+
+    def test_an_engaged_planner_stops_when_the_calibration_is_missing(self):
+        with self._driving():
+            self.depth = {"obstacle_model": "none", "floor_calibration": {"state": "missing", "calibrated": False, "health": None}}
+            stopped = self._drive(0.1, 1.6)
+        self.assertTrue(all(sample["linear_x"] == 0.0 for sample in stopped), stopped)
+        self.assertEqual(stopped[-1]["reason"], "waiting for floor calibration — face open floor and press Recalibrate")
+
+    def test_the_depth_stop_needs_min_points_of_support(self):
+        with self._driving():
+            self.depth = {"above_floor_near_m": 0.25, "above_floor_close_pixels": server.DEPTH_OBSTACLE_MIN_POINTS - 1}
+            thin = self._drive(0.1, 1.6)
+            self.depth = {"above_floor_near_m": 0.25, "above_floor_close_pixels": server.DEPTH_OBSTACLE_MIN_POINTS}
+            solid = self._drive(0.1, 1.6)
+        self.assertFalse(any(sample["action"].startswith("brake") for sample in thin), thin)
+        self.assertTrue(solid[0]["action"].startswith("brake"), solid[0])
+        self.assertEqual(solid[0]["reason"], "depth camera sees an obstacle in the path")
 
 
 class FrameEndpointTests(ServerTestCase):

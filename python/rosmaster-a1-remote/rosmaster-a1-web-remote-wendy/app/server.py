@@ -140,7 +140,6 @@ HP60C_STALE_S = float(os.environ.get("HP60C_STALE_S", "1.0"))
 HP60C_DEPTH_VALID_MIN_RATIO = float(os.environ.get("HP60C_DEPTH_VALID_MIN_RATIO", "0.005"))
 HP60C_DEPTH_INFO_TOPIC = os.environ.get("HP60C_DEPTH_INFO_TOPIC", "/ascamera_hp60c/camera_publisher/depth0/camera_info")
 HP60C_RED_DISTANCE_M = float(os.environ.get("HP60C_RED_DISTANCE_M", "0.45"))
-HP60C_RED_MIN_PIXELS = int(os.environ.get("HP60C_RED_MIN_PIXELS", "32"))
 # The depth obstacle test ====================================================
 #
 # An obstacle is whatever stands DEPTH_OBSTACLE_MIN_HEIGHT_M to
@@ -339,6 +338,28 @@ def finite_percentile(values: list[float], percentile: float) -> float | None:
 def finite_or_none(value: object) -> float | None:
     if isinstance(value, (int, float)) and math.isfinite(float(value)):
         return float(value)
+    return None
+
+
+def floor_readiness_reason(depth: dict) -> str | None:
+    """Why this depth frame's statistics cannot be planned on yet, or None.
+
+    Read off the statistics themselves, which carry the floor calibration's
+    status as it stood when the frame was classified, so the readiness check
+    and the planner judge the same frame by the same rule. The order is the
+    order an operator can fix things in: the camera has to describe itself
+    before it can be calibrated, and has to be calibrated before it can be
+    found to have moved.
+    """
+    calibration = depth.get("floor_calibration") or {}
+    if calibration.get("state") in (None, "no_camera_info"):
+        return "waiting for depth camera info"
+    if not calibration.get("calibrated"):
+        return "waiting for floor calibration — face open floor and press Recalibrate"
+    if calibration.get("health") == "stale":
+        return "camera moved since floor calibration — recalibrate"
+    if depth.get("obstacle_model") != "floor_plane":
+        return "waiting for depth camera info"
     return None
 
 
@@ -1158,13 +1179,13 @@ class RosmasterControl(Node):
         ready = self._auto_ready()
         source = self.depth_source()
         camera = source["camera"] if source else None
-        depth_ok = bool(source and source["fresh"])
+        depth_ok = bool(source and source["fresh"] and floor_readiness_reason(source["depth"]) is None)
         return {
             "mode": "lidar_farthest_corridor_with_depth_object_veto" if depth_ok else "lidar_farthest_corridor",
             "primary_sensor": "ydlidar_farthest_corridor",
             "depth_source": camera,
             "depth_ok": depth_ok,
-            "camera_role": f"{camera}_upper_roi_object_veto" if depth_ok else "waiting_for_depth_ros_topics",
+            "camera_role": f"{camera}_floor_plane_object_veto" if depth_ok else "waiting_for_depth_ros_topics",
             "ready": ready["ready"],
             "reason": ready["reason"],
         }
@@ -1217,7 +1238,7 @@ class RosmasterControl(Node):
         }
         hp60c["usable_for_navigation"] = bool(
             hp60c["depth"]["ok"]
-            and hp60c["depth"].get("obstacle_p20_m") is not None
+            and floor_readiness_reason(hp60c["depth"]) is None
             and hp60c["depth"].get("obstacle_valid_ratio", 0.0) >= HP60C_DEPTH_VALID_MIN_RATIO
         )
         return hp60c
@@ -1387,6 +1408,9 @@ class RosmasterControl(Node):
             return {"ready": False, "reason": "waiting for a depth camera"}
         if not source["fresh"]:
             return {"ready": False, "reason": f"waiting for fresh {source['camera']} depth frames"}
+        floor_reason = floor_readiness_reason(source.get("depth") or {})
+        if floor_reason is not None:
+            return {"ready": False, "reason": floor_reason}
         front = scan.get("sectors", {}).get("front", {})
         if front.get("near_m") is None or front.get("count", 0) < 5:
             return {"ready": False, "reason": "front lidar sector sparse"}
@@ -2049,13 +2073,19 @@ class RosmasterControl(Node):
         depth_above_close_pixels = int(depth.get("above_floor_close_pixels", 0) or 0)
         depth_left_close_pixels = int(depth.get("left_side_close_pixels", 0) or 0)
         depth_right_close_pixels = int(depth.get("right_side_close_pixels", 0) or 0)
-        depth_ok = (
+        # A fresh frame the floor model has classified is depth ok, obstacles
+        # or none: an empty region means clear floor, and every distance below
+        # reads None that way. What is not ok is a stale frame, a frame with
+        # almost no valid depth, or a frame the floor model could not judge,
+        # and floor_reason says which of the last.
+        depth_frames_ok = (
             depth_camera is not None
             and depth_age is not None
             and depth_age < depth_stale_s
-            and (depth_near is not None or depth_above_near is not None)
             and max(depth_valid_ratio, depth_above_valid_ratio) >= HP60C_DEPTH_VALID_MIN_RATIO
         )
+        floor_reason = floor_readiness_reason(depth) if depth_frames_ok else None
+        depth_ok = depth_frames_ok and floor_reason is None
         corridor = None
         if age is None or age > LIDAR_STALE_S or not front_near:
             reason = "waiting for lidar"
@@ -2064,9 +2094,12 @@ class RosmasterControl(Node):
         elif depth_camera is None:
             reason = "waiting for a depth camera"
             action = "wait_for_depth_camera"
-        elif not depth_ok:
+        elif not depth_frames_ok:
             reason = f"waiting for {depth_camera} depth frames"
             action = "wait_for_depth_frames"
+        elif not depth_ok:
+            reason = floor_reason
+            action = "wait_for_floor_calibration"
         else:
             corridor = self._best_lidar_corridor(scan, auto)
             depth_side = self._depth_side_steering(depth_left_near, depth_right_near, depth_left_close_pixels, depth_right_close_pixels)
@@ -2074,7 +2107,7 @@ class RosmasterControl(Node):
                 depth_ok
                 and depth_above_near is not None
                 and depth_above_near <= auto["stop_distance"]
-                and depth_above_close_pixels >= HP60C_RED_MIN_PIXELS
+                and depth_above_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS
             )
             depth_avoid = depth_ok and depth_near is not None and depth_near <= auto["avoid_distance"]
             lidar_stop = front_near <= auto["stop_distance"]
@@ -2097,7 +2130,7 @@ class RosmasterControl(Node):
                     AUTO_BRAKE_S,
                     escape_direction,
                     min(int(state.get("attempts", 0)) + 1, 6),
-                    "depth camera sees an object above the floor line" if depth_stop else "lidar front too close",
+                    "depth camera sees an obstacle in the path" if depth_stop else "lidar front too close",
                     state,
                 )
             elif state["name"] == "brake" and now >= state["until"]:
@@ -2384,9 +2417,9 @@ class RosmasterControl(Node):
     def _escape_direction(self, corridor: dict, depth_side: dict, left_close_pixels: int, right_close_pixels: int) -> str:
         if depth_side.get("direction") in {"left", "right"}:
             return depth_side["direction"]
-        if left_close_pixels >= HP60C_RED_MIN_PIXELS and right_close_pixels < HP60C_RED_MIN_PIXELS:
+        if left_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and right_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return "right"
-        if right_close_pixels >= HP60C_RED_MIN_PIXELS and left_close_pixels < HP60C_RED_MIN_PIXELS:
+        if right_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and left_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return "left"
         if corridor.get("avoid_direction") in {"left", "right"}:
             return corridor["avoid_direction"]
@@ -2424,9 +2457,9 @@ class RosmasterControl(Node):
             return {"direction": "left", "steering": AUTO_MAX_STEERING * 0.55}
         if right_near is None:
             return {"direction": "right", "steering": -AUTO_MAX_STEERING * 0.55}
-        if left_close_pixels >= HP60C_RED_MIN_PIXELS and right_close_pixels < HP60C_RED_MIN_PIXELS:
+        if left_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and right_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return {"direction": "right", "steering": -AUTO_MAX_STEERING * 0.55}
-        if right_close_pixels >= HP60C_RED_MIN_PIXELS and left_close_pixels < HP60C_RED_MIN_PIXELS:
+        if right_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and left_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return {"direction": "left", "steering": AUTO_MAX_STEERING * 0.55}
         if left_near < right_near:
             return {"direction": "right", "steering": -AUTO_MAX_STEERING * 0.45}
