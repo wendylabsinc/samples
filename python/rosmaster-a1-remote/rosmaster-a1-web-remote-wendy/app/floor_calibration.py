@@ -216,6 +216,7 @@ class FloorCalibrationManager:
         self._intrinsics: dict[str, CameraIntrinsics] = {}
         self._last_result: dict[str, dict] = {}
         self._accepted: set[str] = set()
+        self._startup_closed = False
         self._collection: _Collection | None = None
         self._calibrating: dict[str, str] = {}
 
@@ -300,6 +301,17 @@ class FloorCalibrationManager:
             "last_result": last,
         }
 
+    def end_startup_window(self) -> None:
+        """No more startup calibrations in this process: the car has driven.
+
+        A startup calibration is for adjustments made while the car was off.
+        Once it has moved, a floor that no longer matches means the camera
+        moved mid-session, and that is reported (stale) and left for an
+        operator's Recalibrate, never re-learned without anyone asking.
+        """
+        with self._lock:
+            self._startup_closed = True
+
     def calibrate(self, camera: str, source: str) -> dict:
         """Take a calibration from this camera's next frames: {accepted, reason, calibration}.
 
@@ -314,6 +326,18 @@ class FloorCalibrationManager:
             with self._lock:
                 existing = self._calibrations.get(camera)
                 has_intrinsics = camera in self._intrinsics
+                skipped = source == "startup" and (self._startup_closed or camera in self._accepted)
+            if skipped:
+                # Checked under the run lock, not only in run_startup: an
+                # attempt that queued behind an operator's Recalibrate must not
+                # run over it. Nothing is recorded, so the operator's result
+                # stays the last one.
+                return {
+                    "accepted": False,
+                    "skipped": True,
+                    "reason": "startup calibration not needed",
+                    "calibration": self.status(camera),
+                }
             reference = existing.reference_height_m if existing else None
             if source == "startup" and reference is None:
                 return self._finish(camera, source, False, NO_REFERENCE_REASON)
@@ -324,12 +348,14 @@ class FloorCalibrationManager:
                 self._collection = collection
                 self._calibrating[camera] = source
             try:
-                complete = collection.done.wait(s.collect_timeout_s)
+                collection.done.wait(s.collect_timeout_s)
             finally:
                 with self._lock:
                     self._collection = None
                     self._calibrating.pop(camera, None)
-            if not complete:
+            # Read after detaching: a last frame that landed between the wait
+            # timing out and the detach still completed the run.
+            if not collection.done.is_set():
                 got = len(collection.points)
                 return self._finish(camera, source, False, f"no depth frames from {camera}: {got} of {s.frames} arrived")
             fit = fit_floor(np.concatenate(collection.points), inlier_m=s.inlier_m)
@@ -349,12 +375,17 @@ class FloorCalibrationManager:
         depth camera is delivering fresh frames. Stops early once any
         calibration of that camera, startup or operator, has been accepted in
         this process: an operator calibration during the window is the better
-        one, and a startup attempt after it would only relabel it.
+        one, and a startup attempt after it would only relabel it. Also stops
+        for good once end_startup_window() has been called.
         """
         s = self._settings
         deadline = self._clock() + s.startup_window_s
         result = None
         while self._clock() < deadline:
+            with self._lock:
+                closed = self._startup_closed
+            if closed:
+                return result
             camera = active_camera()
             if camera is not None:
                 with self._lock:
@@ -362,7 +393,7 @@ class FloorCalibrationManager:
                 if done:
                     return result
                 result = self.calibrate(camera, "startup")
-                if result["accepted"]:
+                if result["accepted"] or result.get("skipped"):
                     return result
             # Retry a rejected calibration at the configured pace, but look
             # for a camera that is not up yet every second, so a camera that

@@ -359,7 +359,7 @@ def floor_readiness_reason(depth: dict) -> str | None:
     if calibration.get("health") == "stale":
         return "camera moved since floor calibration — recalibrate"
     if depth.get("obstacle_model") != "floor_plane":
-        return "waiting for depth camera info"
+        return "waiting for a depth frame the floor model can read"
     return None
 
 
@@ -649,6 +649,9 @@ class RosmasterControl(Node):
             FLOOR_CALIBRATION_SETTINGS,
             log=log_line,
         )
+        # Set on the first published motion; see _publish and
+        # FloorCalibrationManager.end_startup_window.
+        self._startup_window_closed = False
         self.publisher = self.create_publisher(Twist, "/cmd_vel", 1)
         self._scan_subscription = self.create_subscription(LaserScan, "/scan", self._on_scan, qos_profile_sensor_data)
         self._imu_subscription = self.create_subscription(Imu, "/imu/data_raw", self._on_imu, 10)
@@ -1621,11 +1624,20 @@ class RosmasterControl(Node):
             self._record_sensor_locked("lidar_probe_status", {"bytes": len(msg.data)})
 
     def _on_hp60c_depth(self, msg: RosImage) -> None:
-        frame, stats = self._depth_image_to_preview(msg, "hp60c")
-        if frame is None:
+        # Contained like _record_realsense_frame: this runs on the executor
+        # thread that also publishes /cmd_vel, and an exception escaping a
+        # subscription callback takes that thread down with it. A frame that
+        # fails is dropped like an undecodable one, so the last statistics
+        # keep their old timestamp and go stale rather than look fresh.
+        try:
+            frame, stats = self._depth_image_to_preview(msg, "hp60c")
+            if frame is None:
+                return
+            self._annotate_ros_frame(frame, "HP60C depth", msg.encoding, stats)
+            encoded = self._encode_frame(frame, 78)
+        except Exception as exc:  # noqa: BLE001 - a depth frame is never worth the executor
+            log_line(f"HP60C_FRAME_FAILED encoding={msg.encoding} {type(exc).__name__}: {exc}")
             return
-        self._annotate_ros_frame(frame, "HP60C depth", msg.encoding, stats)
-        encoded = self._encode_frame(frame, 78)
         if encoded is None:
             return
         with self._lock:
@@ -2039,6 +2051,12 @@ class RosmasterControl(Node):
             msg.angular.z = command["angular_z"]
             published = command
         self.publisher.publish(msg)
+        if msg.linear.x != 0.0 and not self._startup_window_closed:
+            # The car is moving under its own power now, so any later
+            # mismatch between the floor and the calibration is the camera
+            # moving mid-session: report it, never re-learn it at startup.
+            self._startup_window_closed = True
+            self._floor.end_startup_window()
         self._publish_count += 1
         self._last_publish_at = time.monotonic()
         with self._lock:

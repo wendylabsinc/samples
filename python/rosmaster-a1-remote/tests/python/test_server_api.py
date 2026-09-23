@@ -146,6 +146,7 @@ class ServerTestCase(unittest.TestCase):
         # neither there nor writable, and one test's calibration must not
         # decide the next one's readiness.
         server.control._floor = fresh_floor_manager()
+        server.control._startup_window_closed = False
         # Direct-control release intentionally leaves this latch set until a
         # browser START. Tests share the singleton, so reset both arbitration
         # fields explicitly rather than letting one safety test poison the
@@ -2263,6 +2264,14 @@ class DepthFramePipelineTests(ServerTestCase):
         self.assertEqual(depth["obstacle_model"], "floor_plane")
         self.assertAlmostEqual(depth["above_floor_near_m"], 0.3, delta=0.03)
 
+    def test_a_failure_on_the_hp60c_path_does_not_escape_the_callback(self):
+        control = server.control
+        control._floor = calibrated_manager("hp60c")
+        with mock.patch.object(server, "classify", side_effect=RuntimeError("boom")):
+            control._on_hp60c_depth(depth_scene.image_msg(render(boxes=(block(0.3, 0.0, 0.06),))))
+        with control._lock:
+            self.assertEqual(control._hp60c["depth"]["frames"], 0, "a failed frame is dropped, not recorded")
+
 
 class FloorReadinessTests(ServerTestCase):
     """What autonomy says it is waiting for, when the depth camera is fresh but the floor is not."""
@@ -2308,6 +2317,11 @@ class FloorReadinessTests(ServerTestCase):
     def test_an_unknown_health_does_not_block(self):
         """A wall filling the view says nothing about the calibration either way."""
         self.assertTrue(self.ready(self.depth(health="unknown"))["ready"])
+
+    def test_a_calibrated_camera_whose_frame_was_not_classified_says_so(self):
+        stream = self.depth()
+        stream["obstacle_model"] = "none"
+        self.assertEqual(self.ready(stream)["reason"], "waiting for a depth frame the floor model can read")
 
 
 class FloorPlannerTests(AutoPlannerHarness):
@@ -2435,6 +2449,20 @@ class FloorStartupThreadTests(ServerTestCase):
             control._on_realsense_depth(depth_scene.image_msg(render()))
             control.run_floor_startup_calibration()
         self.assertEqual(seen, ["realsense"])
+
+
+class FloorStartupWindowTests(ServerTestCase):
+    """Startup calibrations are for adjustments made while the car was off."""
+
+    def test_the_first_published_motion_ends_the_startup_window(self):
+        control = server.control
+        with mock.patch.object(control._floor, "end_startup_window") as end:
+            control._publish()
+            end.assert_not_called()
+            control.update({"enabled": True, "linear_x": 0.3})
+            control._publish()
+            control._publish()
+        end.assert_called_once_with()
 
 
 class FrameEndpointTests(ServerTestCase):

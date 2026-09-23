@@ -228,12 +228,6 @@ function scaledCommand() {
   };
 }
 
-// FETCH_TIMEOUT_MS bounds every fetch this page makes. The server wedged on
-// the car once, and nothing here had a timeout: every fetch waited on it
-// forever. A hang never rejects, so none of the existing catch/finally paths
-// ever ran to notice: driveInFlight below stayed stuck true and silently
-// dropped every gamepad command after the one hung POST, the status poll
-// stacked a new connection every 750 ms tick, and setConnection(false, ...)
 // renderFloorCalibration paints the Floor calibration block from a status
 // block, whichever answer brought it: the status poll or a Recalibrate.
 function renderFloorCalibration(calibration) {
@@ -264,6 +258,12 @@ async function recalibrateFloor() {
   }
 }
 
+// FETCH_TIMEOUT_MS bounds every fetch this page makes. The server wedged on
+// the car once, and nothing here had a timeout: every fetch waited on it
+// forever. A hang never rejects, so none of the existing catch/finally paths
+// ever ran to notice: driveInFlight below stayed stuck true and silently
+// dropped every gamepad command after the one hung POST, the status poll
+// stacked a new connection every 750 ms tick, and setConnection(false, ...)
 // never fired because it only runs from a rejection. Worse, this hardware
 // keeps four MJPEG streams open at all times, which already holds four of
 // Chrome's six per-origin sockets; wedged fetches piling up on the rest is

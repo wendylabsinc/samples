@@ -294,6 +294,46 @@ class ManagerCalibrateTests(ManagerTestCase):
         worker.join(2.0)
         self.assertEqual(manager.status("realsense")["state"], "missing")
 
+    def test_a_startup_attempt_queued_behind_an_operator_run_does_not_relabel_it(self):
+        settings = CalibrationSettings(frames=3, collect_timeout_s=2.0, busy_timeout_s=2.0)
+        manager = self.with_camera(self.manager(settings=settings))
+        results = {}
+        operator = threading.Thread(target=lambda: results.update(operator=manager.calibrate("realsense", "operator")))
+        operator.start()
+        deadline = time.monotonic() + 1.0
+        while manager.status("realsense")["state"] != "calibrating" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        startup = threading.Thread(target=lambda: results.update(startup=manager.calibrate("realsense", "startup")))
+        startup.start()
+        feed = frames()
+        index = 0
+        while operator.is_alive() and time.monotonic() < deadline + 4.0:
+            manager.observe("realsense", feed[index % len(feed)])
+            index += 1
+            time.sleep(0.002)
+        operator.join(2.0)
+        startup.join(3.0)
+        self.assertTrue(results["operator"]["accepted"], results["operator"]["reason"])
+        self.assertFalse(results["startup"]["accepted"])
+        self.assertTrue(results["startup"].get("skipped"))
+        status = manager.status("realsense")
+        self.assertEqual(status["source"], "operator")
+        self.assertEqual(status["last_result"]["source"], "operator")
+
+    def test_once_the_car_has_driven_a_moved_camera_is_never_relearned_at_startup(self):
+        saved = {"realsense": calibration_for(camera_plane(CAR_HEIGHT_M, CAR_PITCH_DEG))}
+        manager = self.with_camera(self.manager(saved))
+        manager.end_startup_window()
+        moved = frames(pitch_deg=CAR_PITCH_DEG + 5.0)
+        for points in moved[:3]:
+            manager.observe("realsense", points)
+            self.clock.t += 0.5
+        self.assertEqual(manager.status("realsense")["state"], "stale")
+        result = calibrate_with(manager, "realsense", "startup", moved)
+        self.assertFalse(result["accepted"])
+        self.assertTrue(result.get("skipped"))
+        self.assertEqual(manager.status("realsense")["state"], "stale", "only an operator's Recalibrate clears it")
+
 
 class ManagerHealthTests(ManagerTestCase):
     def test_a_moved_camera_goes_stale_and_only_a_new_calibration_clears_it(self):
@@ -366,6 +406,14 @@ class StartupLoopTests(ManagerTestCase):
         start = self.clock.t
         self.assertIsNone(manager.run_startup(lambda: None))
         self.assertEqual(self.clock.t - start, 5.0, "polled once a second for a camera that never came up")
+
+    def test_a_closed_window_ends_the_loop_at_once(self):
+        saved = {"realsense": calibration_for(camera_plane(0.21, 18.0), reference_height_m=0.21)}
+        manager = self.with_camera(self.manager(saved))
+        manager.end_startup_window()
+        start = self.clock.t
+        self.assertIsNone(manager.run_startup(lambda: "realsense"))
+        self.assertEqual(self.clock.t, start)
 
 
 if __name__ == "__main__":
