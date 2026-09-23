@@ -322,3 +322,26 @@ preview needs them; the obstacle decision no longer reads them.
   that carries one is offline. Recorded as a follow-up.
 - Changing the LiDAR planner, the stop and avoid distances, or the
   reverse/turn-out state machine.
+
+## Implementation notes (2026-09-22, while planning)
+
+The plan (`docs/superpowers/plans/2026-09-22-depth-floor-calibration.md`) was
+prototyped against the car's real D435i intrinsics before it was written.
+Where it departs from this design:
+
+- `DEPTH_OBSTACLE_MIN_HEIGHT_M` defaults to **0.04**, not 0.05 (Ethan's
+  call). On a 5 cm threshold, a 5 cm book is seen only because depth noise
+  lifts half its top face above it, and it vanishes when the calibration reads
+  the floor 3 mm low. At 4 cm, both the 5 cm stop and the 3 cm ignore have a
+  centimetre of margin.
+- The acceptance checks run in the order dominance, roll, pitch, height, open
+  floor, reference. In the table's order the pitch check could never fire:
+  this camera cannot see floor 1 m ahead once it is pitched past 45°.
+- A region with fewer than `DEPTH_OBSTACLE_MIN_POINTS` points reports no
+  distance, so a few flying pixels never trigger the planner's avoid.
+- `CalibrationStore` lives in `floor_calibration.py` beside the manager, not
+  in `server.py`. The store never creates `/state`: a missing mount point is a
+  missing volume.
+- "missing" and "no reference" are one state, because a calibration always
+  carries its reference.
+- The roll formula governs; the example JSON's roll sign is illustrative.

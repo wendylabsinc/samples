@@ -42,6 +42,15 @@ trajectory epochs, the state table) with SimpleNamespace messages and an
 injected clock; `SlamRouteTests` in `test_server_api.py` covers the three
 `/api/slam*` routes against the real server with a scripted bridge.
 
+`test_floor_model.py` and `test_floor_calibration.py` cover the depth floor
+calibration's pure geometry (`floor_model.py`) and its store and manager
+(`floor_calibration.py`). Scenes are rendered by `depth_scene.py`, a test
+helper that ray-casts depth frames for a camera at a given height, pitch and
+roll over a floor with boxes, using the car's real D435i intrinsics.
+`test_floor_fixtures.py` replays real frames from the car kept in
+`tests/python/fixtures/`, cut out of a bag with `scripts/depth_bag_to_npz.py`
+(covered by `test_depth_bag_to_npz.py`).
+
 ## Shell: service scripts (`tests/shell`)
 
 Cover the bash scripts the base, lidar, web and slam entrypoints run, using

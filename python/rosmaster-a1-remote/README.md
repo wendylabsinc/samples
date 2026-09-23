@@ -21,7 +21,8 @@ WendyOS app, `rosmaster-a1`, with five services, on the car's Jetson Orin Nano.
 - **Four camera tiles at once**: colour, depth, and both raw infrared views from
   the RealSense stereo pair. Any tile expands to full width.
 - **Autonomous mode**: follow the widest LiDAR corridor, with depth as an
-  obstacle veto and a bounded recovery manoeuvre.
+  obstacle veto measured against a calibrated floor, and a bounded recovery
+  manoeuvre.
 - **A live SLAM map** from the `slam` service: occupancy grid, robot pose,
   LiDAR scan and trajectory in one panel, with pan, zoom and follow, and a
   written reason whenever it has nothing to show.
@@ -39,7 +40,7 @@ its own Dockerfile; the manifest is what ties them together.
 | `base` | `rosmaster-a1-wendy/` | Motor bridge and telemetry, plus the sensor probe that captures camera and audio. Owns the serial link to the motor board, subscribes to `/cmd_vel`, publishes encoders, IMU and voltage, and dead-reckons them into `/odom` and the `odom -> base_link` transform. |
 | `lidar` | `rosmaster-a1-lidar-wendy/` | YDLIDAR driver, publishes `/scan` and a `/lidar_sensor_probe/status` heartbeat. Its probe skips camera and audio capture — `base` already owns those. |
 | `realsense` | `rosmaster-a1-realsense-wendy/` | RealSense driver, publishes depth, colour and both infrared streams. |
-| `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, camera frames, controller handling, autonomy, and the Map panel's bridge from the SLAM topics to three polled routes. |
+| `web` | `rosmaster-a1-web-remote-wendy/` | The remote itself: HTTP and HTTPS server, camera frames, controller handling, autonomy and its depth floor calibration (kept on the `rosmaster-a1-web-state` persist volume), and the Map panel's bridge from the SLAM topics to three polled routes. |
 | `slam` | `rosmaster-a1-slam-wendy/` | `slam_toolbox` mapping from `/scan` and `/odom`: publishes `/map`, `/pose`, `map -> odom`, plus a keeper that publishes `/slam/trajectory` and `/slam/status` and autosaves each session to the `rosmaster-a1-maps` persist volume. |
 
 ```bash
@@ -233,6 +234,49 @@ the current epoch, which is how a client resynchronises in one request.
 The routes are the contract: a standalone viewer, or a second Wendy app
 running `slam_bridge.py` on its own node, consumes them unchanged.
 
+## Floor calibration
+
+Autonomy's depth veto measures height above the floor, not image rows. An
+obstacle is anything 4-25 cm above the calibrated floor, either in the car's
+path (0.15 m either side of centre) or in a 0.50 m band on each side of it,
+within 3 m. The floor is a plane fitted to the depth camera's view of open
+floor, kept per camera in `/state/floor_calibration.json` on the web
+service's `rosmaster-a1-web-state` persist volume.
+
+- **Recalibrate** is the button under the telemetry, or
+  `POST /api/depth/calibrate`. It fits the next ten depth frames and answers
+  within about two seconds with `{accepted, reason, calibration}`. Press it
+  with the car on its wheels, facing open floor: it also sets the
+  **reference height** that every later startup calibration has to match.
+- **At startup** the web service loads the saved calibration, then takes a
+  fresh one every 10 s, for up to 10 minutes, until one is accepted. A
+  startup calibration is only accepted within 3 cm of the reference height.
+  A car started on blocks therefore keeps its saved calibration and says
+  `height 0.25 m vs reference 0.21 m — car on blocks?`, instead of learning
+  the desk as the floor. Until the first Recalibrate there is no reference,
+  and autonomy waits for one.
+- **A camera that moves is reported, not re-learned.** Twice a second the
+  floor in view is compared with the calibration. Three disagreements in a
+  row, of 2 degrees or 2 cm, mark the calibration stale. Autonomy then
+  refuses to start, or stops, with
+  `camera moved since floor calibration — recalibrate`, and only a new
+  calibration clears it. Too little floor in view (a wall, a box filling the
+  frame) is not counted either way.
+- **The page** shows the state (ok, stale, missing, calibrating), the height,
+  pitch, roll, age and source, and the last attempt's result. The depth tile
+  tints floor green and obstacles red, and draws the path edges in yellow.
+
+A rejected calibration names its reason: too cluttered, no open floor near or
+far, a rolled or pitched camera, an implausible height, or a reference
+mismatch. Every threshold is an environment variable on the web service; the
+`DEPTH_*` and `FLOOR_*` constants at the top of `server.py` are the list.
+
+Limits. An object closer than the camera's minimum range (about 0.15-0.2 m on
+the D435i) reads as no depth, not as an obstacle, as it always has; the LiDAR
+and the stop distance cover it. A real ramp reads as an obstacle, so the car
+stops for it. The HP60C runs the same code, but it has not been validated on
+a car.
+
 ## Safety model
 
 - **The car stops unless it is being told to move.** The server zeroes the
@@ -245,9 +289,11 @@ running `slam_bridge.py` on its own node, consumes them unchanged.
   drive/start/auto requests are acknowledged but rejected. STOP remains global.
   Disconnect, read failure, or stop releases ownership and browser motion stays
   latched off until an explicit START; reconnecting never resumes motion.
-- **Autonomous mode refuses to engage** without fresh depth, fresh LiDAR and a
-  live `/cmd_vel` subscriber, and it names which one it is waiting for. This
-  holds on both paths: the page's Auto Nav toggle and the pad's **Y** button.
+- **Autonomous mode refuses to engage** without fresh depth, fresh LiDAR, a
+  live `/cmd_vel` subscriber and a healthy floor calibration, and it names
+  which one it is waiting for. This holds on both paths: the page's Auto Nav
+  toggle and the pad's **Y** button. If the depth camera moves after it was
+  calibrated, a running autonomy stops and says so.
 - **Moving a stick takes control back from Auto Nav.** During an autonomous
   run, pushing the left stick or squeezing a trigger past a threshold above the
   deadzone, held for two input samples, exits autonomy and applies that manual
