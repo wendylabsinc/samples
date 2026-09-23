@@ -427,6 +427,61 @@ function controlModeText(uiState) {
   return "Disarmed";
 }
 
+// floorCalibrationView turns /api/status floor_calibration into the Floor
+// calibration block: one line saying what state the depth camera's floor
+// calibration is in and, whenever autonomy cannot use it, what the operator
+// does about it. Levels are setNoticeLevel's: ok, warn, error.
+//
+//   ok              calibrated and healthy, or no floor in view to check it
+//   stale           the camera moved since it was calibrated
+//   missing         never calibrated here, so there is no reference height
+//   calibrating     a Recalibrate is collecting frames
+//   no_camera_info  the depth camera has not described its lens yet
+//   no_camera       the car reports no depth camera at all
+//
+// "missing" and "no reference height" are one state: only a Recalibrate can
+// create the first calibration, and it sets the reference as it does.
+function floorCalibrationView(calibration) {
+  const cal = calibration || {};
+  const parts = [];
+  if (Number.isFinite(cal.height_m)) parts.push(`height ${cal.height_m.toFixed(2)} m`);
+  if (Number.isFinite(cal.pitch_deg)) parts.push(`pitch ${cal.pitch_deg.toFixed(1)}°`);
+  if (Number.isFinite(cal.roll_deg)) parts.push(`roll ${cal.roll_deg.toFixed(1)}°`);
+  if (cal.source) parts.push(cal.source === "operator" ? "set by Recalibrate" : "set at startup");
+  if (Number.isFinite(cal.age_s)) parts.push(`${floorAgeText(cal.age_s)} ago`);
+  if (cal.saved === false) parts.push("not saved");
+  if (cal.health === "unknown") parts.push("no floor in view to check");
+  const details = parts.length ? ` (${parts.join(", ")})` : "";
+  const last = cal.last_result && cal.last_result.reason ? `\nLast attempt: ${cal.last_result.reason}` : "";
+  switch (cal.state) {
+    case "ok":
+      return { level: "ok", text: `OK${details}${last}` };
+    case "stale":
+      return { level: "error", text: `Camera moved since calibration: press Recalibrate${details}${last}` };
+    case "missing":
+      return {
+        level: "error",
+        text: `Missing: no reference height yet. Put the car on open floor and press Recalibrate${last}`,
+      };
+    case "calibrating":
+      return { level: "warn", text: "Calibrating, hold the car still" };
+    case "no_camera_info":
+      return { level: "warn", text: "Waiting for depth camera info" };
+    case "no_camera":
+      return { level: "warn", text: "No depth camera" };
+    default:
+      return { level: "warn", text: "Waiting for the car" };
+  }
+}
+
+function floorAgeText(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s < 90) return `${Math.round(s)} s`;
+  if (s < 90 * 60) return `${Math.round(s / 60)} min`;
+  if (s < 36 * 3600) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86400)} days`;
+}
+
 // directPanelModel turns the direct worker's live block from /api/status into
 // the diagnostics panel texts. In direct mode the browser holds no pad and
 // posts no drives, so without this the panels would sit on "none" while the
@@ -1188,6 +1243,7 @@ if (typeof module !== 'undefined' && module.exports) {
     computeMissingPadStep,
     controlModeText,
     directPanelModel,
+    floorCalibrationView,
     gamepadClamp,
     nextControlState,
     planStatusStopFollowUp,

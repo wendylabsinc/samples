@@ -80,6 +80,10 @@ const state = {
   stopUnconfirmed: false,
   limits: { maxLinearX: 0.65, maxSteeringY: 0.12 },
   lastStatusOk: false,
+  // True while a Recalibrate POST is outstanding. The button is disabled for
+  // the duration, and this is what a second click checks, so a double click
+  // is one calibration rather than two queued behind each other on the car.
+  recalibrating: false,
 };
 
 const els = {
@@ -149,6 +153,9 @@ const els = {
   slamBody: document.getElementById("slamBody"),
   slamReadout: document.getElementById("slamReadout"),
   slamReason: document.getElementById("slamReason"),
+  floorCalibration: document.getElementById("floorCalibration"),
+  recalibrate: document.getElementById("recalibrate"),
+  recalibrateResult: document.getElementById("recalibrateResult"),
 };
 
 function meters(value) {
@@ -219,6 +226,36 @@ function scaledCommand() {
     // feed state.left.x, so flipping here fixes both and keeps them agreeing.
     steering_y: -state.left.x * state.limits.maxSteeringY * steerScale,
   };
+}
+
+// renderFloorCalibration paints the Floor calibration block from a status
+// block, whichever answer brought it: the status poll or a Recalibrate.
+function renderFloorCalibration(calibration) {
+  const view = floorCalibrationView(calibration);
+  els.floorCalibration.textContent = view.text;
+  setNoticeLevel(els.floorCalibration, view.level);
+}
+
+// recalibrateFloor is the Recalibrate button: an operator floor calibration,
+// which also sets the reference height every later startup calibration is
+// held to, so it belongs to a car standing on its wheels on open floor. The
+// server answers within about two seconds, accepted or not, inside the fetch
+// timeout postJson already applies.
+async function recalibrateFloor() {
+  if (state.recalibrating) return;
+  state.recalibrating = true;
+  els.recalibrate.disabled = true;
+  els.recalibrateResult.textContent = "Calibrating, hold the car still";
+  try {
+    const result = await postJson("/api/depth/calibrate", {});
+    els.recalibrateResult.textContent = result.accepted ? result.reason : `Rejected: ${result.reason}`;
+    if (result.calibration) renderFloorCalibration(result.calibration);
+  } catch {
+    els.recalibrateResult.textContent = "Recalibrate failed: the car did not answer";
+  } finally {
+    state.recalibrating = false;
+    els.recalibrate.disabled = false;
+  }
 }
 
 // FETCH_TIMEOUT_MS bounds every fetch this page makes. The server wedged on
@@ -1376,6 +1413,7 @@ async function refreshStatus() {
     state.feedIds = cameras.map((feed) => feed && feed.id).filter(Boolean);
     renderCameraGallery(cameras);
     els.autoReadyValue.textContent = navigation.ready ? "Ready" : navigation.reason || "Not ready";
+    renderFloorCalibration(status.floor_calibration);
     els.driverValue.textContent = `${control.cmd_vel_subscribers || 0} subs`;
     els.watchdogValue.textContent = `${(limits.cmd_timeout_s || 0.5).toFixed(2)} s`;
     state.directPanel = directPanelModel(directGamepad, state.padLines.length);
@@ -1498,6 +1536,7 @@ if (navigator.hid && typeof navigator.hid.addEventListener === "function") {
 }
 
 els.start.addEventListener("click", startManual);
+els.recalibrate.addEventListener("click", recalibrateFloor);
 els.stop.addEventListener("click", hardStop);
 els.speed.addEventListener("input", () => setSpeedFromRange("manual"));
 els.speedInput.addEventListener("change", () => setSpeedFromNumber("manual"));

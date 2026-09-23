@@ -576,6 +576,20 @@
         color: #ffe2e2;
       }
 
+      /* The Floor calibration block under the telemetry: its state line is a
+         diagnostic like the Controller panel's, and the button keeps its last
+         answer beside it. */
+      .floor-calibration {
+        margin-top: 12px;
+      }
+
+      .floor-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 12px;
+      }
+
       /* The WebHID controls sit inside a diagnostic block, so they wrap with it
          rather than widening the narrow column. */
       .hid-tools {
@@ -807,6 +821,15 @@
               <div class="metric"><span>Xbox</span><strong id="gamepadValue">Off</strong></div>
               <div class="metric"><span>Direct Pad</span><strong id="directGamepadValue">Starting</strong></div>
               <div class="metric"><span>Command Source</span><strong id="sourceValue">none</strong></div>
+            </div>
+
+            <div class="diagnostic floor-calibration">
+              <span>Floor calibration</span>
+              <pre id="floorCalibration" class="wrap">Waiting for the car</pre>
+              <div class="floor-actions">
+                <button id="recalibrate" type="button">Recalibrate</button>
+                <span id="recalibrateResult" class="readout"></span>
+              </div>
             </div>
           </div>
         </section>

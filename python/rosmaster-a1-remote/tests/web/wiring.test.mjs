@@ -1188,3 +1188,78 @@ test("WDY-1645: stick noise during Auto Nav neither drives nor exits auto", asyn
   assert.equal(page.state.auto, true, "sub-threshold jitter must not exit auto");
   assert.deepEqual(page.posts("/api/drive"), [], "and must not command a manual drive");
 });
+
+
+// Floor calibration ==========================================================
+
+const ACCEPTED = {
+  ok: true,
+  accepted: true,
+  reason: "accepted: height 0.21 m, pitch 18.4°, roll -0.6°",
+  calibration: {
+    camera: "realsense", state: "ok", calibrated: true, health: "unknown", usable: true,
+    height_m: 0.21, pitch_deg: 18.4, roll_deg: -0.6, source: "operator", age_s: 0, saved: true,
+    last_result: { accepted: true, reason: "accepted: height 0.21 m, pitch 18.4°, roll -0.6°" },
+  },
+};
+
+test("FLOOR: the status poll paints the floor calibration block", async () => {
+  const page = await freshPage();
+  page.fake.status.floor_calibration = { camera: "realsense", state: "stale", calibrated: true, health: "stale", height_m: 0.21 };
+
+  await page.run("refreshStatus()");
+  await page.settle();
+
+  assert.match(page.el("floorCalibration").textContent, /^Camera moved since calibration: press Recalibrate/);
+  assert.equal(page.el("floorCalibration").classList.contains("bad"), true);
+});
+
+test("FLOOR: Recalibrate posts once, holds the button down while the car works, then shows the answer", async () => {
+  const page = await freshPage();
+  page.fake.responses.set("/api/depth/calibrate", ACCEPTED);
+  page.fake.held.add("/api/depth/calibrate");
+
+  page.fireElement("recalibrate", "click", {});
+  page.fireElement("recalibrate", "click", {});
+  await page.settle();
+
+  assert.equal(page.posts("/api/depth/calibrate").length, 1, "a double click is one calibration");
+  assert.equal(page.el("recalibrate").disabled, true);
+  assert.equal(page.el("recalibrateResult").textContent, "Calibrating, hold the car still");
+
+  page.releaseHeld();
+  await page.settle();
+
+  assert.equal(page.el("recalibrate").disabled, false);
+  assert.equal(page.el("recalibrateResult").textContent, "accepted: height 0.21 m, pitch 18.4°, roll -0.6°");
+  assert.match(page.el("floorCalibration").textContent, /^OK \(height 0\.21 m/);
+});
+
+test("FLOOR: a rejected calibration says why", async () => {
+  const page = await freshPage();
+  page.fake.responses.set("/api/depth/calibrate", {
+    ok: true,
+    accepted: false,
+    reason: "no single floor plane: 41 % of points fit — too cluttered?",
+    calibration: { camera: "realsense", state: "missing", calibrated: false },
+  });
+
+  page.fireElement("recalibrate", "click", {});
+  await page.settle();
+
+  assert.equal(page.el("recalibrateResult").textContent, "Rejected: no single floor plane: 41 % of points fit — too cluttered?");
+  assert.match(page.el("floorCalibration").textContent, /^Missing: no reference height yet/);
+  assert.equal(page.el("recalibrate").disabled, false);
+});
+
+test("FLOOR: a Recalibrate the car never answers gives the button back and says so", async () => {
+  const page = await freshPage();
+  page.fake.failing.add("/api/depth/calibrate");
+
+  page.fireElement("recalibrate", "click", {});
+  await page.settle();
+
+  assert.equal(page.el("recalibrateResult").textContent, "Recalibrate failed: the car did not answer");
+  assert.equal(page.el("recalibrate").disabled, false);
+  assert.equal(page.state.recalibrating, false);
+});

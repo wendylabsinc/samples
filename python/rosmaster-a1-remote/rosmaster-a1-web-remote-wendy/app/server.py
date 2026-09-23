@@ -23,11 +23,21 @@ import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
-from sensor_msgs.msg import CompressedImage, Image as RosImage
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image as RosImage
 from sensor_msgs.msg import Imu, JointState, LaserScan, MagneticField, PointCloud2
 from std_msgs.msg import Float32, String
 
 from direct_gamepad import DirectGamepadWorker
+from floor_calibration import CalibrationSettings, CalibrationStore, FloorCalibrationManager
+from floor_model import (
+    CalibrationLimits,
+    CameraIntrinsics,
+    HealthConfig,
+    ObstacleConfig,
+    classify,
+    deproject,
+    project_floor_point,
+)
 from slam_bridge import SlamBridge
 
 
@@ -128,18 +138,83 @@ HP60C_POINTS_TOPIC = os.environ.get("HP60C_POINTS_TOPIC", "/ascamera_hp60c/camer
 HP60C_POINTS_ENABLED = os.environ.get("HP60C_POINTS_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 HP60C_STALE_S = float(os.environ.get("HP60C_STALE_S", "1.0"))
 HP60C_DEPTH_VALID_MIN_RATIO = float(os.environ.get("HP60C_DEPTH_VALID_MIN_RATIO", "0.005"))
-HP60C_OBSTACLE_X_MIN = float(os.environ.get("HP60C_OBSTACLE_X_MIN", "0.22"))
-HP60C_OBSTACLE_X_MAX = float(os.environ.get("HP60C_OBSTACLE_X_MAX", "0.78"))
-HP60C_OBSTACLE_Y_MIN = float(os.environ.get("HP60C_OBSTACLE_Y_MIN", "0.06"))
-HP60C_OBSTACLE_Y_MAX = float(os.environ.get("HP60C_OBSTACLE_Y_MAX", "0.55"))
-HP60C_FLOOR_Y_MIN = float(os.environ.get("HP60C_FLOOR_Y_MIN", "0.68"))
+HP60C_DEPTH_INFO_TOPIC = os.environ.get("HP60C_DEPTH_INFO_TOPIC", "/ascamera_hp60c/camera_publisher/depth0/camera_info")
 HP60C_RED_DISTANCE_M = float(os.environ.get("HP60C_RED_DISTANCE_M", "0.45"))
-HP60C_RED_MIN_PIXELS = int(os.environ.get("HP60C_RED_MIN_PIXELS", "32"))
+# The depth obstacle test ====================================================
+#
+# An obstacle is whatever stands DEPTH_OBSTACLE_MIN_HEIGHT_M to
+# DEPTH_OBSTACLE_MAX_HEIGHT_M above the calibrated floor in the car's path,
+# measured in metres rather than read off a fixed image row. The row test this
+# replaces split "floor" from "above the floor" at row 326 of 480, tuned for
+# the HP60C; with the RealSense on its hinge angled a few degrees further
+# down, the floor itself fell inside the "above the floor" band and every
+# autonomy engagement braked for open floor (2026-09-22). See floor_model.py
+# and docs/superpowers/specs/2026-09-22-depth-floor-calibration-design.md.
+#
+# 4 cm rather than the spec's 5: a 5 cm book sits right on a 5 cm threshold
+# and vanishes when the calibration reads the floor 3 mm low, while at 4 cm a
+# 5 cm object is seen and a 3 cm threshold strip is ignored, each with a
+# centimetre to spare (Ethan, 2026-09-22). 25 cm is the car's 18 cm height
+# plus a margin, so it does not stop for what it passes under. The path is
+# the car's 0.20 m track plus 5 cm either side.
+DEPTH_DOWNSAMPLE = max(1, int(os.environ.get("DEPTH_DOWNSAMPLE", "4")))
+DEPTH_OBSTACLE_MIN_HEIGHT_M = float(os.environ.get("DEPTH_OBSTACLE_MIN_HEIGHT_M", "0.04"))
+DEPTH_OBSTACLE_MAX_HEIGHT_M = float(os.environ.get("DEPTH_OBSTACLE_MAX_HEIGHT_M", "0.25"))
+DEPTH_PATH_HALF_WIDTH_M = float(os.environ.get("DEPTH_PATH_HALF_WIDTH_M", "0.15"))
+DEPTH_SIDE_WIDTH_M = float(os.environ.get("DEPTH_SIDE_WIDTH_M", "0.50"))
+DEPTH_MIN_RANGE_M = float(os.environ.get("DEPTH_MIN_RANGE_M", "0.10"))
+DEPTH_MAX_RANGE_M = float(os.environ.get("DEPTH_MAX_RANGE_M", "3.0"))
+# Downsampled points, not pixels: at DEPTH_DOWNSAMPLE 4 one point stands for
+# 16 pixels, so 8 is about 128 of the old full-resolution pixels. Fewer than
+# this in a region is a few flying pixels, not an obstacle.
+DEPTH_OBSTACLE_MIN_POINTS = max(1, int(os.environ.get("DEPTH_OBSTACLE_MIN_POINTS", "8")))
+DEPTH_OBSTACLE_CONFIG = ObstacleConfig(
+    min_height_m=DEPTH_OBSTACLE_MIN_HEIGHT_M,
+    max_height_m=DEPTH_OBSTACLE_MAX_HEIGHT_M,
+    path_half_width_m=DEPTH_PATH_HALF_WIDTH_M,
+    side_width_m=DEPTH_SIDE_WIDTH_M,
+    min_range_m=DEPTH_MIN_RANGE_M,
+    max_range_m=DEPTH_MAX_RANGE_M,
+    close_m=HP60C_RED_DISTANCE_M,
+    min_points=DEPTH_OBSTACLE_MIN_POINTS,
+)
+FLOOR_CAL_FRAMES = max(1, int(os.environ.get("FLOOR_CAL_FRAMES", "10")))
+FLOOR_CAL_INLIER_M = float(os.environ.get("FLOOR_CAL_INLIER_M", "0.015"))
+FLOOR_CAL_MIN_INLIER_RATIO = float(os.environ.get("FLOOR_CAL_MIN_INLIER_RATIO", "0.6"))
+FLOOR_CAL_HEIGHT_TOLERANCE_M = float(os.environ.get("FLOOR_CAL_HEIGHT_TOLERANCE_M", "0.03"))
+FLOOR_CAL_STARTUP_RETRY_S = float(os.environ.get("FLOOR_CAL_STARTUP_RETRY_S", "10"))
+FLOOR_CAL_STARTUP_WINDOW_S = float(os.environ.get("FLOOR_CAL_STARTUP_WINDOW_S", "600"))
+FLOOR_HEALTH_PERIOD_S = float(os.environ.get("FLOOR_HEALTH_PERIOD_S", "0.5"))
+FLOOR_HEALTH_ANGLE_DEG = float(os.environ.get("FLOOR_HEALTH_ANGLE_DEG", "2.0"))
+FLOOR_HEALTH_HEIGHT_M = float(os.environ.get("FLOOR_HEALTH_HEIGHT_M", "0.02"))
+FLOOR_HEALTH_CONSECUTIVE = max(1, int(os.environ.get("FLOOR_HEALTH_CONSECUTIVE", "3")))
+FLOOR_HEALTH_MIN_POINTS = max(3, int(os.environ.get("FLOOR_HEALTH_MIN_POINTS", "300")))
+FLOOR_CALIBRATION_PATH = os.environ.get("FLOOR_CALIBRATION_PATH", "/state/floor_calibration.json")
+FLOOR_CALIBRATION_SETTINGS = CalibrationSettings(
+    frames=FLOOR_CAL_FRAMES,
+    inlier_m=FLOOR_CAL_INLIER_M,
+    startup_retry_s=FLOOR_CAL_STARTUP_RETRY_S,
+    startup_window_s=FLOOR_CAL_STARTUP_WINDOW_S,
+    health_period_s=FLOOR_HEALTH_PERIOD_S,
+    limits=CalibrationLimits(
+        min_inlier_ratio=FLOOR_CAL_MIN_INLIER_RATIO,
+        height_tolerance_m=FLOOR_CAL_HEIGHT_TOLERANCE_M,
+    ),
+    health=HealthConfig(
+        path_half_width_m=DEPTH_PATH_HALF_WIDTH_M,
+        min_points=FLOOR_HEALTH_MIN_POINTS,
+        inlier_m=FLOOR_CAL_INLIER_M,
+        angle_deg=FLOOR_HEALTH_ANGLE_DEG,
+        height_m=FLOOR_HEALTH_HEIGHT_M,
+        consecutive=FLOOR_HEALTH_CONSECUTIVE,
+    ),
+)
 # The Intel RealSense D435i, fitted in place of the HP60C. It publishes the
 # four views the operator asked for as four separate topics. Topic names vary
 # between driver versions and namespaces, so every one of them is overridable
 # and must be checked against the live car before this is trusted.
 REALSENSE_DEPTH_TOPIC = os.environ.get("REALSENSE_DEPTH_TOPIC", "/camera/camera/depth/image_rect_raw")
+REALSENSE_DEPTH_INFO_TOPIC = os.environ.get("REALSENSE_DEPTH_INFO_TOPIC", "/camera/camera/depth/camera_info")
 REALSENSE_INFRA1_TOPIC = os.environ.get("REALSENSE_INFRA1_TOPIC", "/camera/camera/infra1/image_rect_raw")
 REALSENSE_INFRA2_TOPIC = os.environ.get("REALSENSE_INFRA2_TOPIC", "/camera/camera/infra2/image_rect_raw")
 REALSENSE_COLOR_TOPIC = os.environ.get("REALSENSE_COLOR_TOPIC", "/camera/camera/color/image_raw")
@@ -266,22 +341,26 @@ def finite_or_none(value: object) -> float | None:
     return None
 
 
-def depth_zone_stats(depth: np.ndarray, finite: np.ndarray, close_distance_m: float) -> dict:
-    valid_pixels = int(finite.sum())
-    close = finite & (depth <= close_distance_m)
-    stats = {
-        "valid_ratio": round(float(finite.mean()), 3) if finite.size else 0.0,
-        "valid_pixels": valid_pixels,
-        "close_ratio": round(float(close.mean()), 3) if close.size else 0.0,
-        "close_pixels": int(close.sum()),
-        "near_m": None,
-        "p20_m": None,
-    }
-    if valid_pixels:
-        values = depth[finite]
-        stats["near_m"] = round(float(np.percentile(values, 5)), 3)
-        stats["p20_m"] = round(float(np.percentile(values, 20)), 3)
-    return stats
+def floor_readiness_reason(depth: dict) -> str | None:
+    """Why this depth frame's statistics cannot be planned on yet, or None.
+
+    Read off the statistics themselves, which carry the floor calibration's
+    status as it stood when the frame was classified, so the readiness check
+    and the planner judge the same frame by the same rule. The order is the
+    order an operator can fix things in: the camera has to describe itself
+    before it can be calibrated, and has to be calibrated before it can be
+    found to have moved.
+    """
+    calibration = depth.get("floor_calibration") or {}
+    if calibration.get("state") in (None, "no_camera_info"):
+        return "waiting for depth camera info"
+    if not calibration.get("calibrated"):
+        return "waiting for floor calibration — face open floor and press Recalibrate"
+    if calibration.get("health") == "stale":
+        return "camera moved since floor calibration — recalibrate"
+    if depth.get("obstacle_model") != "floor_plane":
+        return "waiting for a depth frame the floor model can read"
+    return None
 
 
 # The camera feed registry ===================================================
@@ -356,12 +435,13 @@ CAMERA_FRAME_PATH_BY_ID = {feed["id"]: f"/frame_{feed['id']}.jpg" for feed in CA
 
 # The depth cameras autonomy is allowed to plan on ==========================
 #
-# The planner wants a distance in metres and the zone statistics derived from
-# it. It does not care which module produced them, and it must not: an HP60C
-# was fitted here, a RealSense D435i is fitted now, in the same position, so
-# the floor line and the obstacle box are unchanged and either camera's frame
-# goes through the same decoder. Naming one camera in the planner is what made
-# Auto Nav refuse to engage after the swap.
+# The planner wants a distance in metres and the obstacle statistics derived
+# from it. It does not care which module produced them, and it must not: an
+# HP60C was fitted here, a RealSense D435i is fitted now, and each is measured
+# against its own floor calibration (floor_calibration.py keeps one per
+# camera), so either camera's frame goes through the same floor model. Naming
+# one camera in the planner is what made Auto Nav refuse to engage after the
+# swap.
 #
 # `feed_id` points at the registry entry above, so "which camera is fitted" is
 # still answered in exactly one place, camera_feeds, and this is not a second
@@ -561,6 +641,17 @@ threading.Thread(target=_log_writer, daemon=True, name="log-writer").start()
 class RosmasterControl(Node):
     def __init__(self) -> None:
         super().__init__("rosmaster_web_remote")
+        # Built before any subscription so a depth or camera_info callback can
+        # never find it missing. One per process, for whichever depth cameras
+        # the car carries; see floor_calibration.py.
+        self._floor = FloorCalibrationManager(
+            CalibrationStore(FLOOR_CALIBRATION_PATH, log=log_line),
+            FLOOR_CALIBRATION_SETTINGS,
+            log=log_line,
+        )
+        # Set on the first published motion; see _publish and
+        # FloorCalibrationManager.end_startup_window.
+        self._startup_window_closed = False
         self.publisher = self.create_publisher(Twist, "/cmd_vel", 1)
         self._scan_subscription = self.create_subscription(LaserScan, "/scan", self._on_scan, qos_profile_sensor_data)
         self._imu_subscription = self.create_subscription(Imu, "/imu/data_raw", self._on_imu, 10)
@@ -597,6 +688,14 @@ class RosmasterControl(Node):
         )
         self._realsense_depth_subscription = self.create_subscription(
             RosImage, REALSENSE_DEPTH_TOPIC, self._on_realsense_depth, REALSENSE_QOS
+        )
+        # The floor model deprojects depth pixels into metres, which needs the
+        # camera's intrinsics. Both drivers publish them beside the image.
+        self._realsense_depth_info_subscription = self.create_subscription(
+            CameraInfo, REALSENSE_DEPTH_INFO_TOPIC, self._on_realsense_depth_info, REALSENSE_QOS
+        )
+        self._hp60c_depth_info_subscription = self.create_subscription(
+            CameraInfo, HP60C_DEPTH_INFO_TOPIC, self._on_hp60c_depth_info, HP60C_QOS
         )
         self._realsense_infra1_subscription = self.create_subscription(
             RosImage, REALSENSE_INFRA1_TOPIC, self._on_realsense_infra1, REALSENSE_QOS
@@ -1083,13 +1182,13 @@ class RosmasterControl(Node):
         ready = self._auto_ready()
         source = self.depth_source()
         camera = source["camera"] if source else None
-        depth_ok = bool(source and source["fresh"])
+        depth_ok = bool(source and source["fresh"] and floor_readiness_reason(source["depth"]) is None)
         return {
             "mode": "lidar_farthest_corridor_with_depth_object_veto" if depth_ok else "lidar_farthest_corridor",
             "primary_sensor": "ydlidar_farthest_corridor",
             "depth_source": camera,
             "depth_ok": depth_ok,
-            "camera_role": f"{camera}_upper_roi_object_veto" if depth_ok else "waiting_for_depth_ros_topics",
+            "camera_role": f"{camera}_floor_plane_object_veto" if depth_ok else "waiting_for_depth_ros_topics",
             "ready": ready["ready"],
             "reason": ready["reason"],
         }
@@ -1142,7 +1241,7 @@ class RosmasterControl(Node):
         }
         hp60c["usable_for_navigation"] = bool(
             hp60c["depth"]["ok"]
-            and hp60c["depth"].get("obstacle_p20_m") is not None
+            and floor_readiness_reason(hp60c["depth"]) is None
             and hp60c["depth"].get("obstacle_valid_ratio", 0.0) >= HP60C_DEPTH_VALID_MIN_RATIO
         )
         return hp60c
@@ -1283,6 +1382,44 @@ class RosmasterControl(Node):
         source = select_depth_source(self.hp60c_snapshot(), self.realsense_snapshot())
         return f"{source['camera']}_depth" if source else DEPTH_SOURCES[0]["feed_id"]
 
+    def floor_calibration_snapshot(self) -> dict:
+        """The floor calibration of the depth camera autonomy would plan on, for /api/status."""
+        source = self.depth_source()
+        if source is None:
+            return {"camera": None, "state": "no_camera", "calibrated": False, "usable": False, "last_result": None}
+        return self._floor.status(source["camera"])
+
+    def calibrate_floor(self) -> dict:
+        """POST /api/depth/calibrate: an operator calibration of the active depth camera, now.
+
+        Blocks this handler thread while the next FLOOR_CAL_FRAMES frames
+        arrive and are fitted, about a second on the RealSense at 15 Hz; the
+        ROS executor only hands frames over and never waits on it.
+        """
+        source = self.depth_source()
+        if source is None:
+            return {"accepted": False, "reason": "no depth camera to calibrate", "calibration": None}
+        if not source["fresh"]:
+            return {
+                "accepted": False,
+                "reason": f"waiting for fresh {source['camera']} depth frames",
+                "calibration": self._floor.status(source["camera"]),
+            }
+        return self._floor.calibrate(source["camera"], "operator")
+
+    def run_floor_startup_calibration(self) -> None:
+        """main() runs this on its own thread: startup calibrations until one is accepted."""
+
+        def active_camera() -> str | None:
+            source = self.depth_source()
+            return source["camera"] if source and source["fresh"] else None
+
+        result = self._floor.run_startup(active_camera)
+        if result is None:
+            log_line("FLOOR_STARTUP_CALIBRATION_DONE result=none")
+        else:
+            log_line(f"FLOOR_STARTUP_CALIBRATION_DONE accepted={result['accepted']} reason={result['reason']}")
+
     def lidar_snapshot(self) -> dict:
         with self._lock:
             scan = json.loads(json.dumps(self._scan))
@@ -1312,6 +1449,9 @@ class RosmasterControl(Node):
             return {"ready": False, "reason": "waiting for a depth camera"}
         if not source["fresh"]:
             return {"ready": False, "reason": f"waiting for fresh {source['camera']} depth frames"}
+        floor_reason = floor_readiness_reason(source.get("depth") or {})
+        if floor_reason is not None:
+            return {"ready": False, "reason": floor_reason}
         front = scan.get("sectors", {}).get("front", {})
         if front.get("near_m") is None or front.get("count", 0) < 5:
             return {"ready": False, "reason": "front lidar sector sparse"}
@@ -1484,11 +1624,20 @@ class RosmasterControl(Node):
             self._record_sensor_locked("lidar_probe_status", {"bytes": len(msg.data)})
 
     def _on_hp60c_depth(self, msg: RosImage) -> None:
-        frame, stats = self._depth_image_to_preview(msg)
-        if frame is None:
+        # Contained like _record_realsense_frame: this runs on the executor
+        # thread that also publishes /cmd_vel, and an exception escaping a
+        # subscription callback takes that thread down with it. A frame that
+        # fails is dropped like an undecodable one, so the last statistics
+        # keep their old timestamp and go stale rather than look fresh.
+        try:
+            frame, stats = self._depth_image_to_preview(msg, "hp60c")
+            if frame is None:
+                return
+            self._annotate_ros_frame(frame, "HP60C depth", msg.encoding, stats)
+            encoded = self._encode_frame(frame, 78)
+        except Exception as exc:  # noqa: BLE001 - a depth frame is never worth the executor
+            log_line(f"HP60C_FRAME_FAILED encoding={msg.encoding} {type(exc).__name__}: {exc}")
             return
-        self._annotate_ros_frame(frame, "HP60C depth", msg.encoding, stats)
-        encoded = self._encode_frame(frame, 78)
         if encoded is None:
             return
         with self._lock:
@@ -1574,6 +1723,17 @@ class RosmasterControl(Node):
     def _on_realsense_depth(self, msg: RosImage) -> None:
         self._record_realsense_frame("depth", "RealSense depth", msg, depth=True)
 
+    def _on_realsense_depth_info(self, msg: CameraInfo) -> None:
+        self._record_depth_info("realsense", msg)
+
+    def _on_hp60c_depth_info(self, msg: CameraInfo) -> None:
+        self._record_depth_info("hp60c", msg)
+
+    def _record_depth_info(self, camera: str, msg: CameraInfo) -> None:
+        intrinsics = CameraIntrinsics.from_camera_info(msg)
+        if intrinsics is not None:
+            self._floor.set_intrinsics(camera, intrinsics)
+
     def _on_realsense_infra1(self, msg: RosImage) -> None:
         self._record_realsense_frame("infra1", "RealSense infra left", msg)
 
@@ -1615,7 +1775,10 @@ class RosmasterControl(Node):
             )
 
         encoded = None
-        stats: dict = {}
+        # Blank depth statistics until this frame has produced its own, so an
+        # exception anywhere below leaves "no obstacle data" behind a fresh
+        # timestamp rather than the last frame's distances.
+        stats: dict = self._empty_depth_stats() if depth else {}
         # Contained on purpose. This runs on the executor thread that also
         # ticks the /cmd_vel publish timer, and an exception escaping a
         # subscription callback takes that thread down with it: the car would
@@ -1627,7 +1790,7 @@ class RosmasterControl(Node):
         try:
             frame = None
             if depth:
-                depth_m, finite, geometry, stats = self._depth_image_to_stats(msg)
+                depth_m, finite, geometry, stats = self._depth_image_to_stats(msg, "realsense")
                 if depth_m is None:
                     # An undecodable frame blanks the statistics instead of
                     # leaving the last good ones behind a freshly stamped
@@ -1682,27 +1845,36 @@ class RosmasterControl(Node):
                 },
             )
 
-    def _depth_image_to_preview(self, msg: RosImage) -> tuple[PILImage.Image | None, dict]:
+    def _depth_image_to_preview(self, msg: RosImage, camera: str) -> tuple[PILImage.Image | None, dict]:
         """Statistics and a colorized preview, for callers that want both."""
-        depth_m, finite, geometry, stats = self._depth_image_to_stats(msg)
+        depth_m, finite, geometry, stats = self._depth_image_to_stats(msg, camera)
         if depth_m is None:
             return None, stats
         return self._depth_preview_image(msg, depth_m, finite, geometry), stats
 
-    def _depth_image_to_stats(self, msg: RosImage):
+    def _depth_image_to_stats(self, msg: RosImage, camera: str):
         """The half of the depth pipeline autonomy needs, split from the half it does not.
 
-        The zone statistics are what the planner vetoes on, so they are
+        The obstacle statistics are what the planner vetoes on, so they are
         computed for every depth frame whether or not a browser has the tile
-        open. Colorizing, drawing the region boxes and encoding a JPEG is the
-        expensive half and buys nothing when nobody is watching, so it lives in
+        open. Colorizing, tinting and encoding a JPEG is the expensive half
+        and buys nothing when nobody is watching, so it lives in
         _depth_preview_image and is called only when someone is. Both run on
         the ROS executor thread, which is also the thread that publishes
         /cmd_vel, so the split is the difference between paying for a picture
         nobody sees at fifteen frames a second and not.
 
-        Returns the metric depth array, the mask of usable pixels, the region
-        geometry the preview draws, and the statistics.
+        Obstacles are measured against the calibrated floor plane: every
+        DEPTH_DOWNSAMPLE-th pixel is deprojected into metres, handed to the
+        floor calibration (a run in progress pools it; the health check
+        samples it), and, once this camera has a calibration, classified by
+        height above the floor and offset from the car's path. With no
+        camera_info or no calibration the frame still reports its valid ratio
+        and nothing else, which the planner reads as depth not ok.
+
+        Returns the metric depth array, the mask of usable pixels, what the
+        preview needs to draw the floor model's verdict (empty when there is
+        none), and the statistics.
         """
         encoding = msg.encoding.lower()
         if msg.width <= 0 or msg.height <= 0 or not msg.data:
@@ -1719,102 +1891,98 @@ class RosmasterControl(Node):
             return None, None, {}, {"encoding": msg.encoding}
 
         finite = np.isfinite(depth_m) & (depth_m > 0.05) & (depth_m < 8.0)
-        x0 = int(msg.width * clamp_range(HP60C_OBSTACLE_X_MIN, 0.0, 0.98))
-        x1 = int(msg.width * clamp_range(HP60C_OBSTACLE_X_MAX, 0.02, 1.0))
-        y0 = int(msg.height * clamp_range(HP60C_OBSTACLE_Y_MIN, 0.0, 0.98))
-        y1 = int(msg.height * clamp_range(HP60C_OBSTACLE_Y_MAX, 0.02, 1.0))
-        if x1 <= x0:
-            x0, x1 = int(msg.width * 0.22), int(msg.width * 0.78)
-        if y1 <= y0:
-            y0, y1 = int(msg.height * 0.06), int(msg.height * 0.55)
-        floor_y0 = int(msg.height * clamp_range(HP60C_FLOOR_Y_MIN, 0.0, 0.98))
-        obstacle = depth_m[y0:y1, x0:x1]
-        floor = depth_m[floor_y0:, :]
-        above_floor = depth_m[y0:floor_y0, :]
-        left_side = depth_m[y0:floor_y0, :x0]
-        right_side = depth_m[y0:floor_y0, x1:]
-        obstacle_finite = np.isfinite(obstacle) & (obstacle > 0.05) & (obstacle < 8.0)
-        floor_finite = np.isfinite(floor) & (floor > 0.05) & (floor < 8.0)
-        above_floor_finite = np.isfinite(above_floor) & (above_floor > 0.05) & (above_floor < 8.0)
-        left_side_finite = np.isfinite(left_side) & (left_side > 0.05) & (left_side < 8.0)
-        right_side_finite = np.isfinite(right_side) & (right_side > 0.05) & (right_side < 8.0)
-        above_floor_stats = depth_zone_stats(above_floor, above_floor_finite, HP60C_RED_DISTANCE_M)
-        left_side_stats = depth_zone_stats(left_side, left_side_finite, HP60C_RED_DISTANCE_M)
-        right_side_stats = depth_zone_stats(right_side, right_side_finite, HP60C_RED_DISTANCE_M)
-        stats = {
-            "valid_ratio": round(float(finite.mean()), 3) if finite.size else 0.0,
-            "obstacle_valid_ratio": round(float(obstacle_finite.mean()), 3) if obstacle_finite.size else 0.0,
-            "obstacle_valid_pixels": int(obstacle_finite.sum()),
-            "obstacle_near_m": None,
-            "obstacle_p20_m": None,
-            "floor_valid_ratio": round(float(floor_finite.mean()), 3) if floor_finite.size else 0.0,
-            "floor_p20_m": None,
-            "center_valid_ratio": round(float(obstacle_finite.mean()), 3) if obstacle_finite.size else 0.0,
-            "center_valid_pixels": int(obstacle_finite.sum()),
-            "center_near_m": None,
-            "center_p20_m": None,
-            "min_m": None,
-            "max_m": None,
-            "red_distance_m": HP60C_RED_DISTANCE_M,
-            "red_min_pixels": HP60C_RED_MIN_PIXELS,
-            "above_floor_near_m": above_floor_stats["near_m"],
-            "above_floor_p20_m": above_floor_stats["p20_m"],
-            "above_floor_valid_ratio": above_floor_stats["valid_ratio"],
-            "above_floor_valid_pixels": above_floor_stats["valid_pixels"],
-            "above_floor_close_ratio": above_floor_stats["close_ratio"],
-            "above_floor_close_pixels": above_floor_stats["close_pixels"],
-            "left_side_near_m": left_side_stats["near_m"],
-            "left_side_p20_m": left_side_stats["p20_m"],
-            "left_side_valid_ratio": left_side_stats["valid_ratio"],
-            "left_side_valid_pixels": left_side_stats["valid_pixels"],
-            "left_side_close_ratio": left_side_stats["close_ratio"],
-            "left_side_close_pixels": left_side_stats["close_pixels"],
-            "right_side_near_m": right_side_stats["near_m"],
-            "right_side_p20_m": right_side_stats["p20_m"],
-            "right_side_valid_ratio": right_side_stats["valid_ratio"],
-            "right_side_valid_pixels": right_side_stats["valid_pixels"],
-            "right_side_close_ratio": right_side_stats["close_ratio"],
-            "right_side_close_pixels": right_side_stats["close_pixels"],
-            "obstacle_roi": {
-                "x0": x0,
-                "x1": x1,
-                "y0": y0,
-                "y1": y1,
-            },
-            "floor_roi": {
-                "y0": floor_y0,
-            },
-        }
+        valid_ratio = round(float(finite.mean()), 3) if finite.size else 0.0
+        stats = self._empty_depth_stats()
+        stats.update(
+            {
+                "valid_ratio": valid_ratio,
+                "obstacle_valid_ratio": valid_ratio,
+                "above_floor_valid_ratio": valid_ratio,
+            }
+        )
         if finite.any():
             valid_depth = depth_m[finite]
             stats["min_m"] = round(float(np.percentile(valid_depth, 2)), 3)
             stats["max_m"] = round(float(np.percentile(valid_depth, 98)), 3)
-        if obstacle_finite.any():
-            obstacle_depth = obstacle[obstacle_finite]
-            stats["obstacle_near_m"] = round(float(np.percentile(obstacle_depth, 5)), 3)
-            stats["obstacle_p20_m"] = round(float(np.percentile(obstacle_depth, 20)), 3)
-            stats["center_near_m"] = stats["obstacle_near_m"]
-            stats["center_p20_m"] = stats["obstacle_p20_m"]
-        if floor_finite.any():
-            floor_depth = floor[floor_finite]
-            stats["floor_p20_m"] = round(float(np.percentile(floor_depth, 20)), 3)
 
-        return depth_m, finite, {"x0": x0, "x1": x1, "y0": y0, "floor_y0": floor_y0, "y1": y1}, stats
+        geometry: dict = {}
+        intrinsics = self._floor.intrinsics(camera)
+        if intrinsics is not None:
+            intrinsics = intrinsics.for_image(int(msg.width), int(msg.height))
+            points, valid = deproject(depth_m, intrinsics, DEPTH_DOWNSAMPLE)
+            self._floor.observe(camera, points)
+            plane = self._floor.plane(camera)
+            if plane is not None:
+                result = classify(points, plane, DEPTH_OBSTACLE_CONFIG)
+                path, left, right = result.regions["path"], result.regions["left"], result.regions["right"]
+                stats.update(
+                    {
+                        "obstacle_model": "floor_plane",
+                        "obstacle_near_m": path["near_m"],
+                        "obstacle_p20_m": path["p20_m"],
+                        "above_floor_near_m": path["near_m"],
+                        "above_floor_p20_m": path["p20_m"],
+                        "above_floor_points": path["points"],
+                        "above_floor_close_pixels": path["close_points"],
+                        "left_side_near_m": left["near_m"],
+                        "left_side_p20_m": left["p20_m"],
+                        "left_side_points": left["points"],
+                        "left_side_close_pixels": left["close_points"],
+                        "right_side_near_m": right["near_m"],
+                        "right_side_p20_m": right["p20_m"],
+                        "right_side_points": right["points"],
+                        "right_side_close_pixels": right["close_points"],
+                        "floor_valid_ratio": result.floor_ratio,
+                    }
+                )
+                geometry = {
+                    "step": DEPTH_DOWNSAMPLE,
+                    "valid": valid,
+                    "obstacle": result.obstacle,
+                    "floor": result.floor,
+                    "plane": plane,
+                    "intrinsics": intrinsics,
+                }
+        stats["floor_calibration"] = self._floor.status(camera)
+        return depth_m, finite, geometry, stats
 
     def _depth_preview_image(self, msg: RosImage, depth_m, finite, geometry: dict) -> PILImage.Image:
-        """The expensive half: colorize the frame and draw the regions on it."""
-        x0, x1, y0, y1, floor_y0 = geometry["x0"], geometry["x1"], geometry["y0"], geometry["y1"], geometry["floor_y0"]
+        """The expensive half: colorize the frame and paint the floor model's verdict on it.
+
+        Floor points (within 2 cm of the plane) are tinted faint green,
+        obstacle points red, and the path's two edges are drawn on the floor
+        in yellow. Each downsampled point paints its DEPTH_DOWNSAMPLE-square
+        block. With no calibration there is no verdict to paint, so the frame
+        is the plain colorized depth.
+        """
         clipped = np.where(finite, np.clip(depth_m, 0.2, 4.0), 0.0)
         normalized = np.zeros_like(clipped, dtype=np.uint8)
         normalized[finite] = np.uint8(255 - ((clipped[finite] - 0.2) / 3.8 * 255).clip(0, 255))
         preview = self._colorize_depth(normalized)
         preview[~finite] = (8, 10, 9)
+        if geometry:
+            step, valid = geometry["step"], geometry["valid"]
+            rows, cols = preview.shape[:2]
+
+            def full_size(per_point: np.ndarray) -> np.ndarray:
+                grid = np.zeros(valid.shape, dtype=bool)
+                grid[valid] = per_point
+                return np.repeat(np.repeat(grid, step, axis=0), step, axis=1)[:rows, :cols]
+
+            floor = full_size(geometry["floor"])
+            preview[floor] = (preview[floor] * 0.55 + np.array([40, 200, 90]) * 0.45).astype(np.uint8)
+            preview[full_size(geometry["obstacle"])] = (235, 45, 35)
         image = PILImage.fromarray(preview, mode="RGB")
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((x0, y0, max(x0, x1 - 1), max(y0, y1 - 1)), outline=(255, 245, 0), width=2)
-        draw.rectangle((0, y0, max(0, x0 - 1), max(y0, floor_y0 - 1)), outline=(245, 120, 80), width=1)
-        draw.rectangle((x1, y0, msg.width - 1, max(y0, floor_y0 - 1)), outline=(245, 120, 80), width=1)
-        draw.line((0, floor_y0, msg.width - 1, floor_y0), fill=(75, 210, 90), width=2)
+        if geometry:
+            draw = ImageDraw.Draw(image)
+            for lateral in (-DEPTH_PATH_HALF_WIDTH_M, DEPTH_PATH_HALF_WIDTH_M):
+                edge = [
+                    project_floor_point(geometry["plane"], geometry["intrinsics"], forward, lateral)
+                    for forward in np.linspace(0.2, DEPTH_MAX_RANGE_M, 24)
+                ]
+                line = [(float(u), float(v)) for u, v in (pixel for pixel in edge if pixel is not None)]
+                if len(line) >= 2:
+                    draw.line(line, fill=(255, 245, 0), width=2)
         return image
 
     def _colorize_depth(self, normalized: np.ndarray) -> np.ndarray:
@@ -1847,6 +2015,9 @@ class RosmasterControl(Node):
         near = stats.get("obstacle_p20_m")
         if near is not None:
             label += f" obstacle {near:.2f}m"
+        floor_state = (stats.get("floor_calibration") or {}).get("state")
+        if floor_state and floor_state != "ok":
+            label += f" floor {floor_state.replace('_', ' ')}"
         draw = ImageDraw.Draw(frame)
         draw.rectangle((8, 8, min(frame.width - 8, 560), 42), fill=(0, 0, 0))
         draw.text((16, 20), label, fill=(235, 244, 238))
@@ -1880,6 +2051,12 @@ class RosmasterControl(Node):
             msg.angular.z = command["angular_z"]
             published = command
         self.publisher.publish(msg)
+        if msg.linear.x != 0.0 and not self._startup_window_closed:
+            # The car is moving under its own power now, so any later
+            # mismatch between the floor and the calibration is the camera
+            # moving mid-session: report it, never re-learn it at startup.
+            self._startup_window_closed = True
+            self._floor.end_startup_window()
         self._publish_count += 1
         self._last_publish_at = time.monotonic()
         with self._lock:
@@ -1952,13 +2129,19 @@ class RosmasterControl(Node):
         depth_above_close_pixels = int(depth.get("above_floor_close_pixels", 0) or 0)
         depth_left_close_pixels = int(depth.get("left_side_close_pixels", 0) or 0)
         depth_right_close_pixels = int(depth.get("right_side_close_pixels", 0) or 0)
-        depth_ok = (
+        # A fresh frame the floor model has classified is depth ok, obstacles
+        # or none: an empty region means clear floor, and every distance below
+        # reads None that way. What is not ok is a stale frame, a frame with
+        # almost no valid depth, or a frame the floor model could not judge,
+        # and floor_reason says which of the last.
+        depth_frames_ok = (
             depth_camera is not None
             and depth_age is not None
             and depth_age < depth_stale_s
-            and (depth_near is not None or depth_above_near is not None)
             and max(depth_valid_ratio, depth_above_valid_ratio) >= HP60C_DEPTH_VALID_MIN_RATIO
         )
+        floor_reason = floor_readiness_reason(depth) if depth_frames_ok else None
+        depth_ok = depth_frames_ok and floor_reason is None
         corridor = None
         if age is None or age > LIDAR_STALE_S or not front_near:
             reason = "waiting for lidar"
@@ -1967,9 +2150,12 @@ class RosmasterControl(Node):
         elif depth_camera is None:
             reason = "waiting for a depth camera"
             action = "wait_for_depth_camera"
-        elif not depth_ok:
+        elif not depth_frames_ok:
             reason = f"waiting for {depth_camera} depth frames"
             action = "wait_for_depth_frames"
+        elif not depth_ok:
+            reason = floor_reason
+            action = "wait_for_floor_calibration"
         else:
             corridor = self._best_lidar_corridor(scan, auto)
             depth_side = self._depth_side_steering(depth_left_near, depth_right_near, depth_left_close_pixels, depth_right_close_pixels)
@@ -1977,7 +2163,7 @@ class RosmasterControl(Node):
                 depth_ok
                 and depth_above_near is not None
                 and depth_above_near <= auto["stop_distance"]
-                and depth_above_close_pixels >= HP60C_RED_MIN_PIXELS
+                and depth_above_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS
             )
             depth_avoid = depth_ok and depth_near is not None and depth_near <= auto["avoid_distance"]
             lidar_stop = front_near <= auto["stop_distance"]
@@ -2000,7 +2186,7 @@ class RosmasterControl(Node):
                     AUTO_BRAKE_S,
                     escape_direction,
                     min(int(state.get("attempts", 0)) + 1, 6),
-                    "depth camera sees an object above the floor line" if depth_stop else "lidar front too close",
+                    "depth camera sees an obstacle in the path" if depth_stop else "lidar front too close",
                     state,
                 )
             elif state["name"] == "brake" and now >= state["until"]:
@@ -2287,9 +2473,9 @@ class RosmasterControl(Node):
     def _escape_direction(self, corridor: dict, depth_side: dict, left_close_pixels: int, right_close_pixels: int) -> str:
         if depth_side.get("direction") in {"left", "right"}:
             return depth_side["direction"]
-        if left_close_pixels >= HP60C_RED_MIN_PIXELS and right_close_pixels < HP60C_RED_MIN_PIXELS:
+        if left_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and right_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return "right"
-        if right_close_pixels >= HP60C_RED_MIN_PIXELS and left_close_pixels < HP60C_RED_MIN_PIXELS:
+        if right_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and left_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return "left"
         if corridor.get("avoid_direction") in {"left", "right"}:
             return corridor["avoid_direction"]
@@ -2327,9 +2513,9 @@ class RosmasterControl(Node):
             return {"direction": "left", "steering": AUTO_MAX_STEERING * 0.55}
         if right_near is None:
             return {"direction": "right", "steering": -AUTO_MAX_STEERING * 0.55}
-        if left_close_pixels >= HP60C_RED_MIN_PIXELS and right_close_pixels < HP60C_RED_MIN_PIXELS:
+        if left_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and right_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return {"direction": "right", "steering": -AUTO_MAX_STEERING * 0.55}
-        if right_close_pixels >= HP60C_RED_MIN_PIXELS and left_close_pixels < HP60C_RED_MIN_PIXELS:
+        if right_close_pixels >= DEPTH_OBSTACLE_MIN_POINTS and left_close_pixels < DEPTH_OBSTACLE_MIN_POINTS:
             return {"direction": "left", "steering": AUTO_MAX_STEERING * 0.55}
         if left_near < right_near:
             return {"direction": "right", "steering": -AUTO_MAX_STEERING * 0.45}
@@ -2569,40 +2755,35 @@ class RosmasterControl(Node):
         """
         return {
             "valid_ratio": 0.0,
-            "obstacle_valid_ratio": 0.0,
-            "obstacle_valid_pixels": 0,
-            "obstacle_near_m": None,
-            "obstacle_p20_m": None,
-            "floor_valid_ratio": 0.0,
-            "floor_p20_m": None,
-            "center_valid_ratio": 0.0,
-            "center_near_m": None,
-            "center_p20_m": None,
-            "center_valid_pixels": 0,
             "min_m": None,
             "max_m": None,
-            "red_distance_m": HP60C_RED_DISTANCE_M,
-            "red_min_pixels": HP60C_RED_MIN_PIXELS,
+            # "floor_plane" once the floor model has classified the frame,
+            # "none" until then: no camera_info or no calibration yet.
+            "obstacle_model": "none",
+            "obstacle_valid_ratio": 0.0,
+            "obstacle_near_m": None,
+            "obstacle_p20_m": None,
+            "above_floor_valid_ratio": 0.0,
             "above_floor_near_m": None,
             "above_floor_p20_m": None,
-            "above_floor_valid_ratio": 0.0,
-            "above_floor_valid_pixels": 0,
-            "above_floor_close_ratio": 0.0,
+            "above_floor_points": 0,
+            # Downsampled points within HP60C_RED_DISTANCE_M, not pixels any
+            # more. The name is kept because the planner and the sensors panel
+            # read it; DEPTH_OBSTACLE_MIN_POINTS is the threshold that goes
+            # with it.
             "above_floor_close_pixels": 0,
             "left_side_near_m": None,
             "left_side_p20_m": None,
-            "left_side_valid_ratio": 0.0,
-            "left_side_valid_pixels": 0,
-            "left_side_close_ratio": 0.0,
+            "left_side_points": 0,
             "left_side_close_pixels": 0,
             "right_side_near_m": None,
             "right_side_p20_m": None,
-            "right_side_valid_ratio": 0.0,
-            "right_side_valid_pixels": 0,
-            "right_side_close_ratio": 0.0,
+            "right_side_points": 0,
             "right_side_close_pixels": 0,
-            "obstacle_roi": {},
-            "floor_roi": {},
+            "floor_valid_ratio": 0.0,
+            "red_distance_m": HP60C_RED_DISTANCE_M,
+            "obstacle_min_points": DEPTH_OBSTACLE_MIN_POINTS,
+            "floor_calibration": {},
         }
 
     @staticmethod
@@ -2975,6 +3156,7 @@ class Handler(BaseHTTPRequestHandler):
                     "sensors": control.sensors_snapshot(),
                     "auto": control.auto_snapshot(),
                     "navigation": control.navigation_snapshot(),
+                    "floor_calibration": control.floor_calibration_snapshot(),
                     "gamepad": gamepad_snapshot(),
                     "direct_gamepad": direct_gamepad.snapshot(),
                     "commands": command_freshness.snapshot(),
@@ -3116,6 +3298,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "command": command, "control": control.snapshot(), "auto": control.auto_snapshot()})
         elif parsed.path == "/api/gamepad":
             self._send_json({"ok": True, "gamepad": update_gamepad_state(payload)})
+        elif parsed.path == "/api/depth/calibrate":
+            # Finite like every other route: the calibration answers within
+            # about two seconds, accepted or not, well inside the page's 4 s
+            # fetch timeout.
+            self._send_json({"ok": True, **control.calibrate_floor()}, no_store=True)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -3382,6 +3569,7 @@ def serve_https() -> None:
 def main() -> int:
     direct_gamepad.start()
     threading.Thread(target=spin_ros, daemon=True).start()
+    threading.Thread(target=control.run_floor_startup_calibration, daemon=True, name="floor-startup-calibration").start()
     threading.Thread(target=serve_https, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"WEB_REMOTE_READY port={PORT}", flush=True)
