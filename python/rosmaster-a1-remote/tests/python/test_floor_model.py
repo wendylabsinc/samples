@@ -15,9 +15,20 @@ import unittest
 import numpy as np
 
 from tests.python import depth_scene
-from tests.python.depth_scene import D435I_640, camera_plane
+from tests.python.depth_scene import CAR_HEIGHT_M, D435I_640, camera_plane, clutter, wall
 
-from floor_model import CameraIntrinsics, FloorPlane, deproject, project_floor_point  # noqa: E402  (depth_scene put the app directory on sys.path)
+from floor_model import (  # noqa: E402  (depth_scene put the app directory on sys.path)
+    CameraIntrinsics,
+    FloorPlane,
+    deproject,
+    fit_floor,
+    project_floor_point,
+    validate_calibration,
+)
+
+
+def fit_scene(**scene):
+    return fit_floor(depth_scene.pooled_calibration_points(**scene))
 
 
 class IntrinsicsTests(unittest.TestCase):
@@ -89,6 +100,79 @@ class FloorPlaneTests(unittest.TestCase):
 
     def test_a_floor_point_behind_the_camera_does_not_project(self):
         self.assertIsNone(project_floor_point(camera_plane(0.21, 18.0), D435I_640, -0.5, 0.0))
+
+
+class CalibrationRecoveryTests(unittest.TestCase):
+    """Spec: height within 0.01 m, pitch and roll within 0.5 degrees."""
+
+    def test_the_floor_is_recovered_across_heights_pitches_and_rolls(self):
+        for height in (0.12, 0.16, 0.20, 0.24):
+            for pitch in (0.0, 10.0, 20.0, 35.0):
+                for roll in (-5.0, 0.0, 5.0):
+                    with self.subTest(height=height, pitch=pitch, roll=roll):
+                        fit = fit_scene(height_m=height, pitch_deg=pitch, roll_deg=roll)
+                        accepted, reason = validate_calibration(fit, None, "operator")
+                        self.assertTrue(accepted, reason)
+                        self.assertAlmostEqual(fit.plane.height_m, height, delta=0.01)
+                        self.assertAlmostEqual(fit.plane.pitch_deg, pitch, delta=0.5)
+                        self.assertAlmostEqual(fit.plane.roll_deg, roll, delta=0.5)
+
+    def test_the_fit_is_deterministic(self):
+        pooled = depth_scene.pooled_calibration_points()
+        self.assertEqual(fit_floor(pooled), fit_floor(pooled))
+
+
+class CalibrationRejectionTests(unittest.TestCase):
+    """One scene per rejection reason, each reason in plain words."""
+
+    def assertRejected(self, fit, reference, source, starts_with):
+        accepted, reason = validate_calibration(fit, reference, source)
+        self.assertFalse(accepted)
+        self.assertTrue(reason.startswith(starts_with), reason)
+        return reason
+
+    def test_a_car_on_blocks_does_not_match_the_reference(self):
+        fit = fit_scene(height_m=CAR_HEIGHT_M + 0.04)
+        reason = self.assertRejected(fit, CAR_HEIGHT_M, "startup", "height 0.25 m vs reference 0.21 m")
+        self.assertIn("car on blocks?", reason)
+
+    def test_within_the_tolerance_a_startup_calibration_is_accepted(self):
+        accepted, reason = validate_calibration(fit_scene(height_m=CAR_HEIGHT_M + 0.02), CAR_HEIGHT_M, "startup")
+        self.assertTrue(accepted, reason)
+
+    def test_an_operator_calibration_is_not_held_to_the_old_reference(self):
+        accepted, reason = validate_calibration(fit_scene(height_m=CAR_HEIGHT_M + 0.04), CAR_HEIGHT_M, "operator")
+        self.assertTrue(accepted, reason)
+
+    def test_startup_with_no_reference_is_refused(self):
+        self.assertRejected(fit_scene(), None, "startup", "no reference height yet — press Recalibrate")
+
+    def test_a_wall_at_0_6_m_is_not_a_floor(self):
+        self.assertRejected(fit_scene(boxes=(wall(0.6),)), None, "operator", "no single floor plane")
+
+    def test_clutter_is_not_a_floor(self):
+        self.assertRejected(fit_scene(boxes=clutter()), None, "operator", "no single floor plane")
+
+    def test_a_rolled_camera(self):
+        self.assertRejected(fit_scene(roll_deg=14.0), None, "operator", "camera rolled 14°")
+
+    def test_a_camera_pitched_too_far_down(self):
+        self.assertRejected(fit_scene(height_m=0.12, pitch_deg=52.0), None, "operator", "camera pitched 52° down")
+
+    def test_a_camera_pitched_up(self):
+        self.assertRejected(fit_scene(pitch_deg=-10.0), None, "operator", "camera pitched 10° up")
+
+    def test_an_implausible_height(self):
+        self.assertRejected(fit_scene(height_m=0.41), None, "operator", "height 0.41 m — not a camera on this car")
+
+    def test_no_near_floor(self):
+        self.assertRejected(fit_scene(height_m=0.25, pitch_deg=-3.0), None, "operator", "no open floor: nearest floor point")
+
+    def test_no_far_floor(self):
+        self.assertRejected(fit_scene(height_m=0.12, pitch_deg=40.0), None, "operator", "floor only visible to 0.8 m")
+
+    def test_no_points_at_all(self):
+        self.assertRejected(None, None, "operator", "no floor plane")
 
 
 if __name__ == "__main__":
