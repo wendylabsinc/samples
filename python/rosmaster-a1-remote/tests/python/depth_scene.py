@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,8 @@ APP_DIR = Path(__file__).resolve().parents[2] / "rosmaster-a1-web-remote-wendy" 
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from floor_model import CameraIntrinsics, FloorPlane, deproject  # noqa: E402  (import must follow the sys.path setup above)
+from floor_calibration import Calibration  # noqa: E402  (import must follow the sys.path setup above)
+from floor_model import CameraIntrinsics, FloorPlane, deproject  # noqa: E402
 
 # The car's own D435i depth camera_info at 640x480, read off
 # /camera/camera/depth/camera_info on 2026-09-22 (plumb_bob, zero distortion).
@@ -145,4 +147,17 @@ def camera_info_msg(intrinsics: CameraIntrinsics = D435I_640):
         width=intrinsics.width,
         height=intrinsics.height,
         k=[intrinsics.fx, 0.0, intrinsics.cx, 0.0, intrinsics.fy, intrinsics.cy, 0.0, 0.0, 1.0],
+    )
+
+
+def calibration_for(plane: FloorPlane, source: str = "operator", reference_height_m: float | None = None, created_at: float | None = None) -> Calibration:
+    """An accepted calibration of this plane, as if an operator had just taken it."""
+    return Calibration(
+        plane=plane,
+        reference_height_m=plane.height_m if reference_height_m is None else reference_height_m,
+        source=source,
+        created_at=time.time() if created_at is None else created_at,
+        inliers=12000,
+        inlier_ratio=0.9,
+        floor_span_m=(0.18, 2.7),
     )
