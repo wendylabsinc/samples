@@ -14,6 +14,7 @@ const {
   computeMissingPadStep,
   controlModeText,
   directPanelModel,
+  floorCalibrationView,
   cameraFeedState,
   feedReconnectDelayMs,
   nextExpandedFeed,
@@ -1035,4 +1036,42 @@ test("a stop pressed on the override frame wins and does not exit into a drive",
   assert.ok(second.actions.some((a) => a.type === "hardStop"));
   assert.equal(second.actions.some((a) => a.type === "stickOverride"), false);
   assert.deepEqual(second.drive, { left: { x: 0, y: 0 } });
+});
+
+
+// floorCalibrationView ========================================================
+
+test("floorCalibrationView: a healthy calibration reads OK with its numbers", () => {
+  const view = floorCalibrationView({
+    state: "ok", health: "ok", height_m: 0.214, pitch_deg: 18.44, roll_deg: -0.6,
+    source: "operator", age_s: 3600, saved: true, last_result: null,
+  });
+  assert.equal(view.level, "ok");
+  assert.equal(view.text, "OK (height 0.21 m, pitch 18.4°, roll -0.6°, set by Recalibrate, 60 min ago)");
+});
+
+test("floorCalibrationView: every state that stops autonomy says what to do", () => {
+  const stale = floorCalibrationView({ state: "stale", health: "stale", height_m: 0.21, pitch_deg: 18.4, roll_deg: 0, source: "startup", age_s: 20 });
+  assert.equal(stale.level, "error");
+  assert.match(stale.text, /^Camera moved since calibration: press Recalibrate \(/);
+  assert.match(stale.text, /set at startup/);
+
+  const missing = floorCalibrationView({ state: "missing", calibrated: false });
+  assert.equal(missing.level, "error");
+  assert.equal(missing.text, "Missing: no reference height yet. Put the car on open floor and press Recalibrate");
+
+  assert.deepEqual(floorCalibrationView({ state: "calibrating" }), { level: "warn", text: "Calibrating, hold the car still" });
+  assert.deepEqual(floorCalibrationView({ state: "no_camera_info" }), { level: "warn", text: "Waiting for depth camera info" });
+  assert.deepEqual(floorCalibrationView({ state: "no_camera" }), { level: "warn", text: "No depth camera" });
+  assert.deepEqual(floorCalibrationView(undefined), { level: "warn", text: "Waiting for the car" });
+});
+
+test("floorCalibrationView: the last attempt, an unsaved file and a blind health check are all said", () => {
+  const view = floorCalibrationView({
+    state: "ok", health: "unknown", height_m: 0.21, saved: false,
+    last_result: { accepted: false, reason: "height 0.25 m vs reference 0.21 m — car on blocks?" },
+  });
+  assert.match(view.text, /not saved/);
+  assert.match(view.text, /no floor in view to check/);
+  assert.match(view.text, /\nLast attempt: height 0\.25 m vs reference 0\.21 m — car on blocks\?$/);
 });

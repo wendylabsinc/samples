@@ -150,6 +150,23 @@ function defaultStatus() {
     // repeats back rather than assuming. This car has an HP60C; a RealSense
     // reports the same shape with a different name in it.
     navigation: { ready: true, depth_source: "hp60c", depth_ok: true },
+    // The depth camera's floor calibration, calibrated and healthy, as a car
+    // that has had its Recalibrate pressed once reports it.
+    floor_calibration: {
+      camera: "hp60c",
+      state: "ok",
+      calibrated: true,
+      health: "ok",
+      usable: true,
+      height_m: 0.21,
+      pitch_deg: 18.4,
+      roll_deg: -0.6,
+      reference_height_m: 0.21,
+      source: "operator",
+      age_s: 42,
+      saved: true,
+      last_result: null,
+    },
     gamepad: { ok: false },
     direct_gamepad: {
       worker_ok: true,
