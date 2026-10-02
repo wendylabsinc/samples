@@ -1,0 +1,13 @@
+{
+    "appId": "com.example.go-time-browser",
+    "version": "0.0.1",
+    "language": "go",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "mesh",
+            "serviceCIDR": "10.99.0.0/16"
+        }
+    ],
+    "isolation": "isolated"
+}

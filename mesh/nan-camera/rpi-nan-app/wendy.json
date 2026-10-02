@@ -1,0 +1,12 @@
+{
+  "appId": "sh.wendy.nan.rpi-camera",
+  "platform": "linux",
+  "version": "1.0.0",
+  "language": "swift",
+  "entitlements": [
+    { "type": "network", "mode": "host" },
+    { "type": "nan" },
+    { "type": "camera" },
+    { "type": "persist", "name": "rpi-nan-camera-photos", "path": "/photos" }
+  ]
+}
