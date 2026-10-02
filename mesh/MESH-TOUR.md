@@ -16,6 +16,7 @@ done
 ```
 
 Build from the top [WendyOS PR](https://github.com/wendylabsinc/WendyOS/pull/2162).
+Run the build block from the directory containing your `samples` checkout.
 You need Git, GitHub CLI, Go 1.27+, and libusb headers/pkg-config
 (on macOS: `brew install libusb pkg-config`).
 
