@@ -1,13 +1,50 @@
 # Mesh tour
 
-Use two devices enrolled in the same organisation, a mesh-capable WendyOS
-agent and CLI, and Docker. Run these commands from `samples/mesh`.
+## Install the mesh preview
+
+Use two devices enrolled in the same organisation. Keep Ethernet or Wi-Fi
+connected during setup. These draft stacks are a development preview; full
+four-device BLE acceptance is still pending.
+
+```bash
+A=192.168.1.102   # Raspberry Pi; replace with your endpoint.
+B=192.168.2.3     # Jetson Orin; replace with your endpoint.
+# Wait for the top Builder PR image build to finish, then OTA each device:
+for DEVICE in "$A" "$B"; do
+  wendy --device "$DEVICE" os update --pr 289
+done
+```
+
+Build from the top [WendyOS PR](https://github.com/wendylabsinc/WendyOS/pull/2162).
+You need Git, GitHub CLI, Go 1.27+, and libusb headers/pkg-config
+(on macOS: `brew install libusb pkg-config`).
+
+```bash
+gh repo clone wendylabsinc/WendyOS WendyOS-mesh
+cd WendyOS-mesh
+gh pr checkout 2162
+# macOS: use Apple's compiler if another toolchain overrides clang.
+if [ "$(uname -s)" = Darwin ]; then export CC=/usr/bin/clang; fi
+GOBIN="$(go env GOPATH)/bin" go install ./go/cmd/wendy
+export PATH="$(go env GOPATH)/bin:$PATH"
+# Pi and Jetson WendyOS both use Linux ARM64:
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+  -o wendy-agent-linux-arm64 ./go/cmd/wendy-agent
+for DEVICE in "$A" "$B"; do
+  wendy --device "$DEVICE" device push-agent ./wendy-agent-linux-arm64
+  wendy --device "$DEVICE" device info
+done
+cd ../samples/mesh   # Adjust to your samples checkout.
+```
+
+Each push should confirm the running binary's hash matches. The OTA supplies
+the kernel, NAN and Avahi dependencies; the agent push supplies the mesh runtime.
+Use Docker for the sample builds below.
+
 
 ## Enable mesh and internet sharing
 
 ```bash
-A=192.168.2.2   # First device; replace with your endpoint.
-B=192.168.2.3   # Second device.
 for DEVICE in "$A" "$B"; do
   wendy --device "$DEVICE" device local-mesh configure \
     --participate=true --ble=true --ethernet=true --infrastructure-wifi=true
