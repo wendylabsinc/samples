@@ -1,0 +1,26 @@
+{
+    "appId": "com.example.go-time-publisher",
+    "version": "0.0.1",
+    "language": "go",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "mesh",
+            "serviceCIDR": "10.99.0.0/16",
+            "ports": [
+                {
+                    "host": 8080,
+                    "container": 8080,
+                    "protocol": "tcp"
+                }
+            ]
+        }
+    ],
+    "readiness": {
+        "tcpSocket": {
+            "port": 8080
+        },
+        "timeoutSeconds": 30
+    },
+    "isolation": "isolated"
+}
