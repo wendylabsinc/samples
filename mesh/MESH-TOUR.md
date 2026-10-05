@@ -9,13 +9,10 @@ four-device BLE acceptance is still pending.
 ```bash
 A=192.168.1.102   # Raspberry Pi; replace with your endpoint.
 B=192.168.2.3     # Jetson Orin; replace with your endpoint.
-# Wait for the top Builder PR image build to finish, then OTA each device:
-for DEVICE in "$A" "$B"; do
-  wendy --device "$DEVICE" os update --pr 289
-done
 ```
 
 Build from the top [WendyOS PR](https://github.com/wendylabsinc/WendyOS/pull/2162).
+Install this CLI before OTA, including for wired devices and unattended runs.
 Run the build block from the directory containing your `samples` checkout.
 You need Git, GitHub CLI, Go 1.27+, and libusb headers/pkg-config
 (on macOS: `brew install libusb pkg-config`).
@@ -31,7 +28,9 @@ export PATH="$(go env GOPATH)/bin:$PATH"
 # Pi and Jetson WendyOS both use Linux ARM64:
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
   -o wendy-agent-linux-arm64 ./go/cmd/wendy-agent
+# Wait for the top Builder PR image build to finish, then update each device:
 for DEVICE in "$A" "$B"; do
+  wendy --device "$DEVICE" os update --pr 289
   wendy --device "$DEVICE" device push-agent ./wendy-agent-linux-arm64
   wendy --device "$DEVICE" device info
 done
